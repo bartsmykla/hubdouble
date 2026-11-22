@@ -183,6 +183,7 @@ pub struct Repository {
     pub forks: i64,
     pub open_issues: i64,
     pub watchers: i64,
+    pub custom_properties: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Repository {
@@ -234,6 +235,7 @@ impl Repository {
             forks: 0,
             open_issues: 0,
             watchers: 0,
+            custom_properties: serde_json::Map::new(),
         }
     }
 }
