@@ -12,6 +12,10 @@ const SEED: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../examples/client-v5.yaml"
 );
+const CONFIG_MAP: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../deploy/kubernetes/configmap.yaml"
+);
 const USER: &str = "local-user";
 const TARGET: &str = "repos/octo-org/e2e";
 const RUNTIME: &str = "repos/octo-org/runner";
@@ -186,6 +190,23 @@ async fn caller_pin(client: &GoGithub, main: &str, catalog: &Catalog) {
     }));
     let workflow = file_at(client, RUNTIME, ".github/workflows/agent.yml", commit).await;
     assert!(workflow.lines().any(|line| line.trim() == "workflow_call:"));
+}
+
+#[test]
+fn the_kubernetes_config_map_holds_the_example_seed_unchanged() {
+    // Given
+    let seed = std::fs::read_to_string(SEED).unwrap();
+    let config_map = std::fs::read_to_string(CONFIG_MAP).unwrap();
+
+    // When
+    let (_, block) = config_map.split_once("  client-v5.yaml: |\n").unwrap();
+    let embedded: String = block
+        .lines()
+        .flat_map(|line| [line.strip_prefix("    ").unwrap_or(line), "\n"])
+        .collect();
+
+    // Then
+    assert_eq!(embedded, seed);
 }
 
 #[tokio::test]
