@@ -9,7 +9,7 @@ use http::request::Parts as RequestParts;
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hubdouble_admin::{Admin, Fault, FaultQuery, LogEntry, Services};
-use hubdouble_auth::Target;
+use hubdouble_auth::{Actor, Target};
 use hubdouble_model::{Account, AccountKind, ApiError, FieldError, Repo};
 use hubdouble_render::Urls;
 use hubdouble_rest::{Access, Ctx, Entry, Params, Parts, Query, Reply};
@@ -20,6 +20,8 @@ use sha2::{Digest, Sha256};
 
 const VERSIONS: [&str; 2] = ["2022-11-28", "2026-03-10"];
 const RATE_LIMIT: u32 = 5000;
+const GRAPHQL_AUTH_DOCS: &str =
+    "https://docs.github.com/graphql/guides/forming-calls-with-graphql#authenticating-with-graphql";
 
 pub(crate) type HttpResponse = Response<Full<Bytes>>;
 
@@ -277,6 +279,12 @@ impl Inner {
             })?;
             who.login = actor.login().map(str::to_owned);
             who.scopes = actor.oauth_scopes().map(|s| s.join(", "));
+            if matches!(actor, Actor::Anonymous | Actor::App { .. }) {
+                return Err(
+                    ApiError::new(401, "This endpoint requires you to be authenticated.")
+                        .with_docs(GRAPHQL_AUTH_DOCS),
+                );
+            }
             let response = hubdouble_gql::execute(
                 &self.gql,
                 &services.store,

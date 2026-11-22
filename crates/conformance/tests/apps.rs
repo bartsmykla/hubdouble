@@ -79,6 +79,23 @@ fn next_path<'a>(answer: &'a Answer, client: &GoGithub) -> &'a str {
 }
 
 #[tokio::test]
+async fn graphql_needs_a_user_or_installation_token() {
+    // Given
+    let server = setup().start().await;
+    let query = json!({"query": "{viewer{login}}"});
+    // When
+    let anonymous = GoGithub::new(&server).post("graphql", &query).await;
+    let as_app = app(&server).post("graphql", &query).await;
+    // Then
+    for answer in [anonymous, as_app] {
+        let body = body(&answer, "graphql", StatusCode::UNAUTHORIZED);
+        assert!(body["message"].is_string(), "{body}");
+        assert!(body.get("data").is_none(), "{body}");
+        assert!(body.get("errors").is_none(), "{body}");
+    }
+}
+
+#[tokio::test]
 async fn apps_and_installation_lookups_use_the_authenticated_apps_grant() {
     let server = setup().start().await;
     let app = app(&server);
