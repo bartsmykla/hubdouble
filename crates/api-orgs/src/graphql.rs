@@ -5,11 +5,11 @@ use hubdouble_gql::{
     Args, Conn, Ctx, ErrorType, GqlError, Obj, Registry, Resolved, Target, connection,
 };
 use hubdouble_model::{Account, AccountKind, Repo, RepoRole, Team, node_id};
-use hubdouble_store::{Accounts, Teams};
+use hubdouble_store::{Accounts, Repos, Teams};
 use serde_json::{Value, json};
 
 use crate::hierarchy::TeamViewer;
-use crate::{MEMBERS, hierarchy};
+use crate::{MEMBERS, METADATA, hierarchy};
 
 const TEAM_CONNECTION: &str = "TeamConnection";
 const COLLABORATORS: &str = "RepositoryCollaboratorConnection";
@@ -139,7 +139,12 @@ struct Collaborator {
 }
 
 fn collaborators(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
-    let repo = obj.get::<Repo>()?;
+    let repo = ctx
+        .tx
+        .table::<Repos>()
+        .get(obj.get::<Repo>()?.id)
+        .ok_or_else(not_found)?;
+    auth::authorize(ctx.tx, ctx.actor, &METADATA, AuthTarget::Repo(repo))?;
     let accounts = ctx.tx.table::<Accounts>();
     let mut matches = Vec::new();
     let affiliation = arg_text(args, "affiliation");

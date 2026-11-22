@@ -6,7 +6,8 @@ use hubdouble_git::{
     SignatureNode, TagNode, TreeEntryNode, TreeNode,
 };
 use hubdouble_gql::{Args, Ctx, ErrorType, GqlError, MutCtx, Obj, Resolved, Target, connection};
-use hubdouble_model::{Repo, node_id};
+use hubdouble_model::{ApiError, Repo, node_id};
+use hubdouble_store::Repos;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -71,6 +72,12 @@ pub(crate) fn object_resolved(repo_id: i64, object: Object) -> Resolved {
 }
 
 fn load_object(ctx: &Ctx<'_>, repo_id: i64, id: ObjectId) -> Result<Resolved, GqlError> {
+    let repo = ctx
+        .tx
+        .table::<Repos>()
+        .get(repo_id)
+        .ok_or_else(ApiError::not_found)?;
+    authorize(ctx.tx, ctx.actor, &READ_CONTENTS, AuthTarget::Repo(repo))?;
     match ctx.git.object(ctx.tx, repo_id, id) {
         Ok(o) => Ok(object_resolved(repo_id, o)),
         Err(GitError::NotFound) => Ok(Resolved::Null),

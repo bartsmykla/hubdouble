@@ -1,11 +1,19 @@
 use std::sync::Arc;
 
-use hubdouble_gql::{Args, Ctx, ErrorType, GqlError, Obj, Registry, Resolved, connection};
-use hubdouble_model::{AccountKind, Issue, IssueComment, IssueState, Repo, node_id};
-use hubdouble_store::{Accounts, Issues, Repos};
+use hubdouble_auth::{Target as AuthTarget, authorize};
+use hubdouble_gql::{Args, Ctx, ErrorType, GqlError, Obj, Registry, Resolved, Target, connection};
+use hubdouble_model::{
+    AccountKind, ApiError, Grant, Issue, IssueComment, IssueState, Repo, Requirement, node_id,
+};
+use hubdouble_store::{Accounts, IssueComments, Issues, Repos};
 use serde::Serialize;
 
-use crate::shared::full_name;
+use crate::shared::{ISSUES_READ, READ, full_name};
+
+const PULLS_READ: Requirement = Requirement {
+    any_of: &[Grant::read("pull_requests")],
+    ..ISSUES_READ
+};
 
 const CLOSING_KEYWORDS: [&str; 9] = [
     "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
@@ -39,12 +47,18 @@ fn leaf(v: &impl Serialize) -> Result<Resolved, GqlError> {
     }
 }
 
-fn visible_repo(ctx: &Ctx<'_>, repo_id: i64) -> Option<Arc<Repo>> {
-    ctx.tx
+fn read_repo<'a>(
+    ctx: &'a Ctx<'_>,
+    repo_id: i64,
+    requirement: &Requirement,
+) -> Result<&'a Arc<Repo>, GqlError> {
+    let repo = ctx
+        .tx
         .table::<Repos>()
         .get(repo_id)
-        .filter(|r| hubdouble_auth::can_see(ctx.tx, ctx.actor, r))
-        .cloned()
+        .ok_or_else(ApiError::not_found)?;
+    authorize(ctx.tx, ctx.actor, requirement, AuthTarget::Repo(repo))?;
+    Ok(repo)
 }
 
 fn issue_object(i: &Arc<Issue>) -> Resolved {
@@ -54,44 +68,34 @@ fn issue_object(i: &Arc<Issue>) -> Resolved {
     }
 }
 
-#[expect(clippy::unnecessary_wraps, reason = "a node loader returns a Result")]
 fn load_issue(ctx: &Ctx<'_>, id: i64) -> Result<Resolved, GqlError> {
-    Ok(ctx
+    let issue = ctx
         .tx
         .table::<Issues>()
         .get(id)
-        .filter(|i| i.pull.is_none() && visible_repo(ctx, i.repo_id).is_some())
-        .map_or(Resolved::Null, issue_object))
+        .filter(|i| i.pull.is_none())
+        .ok_or_else(ApiError::not_found)?;
+    read_repo(ctx, issue.repo_id, &ISSUES_READ)?;
+    Ok(issue_object(issue))
 }
 
-#[expect(clippy::unnecessary_wraps, reason = "a node loader returns a Result")]
 fn load_comment(ctx: &Ctx<'_>, id: i64) -> Result<Resolved, GqlError> {
-    Ok(ctx
+    let comment = ctx
         .tx
-        .table::<hubdouble_store::IssueComments>()
+        .table::<IssueComments>()
         .get(id)
-        .filter(|c| visible_repo(ctx, c.repo_id).is_some())
-        .map_or(Resolved::Null, |c| Resolved::Object {
-            type_name: "IssueComment",
-            value: Arc::<IssueComment>::clone(c),
-        }))
+        .ok_or_else(ApiError::not_found)?;
+    read_repo(ctx, comment.repo_id, &READ)?;
+    Ok(Resolved::Object {
+        type_name: "IssueComment",
+        value: Arc::<IssueComment>::clone(comment),
+    })
 }
 
-fn repository(ctx: &Ctx<'_>, repo_id: i64) -> Resolved {
-    ctx.tx
-        .table::<Repos>()
-        .get(repo_id)
-        .map_or(Resolved::Null, |r| Resolved::Object {
-            type_name: "Repository",
-            value: Arc::<Repo>::clone(r),
-        })
-}
-
-fn issue_of_comment(ctx: &Ctx<'_>, c: &IssueComment) -> Result<Arc<Issue>, GqlError> {
+fn issue_of_comment<'a>(ctx: &'a Ctx<'_>, c: &IssueComment) -> Result<&'a Arc<Issue>, GqlError> {
     ctx.tx
         .table::<Issues>()
         .get(c.issue_id)
-        .cloned()
         .ok_or_else(|| GqlError::new(ErrorType::NotFound, "the comment's issue is gone"))
 }
 
@@ -99,9 +103,7 @@ fn closed_by(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError
     let issue = obj.get::<Issue>()?;
     let include_closed = args.get::<bool>("includeClosedPrs")?.unwrap_or(false);
     let user_linked_only = args.get::<bool>("userLinkedOnly")?.unwrap_or(false);
-    let Some(repo) = ctx.tx.table::<Repos>().get(issue.repo_id) else {
-        return Ok(Resolved::Null);
-    };
+    let repo = read_repo(ctx, issue.repo_id, &PULLS_READ)?;
     let full = full_name(ctx.tx, repo);
     let pulls: Vec<&Arc<Issue>> = if user_linked_only {
         Vec::new()
@@ -152,6 +154,7 @@ fn comment_author(ctx: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlErr
 
 fn repository_issue(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
     let repo = obj.get::<Repo>()?;
+    read_repo(ctx, repo.id, &ISSUES_READ)?;
     let number: i64 = args
         .get("number")?
         .ok_or_else(|| GqlError::new(ErrorType::Unprocessable, "argument number is required"))?;
@@ -185,7 +188,7 @@ pub(crate) fn register(gql: &mut Registry) {
         leaf(&o.get::<Issue>()?.last_edited_at)
     });
     gql.field("Issue", "repository", |cx, o, _| {
-        Ok(repository(cx, o.get::<Issue>()?.repo_id))
+        cx.load(Target::RepoId(o.get::<Issue>()?.repo_id))
     });
     gql.field("Issue", "closedByPullRequestsReferences", closed_by);
 
@@ -206,17 +209,22 @@ pub(crate) fn register(gql: &mut Registry) {
     });
     gql.field("IssueComment", "author", comment_author);
     gql.field("IssueComment", "issue", |cx, o, _| {
-        Ok(issue_object(&issue_of_comment(
-            cx,
-            o.get::<IssueComment>()?,
-        )?))
+        let issue = issue_of_comment(cx, o.get::<IssueComment>()?)?;
+        let requirement = if issue.pull.is_some() {
+            &PULLS_READ
+        } else {
+            &ISSUES_READ
+        };
+        read_repo(cx, issue.repo_id, requirement)?;
+        Ok(issue_object(issue))
     });
     gql.field("IssueComment", "pullRequest", |cx, o, _| {
         let issue = issue_of_comment(cx, o.get::<IssueComment>()?)?;
         Ok(if issue.pull.is_some() {
+            read_repo(cx, issue.repo_id, &PULLS_READ)?;
             Resolved::Object {
                 type_name: "PullRequest",
-                value: issue,
+                value: Arc::<Issue>::clone(issue),
             }
         } else {
             Resolved::Null
