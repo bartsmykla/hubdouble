@@ -76,13 +76,22 @@ pub(crate) fn ref_updated(
     if change.name.strip_prefix("refs/heads/") != Some(&repo.default_branch) {
         return Ok(());
     }
+    refresh(tx, git, change.repo_id, change.old, change.new)
+}
+
+pub(crate) fn refresh(
+    tx: &mut TxMut<'_>,
+    git: &Git,
+    repo_id: i64,
+    old: Option<ObjectId>,
+    new: Option<ObjectId>,
+) -> Result<(), ApiError> {
     let directory = |id: ObjectId| {
-        git.expression(tx, repo.id, &format!("{id}:{DIRECTORY}"))
+        git.expression(tx, repo_id, &format!("{id}:{DIRECTORY}"))
             .ok()
     };
-    let current_directory = change.new.and_then(directory);
-    if current_directory.as_ref().map(|tree| tree.id)
-        == change.old.and_then(directory).map(|tree| tree.id)
+    let current_directory = new.and_then(directory);
+    if current_directory.as_ref().map(|tree| tree.id) == old.and_then(directory).map(|tree| tree.id)
     {
         return Ok(());
     }
@@ -95,7 +104,7 @@ pub(crate) fn ref_updated(
     };
     let old: BTreeMap<_, _> = tx
         .table::<Workflows>()
-        .in_repo(repo.id)
+        .in_repo(repo_id)
         .map(|w| (w.path.clone(), Arc::clone(w)))
         .collect();
     let mut current = BTreeSet::new();
@@ -113,12 +122,12 @@ pub(crate) fn ref_updated(
             continue;
         }
         let definition = git
-            .object(tx, change.repo_id, entry.id)
+            .object(tx, repo_id, entry.id)
             .ok()
             .and_then(|object| parse(&object.data));
         let workflow = Workflow {
             id: previous.map_or_else(|| tx.next_id(), |w| w.id),
-            repo_id: change.repo_id,
+            repo_id,
             path,
             blob: Some(entry.id),
             definition,
@@ -133,7 +142,7 @@ pub(crate) fn ref_updated(
     {
         tx.table_mut::<Workflows>().replace(Workflow {
             id: workflow.id,
-            repo_id: change.repo_id,
+            repo_id,
             path: workflow.path.clone(),
             blob: None,
             definition: None,

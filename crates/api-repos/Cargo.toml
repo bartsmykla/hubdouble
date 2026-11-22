@@ -13,6 +13,7 @@ bytes.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hubdouble-admin.workspace = true
+hubdouble-api-actions.workspace = true
 hubdouble-auth.workspace = true
 hubdouble-git.workspace = true
 hubdouble-gql.workspace = true

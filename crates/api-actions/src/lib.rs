@@ -8,8 +8,10 @@ mod workflows;
 
 use http::header::LINK;
 use hubdouble_admin::Registrar;
-use hubdouble_model::{ApiError, FieldError, Grant, Requirement, Scope};
+use hubdouble_git::{Git, ObjectId};
+use hubdouble_model::{ApiError, FieldError, Grant, Repo, Requirement, Scope};
 use hubdouble_rest::{Ctx, Page, Reply};
+use hubdouble_store::TxMut;
 use serde::Serialize;
 use serde::ser::SerializeMap as _;
 
@@ -39,6 +41,27 @@ pub fn register(r: &mut Registrar<'_>) {
     configuration::register(r);
     oidc::register(r);
     admin::register(r.admin);
+}
+
+/// Refreshes the workflow index in the transaction that changes the default branch.
+///
+/// # Errors
+///
+/// Returns a store error if the index cannot be updated.
+pub fn refresh_default_branch(
+    tx: &mut TxMut<'_>,
+    git: &Git,
+    previous: &Repo,
+    target: ObjectId,
+) -> Result<(), ApiError> {
+    let old = git
+        .resolve_ref(
+            tx,
+            previous.id,
+            &format!("refs/heads/{}", previous.default_branch),
+        )
+        .ok();
+    workflows::refresh(tx, git, previous.id, old, Some(target))
 }
 
 fn invalid(resource: &str, field: &str, message: impl Into<String>) -> ApiError {

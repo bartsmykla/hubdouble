@@ -2158,6 +2158,7 @@ dependencies = [
  "http",
  "http-body-util",
  "hubdouble-admin",
+ "hubdouble-api-actions",
  "hubdouble-auth",
  "hubdouble-git",
  "hubdouble-gql",

@@ -204,6 +204,53 @@ async fn workflow_run_filters_apply_together_before_pagination() {
 }
 
 #[tokio::test]
+async fn changing_the_default_branch_refreshes_the_workflow_index() {
+    let public = fixture_public_with_branch_workflows();
+    let server = TestServer::builder()
+        .frame(hubdouble_api::register_all)
+        .entry(json!({"kind": "user", "login": "alice"}))
+        .entry(public)
+        .start()
+        .await;
+    let client = GoGithub::new(&server);
+    let workflows = "repos/alice/workflows/actions/workflows";
+    let common = format!("{workflows}/common.yml");
+    let id = client.get(&common).await.json()["id"].clone();
+    assert!(id.is_number());
+    let edit = server
+        .admin(
+            Method::PATCH,
+            "repos/alice/workflows",
+            Some(&json!({"default_branch": "next"})),
+        )
+        .await;
+    assert_eq!(edit.status, StatusCode::OK);
+    let new = client.get(&format!("{workflows}/next.yml")).await;
+    assert_eq!(new.status, StatusCode::OK);
+    assert_eq!(new.json()["path"], ".github/workflows/next.yml");
+    let removed = client.get(&format!("{workflows}/old.yml")).await;
+    assert_eq!(removed.status, StatusCode::NOT_FOUND);
+    let common = client.get(&common).await.json();
+    assert_eq!(common["id"], id);
+    assert_eq!(common["name"], "Updated");
+}
+
+fn fixture_public_with_branch_workflows() -> serde_json::Value {
+    json!({
+        "kind": "repository", "owner": "alice", "name": "workflows",
+        "files": {
+            ".github/workflows/common.yml": "name: Original\non: push\n",
+            ".github/workflows/old.yml": "on: push\n"
+        },
+        "commits": [{"branch": "next", "message": "change workflows", "files": {
+            ".github/workflows/common.yml": "name: Updated\non: push\n",
+            ".github/workflows/old.yml": null,
+            ".github/workflows/next.yml": "on: push\n"
+        }}]
+    })
+}
+
+#[tokio::test]
 async fn workflow_run_list_returns_no_matches_for_an_invalid_created_filter() {
     let server = server("none").await;
     let client = client(&server);

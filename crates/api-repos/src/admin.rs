@@ -6,6 +6,7 @@ use http_body_util::Full;
 use hubdouble_admin::{
     AdminHandler, AdminRequest, Registrar, Services, error_response, json_response, read_json,
 };
+use hubdouble_git::{Git, ObjectId};
 use hubdouble_model::{AccountKind, ApiError, Release, Repo, Visibility};
 use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
 use hubdouble_rest::Params;
@@ -15,8 +16,17 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
 pub(crate) fn register(r: &mut Registrar<'_>) {
-    r.admin
-        .route(Method::PATCH, "/repos/{owner}/{repo}", route(edit_repo));
+    let refresh_workflows = r
+        .rest
+        .entries()
+        .any(|entry| entry.operation_id == "actions/get-workflow");
+    r.admin.route(
+        Method::PATCH,
+        "/repos/{owner}/{repo}",
+        route(move |tx, services, params, body| {
+            edit_repo(tx, services, params, body, refresh_workflows)
+        }),
+    );
     r.admin
         .route(Method::DELETE, "/repos/{owner}/{repo}", route(delete_repo));
     r.admin
@@ -37,9 +47,13 @@ pub(crate) fn repo_by_full_name(tx: &Tx, full: &str) -> Result<Arc<Repo>, ApiErr
         .ok_or_else(unknown)
 }
 
-type Change = fn(&mut TxMut<'_>, &Services, &Params, Value) -> Result<Option<Value>, ApiError>;
-
-fn route(change: Change) -> AdminHandler {
+fn route(
+    change: impl Fn(&mut TxMut<'_>, &Services, &Params, Value) -> Result<Option<Value>, ApiError>
+    + Copy
+    + Send
+    + Sync
+    + 'static,
+) -> AdminHandler {
     Arc::new(move |req: AdminRequest| {
         Box::pin(async move {
             let AdminRequest {
@@ -158,11 +172,30 @@ fn visibility(
     })
 }
 
+fn edit_default_branch(
+    tx: &Tx,
+    git: &Git,
+    repo: &mut Repo,
+    branch: Option<String>,
+    edited: &mut Map<String, Value>,
+) -> Result<Option<ObjectId>, ApiError> {
+    let Some(name) = branch.filter(|name| *name != repo.default_branch) else {
+        return Ok(None);
+    };
+    let target = git
+        .resolve_ref(tx, repo.id, &format!("refs/heads/{name}"))
+        .map_err(|_| ApiError::unprocessable(format!("no branch {name}")))?;
+    edited.insert("default_branch".to_owned(), from(&repo.default_branch));
+    repo.default_branch = name;
+    Ok(Some(target))
+}
+
 fn edit_repo(
     tx: &mut TxMut<'_>,
     services: &Services,
     params: &Params,
     body: Value,
+    refresh_workflows: bool,
 ) -> Result<Option<Value>, ApiError> {
     let old = named_repo(tx, params)?;
     let e: RepoEdit = decode(body)?;
@@ -185,14 +218,8 @@ fn edit_repo(
         edited.insert("topics".to_owned(), from(&old.topics));
         new.topics = t;
     }
-    if let Some(b) = e.default_branch.filter(|b| *b != old.default_branch) {
-        services
-            .git
-            .resolve_ref(tx, old.id, &format!("refs/heads/{b}"))
-            .map_err(|_| ApiError::unprocessable(format!("no branch {b}")))?;
-        edited.insert("default_branch".to_owned(), from(&old.default_branch));
-        new.default_branch = b;
-    }
+    let branch_target =
+        edit_default_branch(tx, &services.git, &mut new, e.default_branch, &mut edited)?;
     let renamed = e.name.filter(|n| *n != old.name);
     if let Some(n) = &renamed {
         if !valid_name(n) {
@@ -216,6 +243,9 @@ fn edit_repo(
     }
     new.updated_at = services.clock.now();
     tx.table_mut::<Repos>().replace(new.clone())?;
+    if let Some(target) = branch_target.filter(|_| refresh_workflows) {
+        hubdouble_api_actions::refresh_default_branch(tx, &services.git, &old, target)?;
+    }
     let id = old.id;
     if !edited.is_empty() {
         let changes = Map::from_iter([("changes".to_owned(), Value::Object(edited))]);
