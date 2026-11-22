@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use bytes::Bytes;
 use hubdouble_model::{App, Clock, Delivery, DeliveryRequest, DeliveryResponse};
-use hubdouble_render::Urls;
 use hubdouble_store::{
     Apps, Committed, Counters, Deliveries, OutboxEntry, Sequence, Snapshot, Store,
 };
@@ -14,7 +13,7 @@ use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::delivery::{Binder, Outcome, send, signature_1, signature_256};
+use crate::delivery::{Outcome, send, signature_1, signature_256};
 use crate::emit::REDELIVERY_KEY;
 use crate::{HooksError, Options, Stats};
 
@@ -54,7 +53,6 @@ pub(crate) struct Shared {
     store: Store,
     clock: Arc<dyn Clock>,
     options: Options,
-    binder: Binder,
     state: Mutex<State>,
     items: Semaphore,
     space: Semaphore,
@@ -68,7 +66,6 @@ impl Shared {
     pub(crate) fn start(
         store: Store,
         clock: Arc<dyn Clock>,
-        urls: &Urls,
         options: Options,
     ) -> Result<Arc<Shared>, HooksError> {
         let rt = tokio::runtime::Handle::try_current().map_err(|_| HooksError::NoRuntime)?;
@@ -76,7 +73,6 @@ impl Shared {
         let shared = Arc::new(Shared {
             store,
             clock,
-            binder: Binder::new(urls),
             state: Mutex::new(State::default()),
             items: Semaphore::new(0),
             space: Semaphore::new(options.queue_capacity),
@@ -205,7 +201,7 @@ impl Shared {
             .unwrap_or_default()
     }
 
-    fn job(&self, id: i64, epoch: u64, app: &App, entry: OutboxEntry) -> Option<Job> {
+    fn job(id: i64, epoch: u64, app: &App, entry: OutboxEntry) -> Option<Job> {
         let hook = app.webhook.as_ref()?;
         let mut payload = entry.payload;
         let marker = payload
@@ -226,7 +222,6 @@ impl Shared {
                 entry.action.map(str::to_owned),
             ),
         };
-        self.binder.bind(&mut payload);
         let body = Bytes::from(serde_json::to_vec(&payload).ok()?);
         let app_id = app.id.to_string();
         let mut headers = BTreeMap::from([
@@ -282,7 +277,7 @@ impl Shared {
             .into_iter()
             .map(|(id, app, c)| {
                 let app_id = app.id;
-                self.job(id, c.epoch, &app, c.entry).ok_or((app_id, id))
+                Shared::job(id, c.epoch, &app, c.entry).ok_or((app_id, id))
             })
             .collect();
         {

@@ -8,12 +8,8 @@ use hmac::{Hmac, KeyInit, Mac};
 use http::header::{HOST, HeaderName, HeaderValue};
 use http::{Method, Request, Uri};
 use http_body_util::{BodyExt, Full};
-use hubdouble_render::Urls;
 use hyper_util::rt::TokioIo;
-use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
-
-use crate::emit::{API_ORIGIN, BASE_ORIGIN, PLACEHOLDER_MARK, WEB_HOST, WEB_ORIGIN};
 
 /// A byte stream a webhook request is written to.
 pub trait Io: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
@@ -72,39 +68,6 @@ pub(crate) fn signature_1(secret: &[u8], body: &[u8]) -> String {
         .unwrap_or_else(|_| unreachable!("HMAC takes a key of any length"));
     mac.update(body);
     format!("sha1={}", hex(&mac.finalize().into_bytes()))
-}
-
-/// Rewrites the placeholder origins of [`crate::payload_urls`] to the configured ones.
-pub(crate) struct Binder {
-    pairs: [(&'static str, String); 4],
-}
-
-impl Binder {
-    pub(crate) fn new(urls: &Urls) -> Binder {
-        Binder {
-            pairs: [
-                (API_ORIGIN, urls.api.clone()),
-                (BASE_ORIGIN, urls.base.clone()),
-                (WEB_ORIGIN, urls.web.clone()),
-                (WEB_HOST, urls.web_host().to_owned()),
-            ],
-        }
-    }
-
-    pub(crate) fn bind(&self, v: &mut Value) {
-        match v {
-            Value::String(s) if s.contains(PLACEHOLDER_MARK) => {
-                for (from, to) in &self.pairs {
-                    if s.contains(from) {
-                        *s = s.replace(from, to);
-                    }
-                }
-            }
-            Value::Array(items) => items.iter_mut().for_each(|i| self.bind(i)),
-            Value::Object(fields) => fields.values_mut().for_each(|f| self.bind(f)),
-            _ => {}
-        }
-    }
 }
 
 /// What one attempt got back.

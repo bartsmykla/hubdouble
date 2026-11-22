@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hubdouble_model::{ApiError, Clock, Config, Event};
-use hubdouble_render::Urls;
 use hubdouble_store::{Snapshot, Store, TxMut};
 
 use crate::delivery::{Connector, TcpConnector};
@@ -56,14 +55,6 @@ pub fn redeliver(tx: &mut TxMut<'_>, app_id: i64, delivery_id: i64) -> Result<()
     crate::emit::redeliver(tx, app_id, delivery_id)
 }
 
-/// The origins every webhook payload is rendered with. The publisher rewrites them to the
-/// configured origins before delivery, so code that renders a payload without a request (a ref
-/// subscriber) uses these.
-#[must_use]
-pub fn payload_urls() -> Urls {
-    crate::emit::payload_urls()
-}
-
 /// The tuning of the delivery runtime.
 #[derive(Clone)]
 pub struct Options {
@@ -112,19 +103,17 @@ impl Handle {
     /// # Errors
     ///
     /// [`HooksError`] when the workers cannot start.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "the frozen contract takes the shared config"
-    )]
     pub fn start(
         store: Store,
         clock: Arc<dyn Clock>,
         config: Arc<Config>,
     ) -> Result<Handle, HooksError> {
-        Handle::start_with(store, clock, &config, Options::default())
+        drop(config);
+        Handle::start_with(store, clock, Options::default())
     }
 
-    /// As [`Handle::start`], with explicit [`Options`].
+    /// As [`Handle::start`], with explicit [`Options`]. Payload URLs come from the store's
+    /// [`hubdouble_store::Tx::config`].
     ///
     /// # Errors
     ///
@@ -132,12 +121,10 @@ impl Handle {
     pub fn start_with(
         store: Store,
         clock: Arc<dyn Clock>,
-        config: &Config,
         options: Options,
     ) -> Result<Handle, HooksError> {
-        let urls = Urls::new(config, "");
         Ok(Handle {
-            shared: Shared::start(store, clock, &urls, options)?,
+            shared: Shared::start(store, clock, options)?,
         })
     }
 

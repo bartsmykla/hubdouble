@@ -17,20 +17,10 @@ const ALWAYS_DELIVERED: [&str; 4] = [
 
 pub(crate) const REDELIVERY_KEY: &str = "_hubdouble_redelivery";
 
-pub(crate) const PLACEHOLDER_MARK: &str = "hubdouble.invalid";
-pub(crate) const API_ORIGIN: &str = "http://api.hubdouble.invalid";
-pub(crate) const WEB_ORIGIN: &str = "http://web.hubdouble.invalid";
-pub(crate) const WEB_HOST: &str = "web.hubdouble.invalid";
-pub(crate) const BASE_ORIGIN: &str = "http://base.hubdouble.invalid";
-
 const ZEN: &str = "Keep it logically awesome.";
 
-pub(crate) fn payload_urls() -> Urls {
-    Urls {
-        api: API_ORIGIN.to_owned(),
-        web: WEB_ORIGIN.to_owned(),
-        base: BASE_ORIGIN.to_owned(),
-    }
+fn payload_urls(tx: &Tx) -> Urls {
+    Urls::new(tx.config(), "")
 }
 
 fn hook_active(app: &App) -> bool {
@@ -99,7 +89,7 @@ fn to_value(v: &impl Serialize) -> Option<Value> {
 }
 
 fn base_payload(tx: &Tx, e: &Event, mut p: Map<String, Value>) -> Map<String, Value> {
-    let urls = payload_urls();
+    let urls = payload_urls(tx);
     let accounts = tx.table::<Accounts>();
     let repo = e.repo_id.and_then(|id| tx.table::<Repos>().get(id));
     insert_absent(&mut p, "action", || e.action.map(Value::from));
@@ -145,6 +135,7 @@ pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
             event: e.name,
             action: e.action,
             payload: Value::Object(p),
+            redelivery_of: None,
         });
     }
 }
@@ -173,7 +164,7 @@ pub(crate) fn ping(tx: &mut TxMut<'_>, app_id: i64) {
             "updated_at": app.updated_at,
             "created_at": app.created_at,
             "app_id": app.id,
-            "deliveries_url": format!("{API_ORIGIN}/app/hook/deliveries"),
+            "deliveries_url": format!("{}/app/hook/deliveries", payload_urls(tx).api),
         },
     });
     tx.push_outbox(OutboxEntry {
@@ -183,6 +174,7 @@ pub(crate) fn ping(tx: &mut TxMut<'_>, app_id: i64) {
         event: "ping",
         action: None,
         payload,
+        redelivery_of: None,
     });
 }
 
@@ -212,6 +204,7 @@ pub(crate) fn redeliver(
         event: "",
         action: None,
         payload: Value::Object(payload),
+        redelivery_of: None,
     });
     Ok(())
 }

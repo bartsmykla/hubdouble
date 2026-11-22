@@ -202,7 +202,7 @@ fn installation(id: i64, app_id: i64, repos: Option<Vec<i64>>) -> Installation {
 }
 
 fn world() -> Store {
-    let store = StoreBuilder::new().build();
+    let store = StoreBuilder::new().build_with(Arc::new(config()));
     store
         .update_quiet(|tx| {
             let mut accounts = tx.table_mut::<Accounts>();
@@ -265,7 +265,7 @@ fn start(store: &Store, tune: impl FnOnce(&mut Options)) -> (Handle, mpsc::Unbou
     };
     tune(&mut options);
     let clock = Arc::new(ManualClock::new(Timestamp::SEED));
-    let handle = Handle::start_with(store.clone(), clock, &config(), options).unwrap();
+    let handle = Handle::start_with(store.clone(), clock, options).unwrap();
     (handle, rx)
 }
 
@@ -393,19 +393,6 @@ async fn delivers_signed_with_githubs_headers_and_logs_the_attempt() {
     assert_eq!(body["installation"]["id"], json!(INSTALL_A));
     assert_eq!(body["organization"]["login"], json!("acme"));
     assert_eq!(body["repository"]["full_name"], json!("acme/widget"));
-    assert_eq!(
-        body["repository"]["url"],
-        json!("http://hubdouble.test/repos/acme/widget")
-    );
-    assert_eq!(
-        body["repository"]["html_url"],
-        json!("https://github.com/acme/widget")
-    );
-    assert_eq!(
-        body["repository"]["ssh_url"],
-        json!("git@github.com:acme/widget.git")
-    );
-    assert!(!String::from_utf8_lossy(&raw).contains("hubdouble.invalid"));
     // And the delivery log holds the attempt
     let d = store
         .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
@@ -423,6 +410,55 @@ async fn delivers_signed_with_githubs_headers_and_logs_the_attempt() {
     assert_eq!(d.request.payload, body);
     assert_eq!(d.request.headers["X-GitHub-Delivery"], *guid);
     assert_eq!(d.response.payload.as_deref(), Some("received"));
+}
+
+fn values_under(v: &Value, key: &str, out: &mut Vec<String>) {
+    match v {
+        Value::Object(fields) => {
+            for (k, f) in fields {
+                if k == key
+                    && let Some(s) = f.as_str()
+                {
+                    out.push(s.to_owned());
+                }
+                values_under(f, key, out);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|i| values_under(i, key, out)),
+        _ => {}
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn delivered_payload_urls_use_the_configured_origins() {
+    let store = world();
+    let (hooks, hits) = start(&store, |_| {});
+    let mut bodies = answer_all(hits);
+    // Given a server with a base URL and a separate web URL
+    // When an event on a repository of an org is delivered
+    emit_one(&store, event("issue_comment", WIDGET));
+    hooks.drain().await.unwrap();
+    let body = bodies.recv().await.unwrap();
+    // Then every API url uses the base URL and every html_url the web URL
+    let (mut urls, mut html) = (Vec::new(), Vec::new());
+    values_under(&body, "url", &mut urls);
+    values_under(&body, "html_url", &mut html);
+    assert!(urls.contains(&"http://hubdouble.test/repos/acme/widget".to_owned()));
+    assert!(urls.contains(&"http://hubdouble.test/orgs/acme".to_owned()));
+    assert!(urls.contains(&"http://hubdouble.test/users/octo".to_owned()));
+    assert!(
+        urls.iter().all(|u| u.starts_with("http://hubdouble.test/")),
+        "{urls:?}"
+    );
+    assert!(html.contains(&"https://github.com/acme/widget".to_owned()));
+    assert!(
+        html.iter().all(|u| u.starts_with("https://github.com/")),
+        "{html:?}"
+    );
+    assert_eq!(
+        body["repository"]["ssh_url"],
+        json!("git@github.com:acme/widget.git")
+    );
 }
 
 #[tokio::test(start_paused = true)]

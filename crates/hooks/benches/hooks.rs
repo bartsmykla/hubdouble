@@ -8,7 +8,7 @@ use http::Uri;
 use http_body_util::{BodyExt, Full};
 use hubdouble_hooks::{ConnectFuture, Connector, Handle, Io, Options, emit};
 use hubdouble_model::{
-    Account, AccountKind, App, Config, Event, Installation, Repo, RepositorySelection, SystemClock,
+    Account, AccountKind, App, Event, Installation, Repo, RepositorySelection, SystemClock,
     Timestamp, Visibility, Webhook, node_id,
 };
 use hubdouble_store::{Accounts, Apps, Installations, Repos, Store, StoreBuilder};
@@ -184,7 +184,6 @@ fn start(rt: &Runtime, store: &Store, delay: Duration, queue_capacity: usize) ->
     Handle::start_with(
         store.clone(),
         Arc::new(SystemClock),
-        &Config::default(),
         Options {
             queue_capacity,
             connector: Arc::new(SlowReceiver { delay }),
