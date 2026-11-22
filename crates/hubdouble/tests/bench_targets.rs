@@ -97,9 +97,45 @@ fn the_gate_fails_a_criterion_bench_whose_slowdown_lower_bound_passes_the_budget
     change("faster", -0.30);
     change("slower", 0.21);
 
-    // When the gate runs without a targets baseline
-    let (failed, _) = gate::compare(dir.path(), &dir.path().join("none.json"), None);
+    let targets = dir.path().join("targets.json");
+    write(&targets, &rows(&[]));
+
+    // When the gate runs with targets that match main's
+    let (failed, _) = gate::compare(dir.path(), &targets, Some(&targets));
 
     // Then only the bench that is surely more than 20 % slower fails it
     assert_eq!(failed, 1);
+}
+
+#[test]
+fn the_gate_needs_main_targets_and_a_value_on_both_sides_of_every_row() {
+    // Given main's targets with one row it could not measure and one row this run drops
+    let dir = TempDir::new().unwrap();
+    let base = dir.path().join("main.json");
+    let current = dir.path().join("current.json");
+    write(
+        &base,
+        &rows(&[
+            ("steady", "below", Some(10.0)),
+            ("not measured on main", "below", None),
+            ("dropped", "below", Some(10.0)),
+        ]),
+    );
+    write(
+        &current,
+        &rows(&[
+            ("steady", "below", Some(10.0)),
+            ("not measured on main", "below", Some(10.0)),
+            ("new and measured", "below", Some(1.0)),
+            ("new and not measured", "below", None),
+        ]),
+    );
+
+    // When the gate compares them, and when it runs without main's targets
+    let (failed, _) = gate::compare(dir.path(), &current, Some(&base));
+    let (alone, _) = gate::compare(dir.path(), &current, None);
+
+    // Then each row without a value on one side fails it, and so does a missing baseline
+    assert_eq!(failed, 3);
+    assert_eq!(alone, 1);
 }

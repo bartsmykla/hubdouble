@@ -31,17 +31,17 @@ jobs:
           echo "HEAD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git checkout --detach origin/main
           rm -rf target/criterion target/bench-targets.json
-          cargo bench --workspace --locked --no-fail-fast -- --save-baseline main || true
-          if [ -f target/bench-targets.json ]; then
-            mv target/bench-targets.json "$RUNNER_TEMP/main-targets.json"
+          cargo bench --workspace --exclude hubdouble --locked -- --save-baseline main
+          cargo bench --locked -p hubdouble --bench targets || echo "main misses some targets"
+          if [ ! -f target/bench-targets.json ]; then
+            echo "::error::the targets bench on main wrote no report"
+            exit 1
           fi
+          mv target/bench-targets.json "$RUNNER_TEMP/main-targets.json"
       - name: benchmarks on the pull request and the gate against main
         run: |
           git checkout --detach "$HEAD_SHA"
           status=0
           cargo bench --workspace --locked --no-fail-fast -- --baseline-lenient main || status=1
-          if [ -f "$RUNNER_TEMP/main-targets.json" ]; then
-            export HUBDOUBLE_BENCH_BASELINE="$RUNNER_TEMP/main-targets.json"
-          fi
-          mise run bench:gate || status=1
+          HUBDOUBLE_BENCH_BASELINE="$RUNNER_TEMP/main-targets.json" mise run bench:gate || status=1
           exit "$status"

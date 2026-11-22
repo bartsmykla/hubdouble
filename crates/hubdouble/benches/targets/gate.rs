@@ -27,21 +27,32 @@ fn regression(goal: &str, base: f64, current: f64) -> Option<f64> {
 fn targets(base: &Value, current: &Value, out: &mut String) -> usize {
     let mut failed = 0;
     let rows = |v: &Value| v["rows"].as_array().cloned().unwrap_or_default();
-    let base_rows = rows(base);
-    for row in rows(current) {
+    let (base_rows, current_rows) = (rows(base), rows(current));
+    let find =
+        |rows: &[Value], measure: &Value| rows.iter().find(|r| r["measure"] == *measure).cloned();
+    for row in &base_rows {
+        if find(&current_rows, &row["measure"]).is_none() {
+            failed += 1;
+            let measure = row["measure"].as_str().unwrap_or_default();
+            let _ = writeln!(out, "MISSING  {measure}: measured on main, absent now");
+        }
+    }
+    for row in current_rows {
         let measure = row["measure"].as_str().unwrap_or_default();
         let goal = row["goal"].as_str().unwrap_or_default();
-        let Some(old) = base_rows
-            .iter()
-            .find(|r| r["measure"] == row["measure"])
-            .and_then(|r| r["value"].as_f64())
-        else {
-            let _ = writeln!(out, "new      {measure}");
+        let new = row["value"].as_f64();
+        let Some(base_row) = find(&base_rows, &row["measure"]) else {
+            if new.is_none() {
+                failed += 1;
+                let _ = writeln!(out, "MISSING  {measure}: new and not measured");
+            } else {
+                let _ = writeln!(out, "new      {measure}");
+            }
             continue;
         };
-        let Some(new) = row["value"].as_f64() else {
+        let (Some(old), Some(new)) = (base_row["value"].as_f64(), new) else {
             failed += 1;
-            let _ = writeln!(out, "MISSING  {measure}: was {old}, now not measured");
+            let _ = writeln!(out, "MISSING  {measure}: no value on main or now");
             continue;
         };
         let Some(change) = regression(goal, old, new) else {
@@ -129,15 +140,13 @@ pub(crate) fn run(target: &Path, current: &Path, baseline: Option<&Path>) -> Exi
 pub(crate) fn compare(target: &Path, current: &Path, baseline: Option<&Path>) -> (usize, String) {
     let mut out = String::new();
     let mut failed = 0;
-    match baseline {
-        Some(base) => match (read(base), read(current)) {
-            (Ok(base), Ok(current)) => failed += targets(&base, &current, &mut out),
-            (Err(e), _) | (_, Err(e)) => {
-                failed += 1;
-                let _ = writeln!(out, "cannot compare the targets: {e}");
-            }
-        },
-        None => out.push_str("no HUBDOUBLE_BENCH_BASELINE: the targets are not compared\n"),
+    let base = baseline.ok_or_else(|| "HUBDOUBLE_BENCH_BASELINE is not set".to_owned());
+    match base.and_then(|base| Ok((read(base)?, read(current)?))) {
+        Ok((base, current)) => failed += targets(&base, &current, &mut out),
+        Err(e) => {
+            failed += 1;
+            let _ = writeln!(out, "cannot compare the targets with main: {e}");
+        }
     }
     failed += criterion(&target.join("criterion"), &mut out);
     let _ = writeln!(
