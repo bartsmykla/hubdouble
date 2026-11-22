@@ -1,4 +1,5 @@
 mod gate;
+mod row;
 
 use std::convert::Infallible;
 use std::fmt::Write as _;
@@ -20,6 +21,7 @@ use hubdouble_testkit::fixture;
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use mimalloc::MiMalloc;
+use row::{Goal, Row, number};
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
 use tokio::net::{TcpListener, TcpStream};
@@ -43,75 +45,6 @@ const SLOW_DELAY: Duration = Duration::from_secs(2);
 const ENQUEUE_EVENTS: usize = 5_000;
 const START_RUNS: usize = 5;
 const TEAMS: usize = 100;
-
-#[derive(Clone, Copy)]
-enum Goal {
-    Below(f64),
-    Above(f64),
-    Report,
-}
-
-struct Row {
-    measure: String,
-    value: Option<f64>,
-    unit: &'static str,
-    goal: Goal,
-    note: String,
-}
-
-impl Row {
-    fn new(measure: impl Into<String>, value: Option<f64>, unit: &'static str, goal: Goal) -> Row {
-        Row {
-            measure: measure.into(),
-            value,
-            unit,
-            goal,
-            note: String::new(),
-        }
-    }
-
-    fn note(mut self, note: impl Into<String>) -> Row {
-        self.note = note.into();
-        self
-    }
-
-    fn met(&self) -> bool {
-        match (self.goal, self.value) {
-            (Goal::Report, _) => true,
-            (_, None) => false,
-            (Goal::Below(t), Some(v)) => v < t,
-            (Goal::Above(t), Some(v)) => v > t,
-        }
-    }
-
-    fn target(&self) -> String {
-        match self.goal {
-            Goal::Below(t) => format!("< {} {}", number(t), self.unit),
-            Goal::Above(t) => format!("> {} {}", number(t), self.unit),
-            Goal::Report => "report".to_owned(),
-        }
-    }
-
-    fn json(&self) -> Value {
-        let (goal, target) = match self.goal {
-            Goal::Below(t) => ("below", Some(t)),
-            Goal::Above(t) => ("above", Some(t)),
-            Goal::Report => ("report", None),
-        };
-        json!({"measure": self.measure, "value": self.value, "unit": self.unit,
-               "goal": goal, "target": target, "met": self.met()})
-    }
-}
-
-fn number(v: f64) -> String {
-    if v >= 100.0 {
-        format!("{v:.0}")
-    } else if v >= 10.0 {
-        format!("{v:.1}")
-    } else {
-        format!("{v:.2}")
-    }
-}
 
 fn micros(d: Duration) -> f64 {
     d.as_secs_f64() * 1e6
@@ -1568,7 +1501,8 @@ fn main() -> ExitCode {
     let out = std::env::var_os("HUBDOUBLE_BENCH_OUT")
         .map_or_else(|| target.join("bench-targets.json"), PathBuf::from);
     if std::env::args().any(|a| a == "--gate") {
-        return gate::run(target, &out);
+        let baseline = std::env::var_os("HUBDOUBLE_BENCH_BASELINE").map(PathBuf::from);
+        return gate::run(target, &out, baseline.as_deref());
     }
     std::fs::create_dir_all(TMP).unwrap_or_else(|e| fail("make the temporary directory", e));
     let dir = TempDir::new_in(TMP).unwrap_or_else(|e| fail("make a temporary directory", e));

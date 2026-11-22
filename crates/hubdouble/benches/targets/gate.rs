@@ -116,11 +116,21 @@ fn criterion(dir: &Path, out: &mut String) -> usize {
     failed
 }
 
-pub(crate) fn run(target: &Path, current: &Path) -> ExitCode {
+pub(crate) fn run(target: &Path, current: &Path, baseline: Option<&Path>) -> ExitCode {
+    let (failed, out) = compare(target, current, baseline);
+    let _ = std::io::stdout().lock().write_all(out.as_bytes());
+    if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+pub(crate) fn compare(target: &Path, current: &Path, baseline: Option<&Path>) -> (usize, String) {
     let mut out = String::new();
     let mut failed = 0;
-    match std::env::var_os("HUBDOUBLE_BENCH_BASELINE") {
-        Some(base) => match (read(Path::new(&base)), read(current)) {
+    match baseline {
+        Some(base) => match (read(base), read(current)) {
             (Ok(base), Ok(current)) => failed += targets(&base, &current, &mut out),
             (Err(e), _) | (_, Err(e)) => {
                 failed += 1;
@@ -135,10 +145,5 @@ pub(crate) fn run(target: &Path, current: &Path) -> ExitCode {
         "{failed} regressions beyond the {:.0} % budget",
         BUDGET * 100.0
     );
-    let _ = std::io::stdout().lock().write_all(out.as_bytes());
-    if failed == 0 {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    (failed, out)
 }
