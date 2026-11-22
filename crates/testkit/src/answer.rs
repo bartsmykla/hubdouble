@@ -15,6 +15,9 @@ const MANY: [&str; 6] = ["ref", "path", "branch", "basehead", "tag", "tree_sha"]
 
 const PROSE_STATUSES: [u16; 7] = [304, 400, 401, 403, 404, 422, 429];
 
+const RAW_BY_CONTENT: [(&str, [&str; 2]); 1] =
+    [("git/get-blob", ["text/plain", "application/octet-stream"])];
+
 const EVERY_ANSWER: [&str; 7] = [
     "x-github-request-id",
     "x-github-media-type",
@@ -460,7 +463,11 @@ fn documented_answer(x: &Exchange<'_>, id: &str, response: &Value) -> Vec<String
             None => errors.push(format!("{id} {}: JSON where the docs give none", x.status)),
         },
         Some(content) => {
-            let documented = content.contains_key(media);
+            let documented = content.contains_key(media)
+                || (accepts("raw")
+                    && RAW_BY_CONTENT
+                        .iter()
+                        .any(|(op, m)| *op == id && m.contains(&media)));
             let custom = asked.split(',').any(|a| {
                 let a = media_type(a);
                 let same = a == media

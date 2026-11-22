@@ -87,7 +87,13 @@ pub(crate) fn get_blob(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         return Err(ApiError::not_found());
     };
     if accepts(ctx, "raw") {
-        return Ok(Reply::raw(RAW, data.to_vec()));
+        let binary = data.iter().take(8000).any(|&b| b == 0);
+        let media = if binary {
+            "application/octet-stream"
+        } else {
+            "text/plain; charset=utf-8"
+        };
+        return Ok(Reply::raw(media, data.to_vec()));
     }
     let repo = ctx.repo()?.id;
     Reply::json(&Blob {

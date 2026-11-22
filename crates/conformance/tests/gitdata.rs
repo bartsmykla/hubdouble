@@ -234,6 +234,22 @@ async fn a_blob_reads_back_as_json_and_as_raw_bytes() {
     for accept in ["application/vnd.github.raw", RAW_ACCEPT] {
         raw.push(get_with(&client, &path, &[("accept", accept)]).await);
     }
+    let binary = client
+        .post(
+            "repos/acme/public/git/blobs",
+            &json!({"content": "iVBORw0KGgoAAAANSUhEUg==", "encoding": "base64"}),
+        )
+        .await;
+    let binary_path = format!(
+        "repos/acme/public/git/blobs/{}",
+        binary.json()["sha"].as_str().unwrap()
+    );
+    let binary_raw = get_with(
+        &client,
+        &binary_path,
+        &[("accept", "application/vnd.github.raw")],
+    )
+    .await;
     // Then
     assert_eq!(made.status, StatusCode::CREATED);
     valid("git/create-blob", &made);
@@ -245,8 +261,15 @@ async fn a_blob_reads_back_as_json_and_as_raw_bytes() {
     assert_eq!(body["size"], 6);
     for raw in raw {
         assert_eq!(raw.status, StatusCode::OK);
+        assert_eq!(raw.header("content-type"), "text/plain; charset=utf-8");
         assert_eq!(&raw.body[..], b"hello\n");
     }
+    assert_eq!(binary_raw.status, StatusCode::OK);
+    assert_eq!(
+        binary_raw.header("content-type"),
+        "application/octet-stream"
+    );
+    assert_eq!(&binary_raw.body[..4], b"\x89PNG");
 }
 
 #[tokio::test]
