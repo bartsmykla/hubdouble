@@ -142,6 +142,27 @@ fn an_unimplemented_field_errors_on_its_path_only() {
 }
 
 #[test]
+fn a_type_without_a_serde_form_answers_only_its_resolved_fields() {
+    // Given Ref declared with object_resolved and only its name resolver
+    let w = world();
+    // When a resolved and an unresolved field are selected
+    let r = w.run(
+        "{ repository(owner: \"o\", name: \"one\") { ref(qualifiedName: \"main\") { name target { oid } } } }",
+        &Value::Null,
+    );
+    // Then the resolver answers and the other field is NOT_IMPLEMENTED on its own path
+    assert_eq!(
+        r["data"],
+        json!({"repository": {"ref": {"name": "main", "target": null}}})
+    );
+    assert_eq!(types(&r), vec!["HUBDOUBLE_NOT_IMPLEMENTED"]);
+    assert_eq!(
+        r["errors"][0]["path"],
+        json!(["repository", "ref", "target"])
+    );
+}
+
+#[test]
 fn the_serde_form_is_built_once_per_parent_and_only_when_selected() {
     let w = world();
     let probe = || {

@@ -261,6 +261,24 @@ fn comment_reply_to(_: &Ctx<'_>, parent: &Obj, _: &Args) -> Result<Resolved, Gql
     })
 }
 
+pub struct GitRef {
+    pub name: String,
+}
+
+#[expect(clippy::unnecessary_wraps, reason = "a resolver returns a Result")]
+fn repository_ref(_: &Ctx<'_>, _: &Obj, _: &Args) -> Result<Resolved, GqlError> {
+    Ok(object(
+        "Ref",
+        GitRef {
+            name: "main".to_owned(),
+        },
+    ))
+}
+
+fn ref_name(_: &Ctx<'_>, parent: &Obj, _: &Args) -> Result<Resolved, GqlError> {
+    Ok(Resolved::Leaf(parent.get::<GitRef>()?.name.clone().into()))
+}
+
 #[expect(clippy::unnecessary_wraps, reason = "a node loader returns a Result")]
 fn load_pull(_: &Ctx<'_>, id: i64) -> Result<Resolved, GqlError> {
     Ok(if id > 0 { pull(id) } else { Resolved::Null })
@@ -299,6 +317,9 @@ pub fn registry() -> Registry {
     r.object::<Review>("PullRequestReview");
     r.object::<User>("User");
     r.object::<Payload>("AddCommentPayload");
+    r.object_resolved::<GitRef>("Ref");
+    r.field("Repository", "ref", repository_ref);
+    r.field("Ref", "name", ref_name);
     r.field("Query", "repository", query_repository);
     r.field("Query", "search", query_search);
     r.field("Repository", "pullRequest", repository_pull);

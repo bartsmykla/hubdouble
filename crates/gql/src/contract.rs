@@ -294,6 +294,24 @@ impl Registry {
     ///
     /// Panics when `type_name` is not an object type of the schema or is already declared.
     pub fn object<T: Serialize + Send + Sync + 'static>(&mut self, type_name: &'static str) {
+        self.declare::<T>(type_name, serialize_as::<T>);
+    }
+
+    /// As [`Registry::object`], for a value without a `serde` form: every field the documents
+    /// select needs a resolver, and a field without one answers `NOT_IMPLEMENTED`.
+    ///
+    /// # Panics
+    ///
+    /// As [`Registry::object`].
+    pub fn object_resolved<T: Send + Sync + 'static>(&mut self, type_name: &'static str) {
+        self.declare::<T>(type_name, |_| None);
+    }
+
+    fn declare<T: 'static>(
+        &mut self,
+        type_name: &'static str,
+        serialize: fn(&(dyn Any + Send + Sync)) -> Option<serde_json::Value>,
+    ) {
         assert!(
             self.schema.is_object(type_name),
             "{type_name} is not an object type of the schema"
@@ -303,7 +321,7 @@ impl Registry {
             ObjectType {
                 type_id: TypeId::of::<T>(),
                 rust_name: std::any::type_name::<T>(),
-                serialize: serialize_as::<T>,
+                serialize,
             },
         );
         assert!(previous.is_none(), "{type_name} is declared twice");
