@@ -275,15 +275,16 @@ impl Store {
 pub trait Table: Any + Send + Sync + Clone {     // not object safe: the store keeps tables in a TypeId map with typed accessors
     fn restore(&mut self, seeded: &Self) { *self = seeded.clone(); } // default: back to the seeded state
 }
-pub struct Tx { /* every table */ }               // the state inside the lock; only & methods
+pub struct Tx { /* every table, Arc<Config> */ }  // the state inside the lock; only & methods; config() gives the URLs to code that renders outside a request
 pub struct TxMut<'a> { /* &'a mut Tx (private), undo log, outbox buffer, id sequence */ } // Deref<Target = Tx>, no DerefMut
 impl TxMut<'_> {
     pub fn next_id(&mut self) -> i64;
     pub fn table_mut<T: Table>(&mut self) -> TableMut<'_, T>; // every insert, replace and remove records its undo
     pub fn push_outbox(&mut self, entry: OutboxEntry);        // buffered; reaches the outbox only on commit
 }
-impl Tx { pub fn table<T: Table>(&self) -> &T; }
-pub struct StoreBuilder;                          // register_table::<T>() for every table, then build(); no table is added after start
+impl Tx { pub fn table<T: Table>(&self) -> &T; pub fn config(&self) -> &Config; }
+pub struct StoreBuilder;                          // register_table::<T>() for every table, then build_with(config) (build() uses Config::default, for tests); no table is added after start
+pub struct OutboxEntry { pub app_id: i64, pub installation_id: Option<i64>, pub repo_id: Option<i64>, pub event: &'static str, pub action: Option<&'static str>, pub payload: serde_json::Value, pub redelivery_of: Option<String> }
 ```
 
 A table overrides `restore` only where section 4.6 keeps state across a reset: the token table keeps every unexpired token of a seeded installation or user, the delivery table keeps the App delivery log, and the counter table (the global ID sequence, delivery IDs, run IDs, each repository's issue and PR number, and the request log cursor) keeps its current values, so every generated sequence keeps counting up. A track's side table uses the default unless 4.6 says otherwise.
@@ -360,13 +361,13 @@ The Rust value of every type another track can reach is frozen in this table. Fo
 impl Git {                                         // one per server; objects shared per fork network, refs per repository
     pub fn resolve_ref(&self, tx: &Tx, repo: i64, name: &str) -> Result<ObjectId, GitError>;
     pub fn refs(&self, tx: &Tx, repo: i64, prefix: &str) -> Vec<Ref>;
-    pub fn update_ref(&self, tx: &mut TxMut<'_>, repo: i64, name: &str, old: Option<ObjectId>, new: Option<ObjectId>, force: bool) -> Result<(), GitError>;
+    pub fn update_ref(&self, tx: &mut TxMut<'_>, repo: i64, sender: i64, name: &str, old: Option<ObjectId>, new: Option<ObjectId>, force: bool) -> Result<(), GitError>; // sender: the acting account, the push event's sender and pusher
     pub fn object(&self, tx: &Tx, repo: i64, id: ObjectId) -> Result<Object, GitError>;
     pub fn expression(&self, tx: &Tx, repo: i64, expr: &str) -> Result<Object, GitError>; // "main:docs/a.md", "HEAD:", an oid
     pub fn write_blob / write_tree / write_commit / write_tag(&self, tx: &Tx, repo: i64, ...) -> Result<ObjectId, GitError>;
-    pub fn commit(&self, tx: &mut TxMut<'_>, repo: i64, branch: &str, parent: Option<ObjectId>, changes: &[FileChange], author: &Signature, committer: &Signature, sign: bool) -> Result<ObjectId, GitError>;
+    pub fn commit(&self, tx: &mut TxMut<'_>, repo: i64, sender: i64, branch: &str, parent: Option<ObjectId>, changes: &[FileChange], message: &str, author: &Signature, committer: &Signature, sign: bool) -> Result<ObjectId, GitError>;
     pub fn compare(&self, tx: &Tx, repo: i64, base: ObjectId, head: ObjectId) -> Result<Comparison, GitError>; // merge base, ahead, behind, commits, files with patches
-    pub fn merge(&self, tx: &mut TxMut<'_>, repo: i64, base: &str, head: &str, msg: &str) -> Result<MergeResult, GitError>; // GitError::NothingToMerge, GitError::Conflict
+    pub fn merge(&self, tx: &mut TxMut<'_>, repo: i64, sender: i64, base: &str, head: &str, msg: &str) -> Result<MergeResult, GitError>; // GitError::NothingToMerge, GitError::Conflict; author: the sender, committer: web-flow
     pub fn mergeable(&self, tx: &Tx, repo: i64, base: ObjectId, head: ObjectId) -> Result<bool, GitError>;
 }
 impl GitBuilder { pub fn on_ref_update(&mut self, f: fn(&mut TxMut<'_>, &Git, &RefChange) -> Result<(), ApiError>); } // at start only
@@ -387,7 +388,10 @@ pub struct Event {                                 // in hubdouble-model
     pub installation_id: Option<i64>,
     pub payload: serde_json::Map<String, serde_json::Value>, // built from hubdouble-render structs; hooks adds installation, repository, organization, sender
 }
-pub fn emit(tx: &mut TxMut<'_>, e: Event);         // in hubdouble-hooks; every track and P0-C emit through it
+pub fn emit(tx: &mut TxMut<'_>, e: Event);         // in hubdouble-hooks; every track and P0-C emit through it; URLs from Urls::new(tx.config(), "")
+pub fn ping(tx: &mut TxMut<'_>, app_id: i64);
+pub fn redeliver(tx: &mut TxMut<'_>, app_id: i64, delivery_id: i64) -> Result<(), HooksError>; // same GUID, new delivery ID
+impl Handle { pub async fn drain(&self); pub async fn reset(&self, s: &Snapshot); } // admin reset calls Handle::reset, never Store::restore directly
 ```
 
 `emit` renders the payload and resolves the recipients (the App and installation when set, otherwise every App installed on the account or repository that subscribes) inside the transaction and pushes one `OutboxEntry` per recipient with `TxMut::push_outbox`, so an `installation.deleted` or `installation_repositories.removed` event carries the installation and repositories as they were before the change, and a rolled-back `update` delivers nothing. A test installs two Apps on one account, deletes one installation, and checks that only that App receives the event, with the deleted installation's data.
