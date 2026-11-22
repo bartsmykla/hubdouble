@@ -581,8 +581,11 @@ pub struct ReviewComment {
     pub start_line: Option<i64>,
     pub original_start_line: Option<i64>,
     pub start_side: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub original_line: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub side: Option<&'static str>,
     pub subject_type: &'static str,
     pub reactions: ReactionRollup,
