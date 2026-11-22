@@ -201,8 +201,8 @@ impl Shared {
     }
 
     pub(crate) async fn reset(&self, snapshot: &Snapshot) -> Result<(), HooksError> {
-        self.store.restore(snapshot);
-        self.forget_older(self.store.epoch()).await
+        let epoch = self.store.restore_epoch(snapshot);
+        self.forget_older(epoch).await
     }
 
     pub(crate) async fn forget_older(&self, epoch: u64) -> Result<(), HooksError> {

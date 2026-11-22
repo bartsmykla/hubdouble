@@ -352,6 +352,13 @@ impl Store {
     /// a new epoch, so hooks can refuse to start an attempt committed before the reset. The
     /// dropped entries release their share of the outbox limits.
     pub fn restore(&self, s: &Snapshot) {
+        let _ = self.restore_epoch(s);
+    }
+
+    /// As [`Store::restore`], and returns the epoch this reset moved to, read under the lock, so
+    /// a later reset cannot move it first.
+    #[must_use]
+    pub fn restore_epoch(&self, s: &Snapshot) -> u64 {
         let mut state = self.inner.state.write();
         for (id, table) in &mut state.tx.tables {
             if let Some(seeded) = s.tables.get(id) {
@@ -363,7 +370,7 @@ impl Store {
                 self.inner.release(c.entry.payload.len());
             }
         }
-        self.inner.epoch.fetch_add(1, Ordering::SeqCst);
+        self.inner.epoch.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// Bounds the committed entries that wait for delivery: an entry that would make them more
