@@ -2,16 +2,19 @@ name: bench
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
 concurrency:
   group: bench-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
+  BASE_REF: ${{ github.event_name == 'push' && github.event.before || 'origin/main' }}
 
 jobs:
   bench:
@@ -26,22 +29,22 @@ jobs:
         with:
           version: 2026.11.12
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: benchmarks on main
+      - name: benchmarks on the base commit
         run: |
           echo "HEAD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          git checkout --detach origin/main
+          git checkout --detach "$BASE_REF"
           rm -rf target/criterion target/bench-targets.json
-          cargo bench --workspace --exclude hubdouble --locked -- --save-baseline main
-          cargo bench --locked -p hubdouble --bench targets || echo "main misses some targets"
+          cargo bench --workspace --exclude hubdouble --bench '*' --locked -- --save-baseline main
+          cargo bench --locked -p hubdouble --bench targets || echo "the base misses some targets"
           if [ ! -f target/bench-targets.json ]; then
-            echo "::error::the targets bench on main wrote no report"
+            echo "::error::the targets bench on the base wrote no report"
             exit 1
           fi
           mv target/bench-targets.json "$RUNNER_TEMP/main-targets.json"
-      - name: benchmarks on the pull request and the gate against main
+      - name: benchmarks on the head and the gate against the base
         run: |
           git checkout --detach "$HEAD_SHA"
           status=0
-          cargo bench --workspace --locked --no-fail-fast -- --baseline-lenient main || status=1
+          cargo bench --workspace --bench '*' --locked --no-fail-fast -- --baseline-lenient main || status=1
           HUBDOUBLE_BENCH_BASELINE="$RUNNER_TEMP/main-targets.json" mise run bench:gate || status=1
           exit "$status"
