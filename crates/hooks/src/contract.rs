@@ -1,32 +1,109 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use hubdouble_model::{ApiError, Clock, Config, Event};
-use hubdouble_store::{Store, TxMut};
+use hubdouble_render::Urls;
+use hubdouble_store::{Snapshot, Store, TxMut};
+
+use crate::delivery::{Connector, TcpConnector};
+use crate::runtime::Shared;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HooksError {
-    #[error("{0} is not implemented yet")]
-    NotImplemented(&'static str),
+    #[error("the webhook workers need a tokio runtime")]
+    NoRuntime,
+    #[error("the webhook publisher has stopped")]
+    Stopped,
+    #[error("delivery {0} does not exist")]
+    UnknownDelivery(i64),
 }
 
 impl From<HooksError> for ApiError {
     fn from(e: HooksError) -> ApiError {
         match e {
-            HooksError::NotImplemented(what) => ApiError::not_implemented(what),
+            HooksError::UnknownDelivery(_) => ApiError::not_found(),
+            HooksError::NoRuntime | HooksError::Stopped => ApiError::internal(e.to_string()),
         }
     }
 }
 
 /// Renders `e`'s payload and resolves its recipients inside the transaction, then pushes one
 /// [`hubdouble_store::OutboxEntry`] per recipient with [`TxMut::push_outbox`].
+///
+/// With `installation_id` set, only that installation's App receives it (and only when
+/// `app_id`, if set, names that App). With only `app_id` set, only that App receives it.
+/// Otherwise every unsuspended installation on the repository's owner (or on `org_id`) that
+/// covers the repository receives it. In every case the App needs an active webhook and must
+/// subscribe to the event, except for the installation-family events, which always go out.
+/// `action`, `installation`, `repository`, `organization` and `sender` are added unless the
+/// payload has them.
 pub fn emit(tx: &mut TxMut<'_>, e: Event) {
-    let _ = (tx, e);
+    crate::emit::emit(tx, e);
+}
+
+/// Queues the `ping` GitHub sends when an App's webhook is set.
+pub fn ping(tx: &mut TxMut<'_>, app_id: i64) {
+    crate::emit::ping(tx, app_id);
+}
+
+/// Queues a redelivery of a logged attempt: the same GUID and payload, a new delivery ID and
+/// `redelivery: true`.
+///
+/// # Errors
+///
+/// [`HooksError::UnknownDelivery`] when the App has no such delivery.
+pub fn redeliver(tx: &mut TxMut<'_>, app_id: i64, delivery_id: i64) -> Result<(), HooksError> {
+    crate::emit::redeliver(tx, app_id, delivery_id)
+}
+
+/// The origins every webhook payload is rendered with. The publisher rewrites them to the
+/// configured origins before delivery, so code that renders a payload without a request (a ref
+/// subscriber) uses these.
+#[must_use]
+pub fn payload_urls() -> Urls {
+    crate::emit::payload_urls()
+}
+
+/// The tuning of the delivery runtime.
+#[derive(Clone)]
+pub struct Options {
+    pub workers: usize,
+    /// The worker queue bound; a full queue makes only the publisher wait.
+    pub queue_capacity: usize,
+    /// The timeout of one attempt.
+    pub timeout: Duration,
+    /// The delivery log ring size per App.
+    pub log_capacity: usize,
+    pub connector: Arc<dyn Connector>,
+}
+
+impl Default for Options {
+    fn default() -> Options {
+        Options {
+            workers: 4,
+            queue_capacity: 10_000,
+            timeout: Duration::from_secs(10),
+            log_capacity: 50_000,
+            connector: Arc::new(TcpConnector),
+        }
+    }
+}
+
+/// A point-in-time view of the delivery runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    pub queued: usize,
+    /// The deepest the worker queue has been.
+    pub max_queued: usize,
+    pub in_flight: usize,
+    /// Deliveries with an ID that are not in the delivery log yet.
+    pub unlogged: usize,
 }
 
 /// The running publisher, delivery queue and workers.
 #[derive(Clone)]
 pub struct Handle {
-    store: Store,
+    pub(crate) shared: Arc<Shared>,
 }
 
 impl Handle {
@@ -35,34 +112,64 @@ impl Handle {
     /// # Errors
     ///
     /// [`HooksError`] when the workers cannot start.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the frozen contract takes the shared config"
+    )]
     pub fn start(
         store: Store,
         clock: Arc<dyn Clock>,
         config: Arc<Config>,
     ) -> Result<Handle, HooksError> {
-        let _ = (clock, config);
-        Ok(Handle { store })
+        Handle::start_with(store, clock, &config, Options::default())
     }
 
-    /// Returns once every event committed before the call has been delivered and logged.
+    /// As [`Handle::start`], with explicit [`Options`].
     ///
     /// # Errors
     ///
-    /// [`HooksError`] when draining fails.
-    #[expect(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "the contract is async and the P0-E body awaits"
-    )]
+    /// [`HooksError::NoRuntime`] outside a tokio runtime.
+    pub fn start_with(
+        store: Store,
+        clock: Arc<dyn Clock>,
+        config: &Config,
+        options: Options,
+    ) -> Result<Handle, HooksError> {
+        let urls = Urls::new(config, "");
+        Ok(Handle {
+            shared: Shared::start(store, clock, &urls, options)?,
+        })
+    }
+
+    /// Returns once every event committed before the call has left the outbox and the
+    /// publisher, the worker queue holds none of them, no attempt for them is in flight and
+    /// every attempt is in the delivery log.
+    ///
+    /// # Errors
+    ///
+    /// [`HooksError::Stopped`] after [`Handle::shutdown`].
     pub async fn drain(&self) -> Result<(), HooksError> {
-        let _ = &self.store;
-        Err(HooksError::NotImplemented("hooks/drain"))
+        self.shared.drain().await
+    }
+
+    /// Restores `snapshot` with [`Store::restore`], which clears the outbox and moves to a new
+    /// epoch under the store lock, then clears the worker queue and returns once every attempt
+    /// already in flight has ended. No attempt of an older epoch starts or logs after it returns.
+    ///
+    /// # Errors
+    ///
+    /// [`HooksError::Stopped`] when the runtime is dropped while it waits.
+    pub async fn reset(&self, snapshot: &Snapshot) -> Result<(), HooksError> {
+        self.shared.reset(snapshot).await
+    }
+
+    #[must_use]
+    pub fn stats(&self) -> Stats {
+        self.shared.stats()
     }
 
     /// Stops the publisher and the workers after their current attempts.
-    #[expect(
-        clippy::unused_async,
-        reason = "the contract is async and the P0-E body awaits"
-    )]
-    pub async fn shutdown(&self) {}
+    pub async fn shutdown(&self) {
+        self.shared.shutdown().await;
+    }
 }

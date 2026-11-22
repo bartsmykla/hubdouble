@@ -1,0 +1,217 @@
+use std::sync::Arc;
+
+use hubdouble_model::{AccountKind, App, Event, Installation, RepositorySelection};
+use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
+use hubdouble_store::{Accounts, Apps, Deliveries, Installations, OutboxEntry, Repos, Tx, TxMut};
+use serde::Serialize;
+use serde_json::{Map, Value, json};
+
+use crate::HooksError;
+
+const ALWAYS_DELIVERED: [&str; 4] = [
+    "installation",
+    "installation_repositories",
+    "installation_target",
+    "github_app_authorization",
+];
+
+pub(crate) const REDELIVERY_KEY: &str = "_hubdouble_redelivery";
+
+pub(crate) const PLACEHOLDER_MARK: &str = "hubdouble.invalid";
+pub(crate) const API_ORIGIN: &str = "http://api.hubdouble.invalid";
+pub(crate) const WEB_ORIGIN: &str = "http://web.hubdouble.invalid";
+pub(crate) const WEB_HOST: &str = "web.hubdouble.invalid";
+pub(crate) const BASE_ORIGIN: &str = "http://base.hubdouble.invalid";
+
+const ZEN: &str = "Keep it logically awesome.";
+
+pub(crate) fn payload_urls() -> Urls {
+    Urls {
+        api: API_ORIGIN.to_owned(),
+        web: WEB_ORIGIN.to_owned(),
+        base: BASE_ORIGIN.to_owned(),
+    }
+}
+
+fn hook_active(app: &App) -> bool {
+    app.webhook.as_ref().is_some_and(|w| w.active)
+}
+
+fn subscribes(app: &App, event: &str) -> bool {
+    ALWAYS_DELIVERED.contains(&event) || app.events.iter().any(|e| e == event)
+}
+
+fn covers(i: &Installation, repo_id: i64) -> bool {
+    i.repository_selection == RepositorySelection::All || i.repo_ids.contains(&repo_id)
+}
+
+pub(crate) fn recipients(tx: &Tx, e: &Event) -> Vec<(i64, Option<Arc<Installation>>)> {
+    let apps = tx.table::<Apps>();
+    let wants = |app_id: i64| {
+        apps.get(app_id)
+            .is_some_and(|a| hook_active(a) && subscribes(a, e.name))
+    };
+    if let Some(id) = e.installation_id {
+        return tx
+            .table::<Installations>()
+            .get(id)
+            .filter(|i| e.app_id.is_none_or(|a| a == i.app_id) && wants(i.app_id))
+            .map(|i| (i.app_id, Some(i.clone())))
+            .into_iter()
+            .collect();
+    }
+    if let Some(app_id) = e.app_id {
+        return if wants(app_id) {
+            vec![(app_id, None)]
+        } else {
+            Vec::new()
+        };
+    }
+    let repo = e.repo_id.and_then(|id| tx.table::<Repos>().get(id));
+    if e.repo_id.is_some() && repo.is_none() {
+        return Vec::new();
+    }
+    let Some(account) = repo.map(|r| r.owner_id).or(e.org_id) else {
+        return Vec::new();
+    };
+    tx.table::<Installations>()
+        .iter()
+        .filter(|i| {
+            i.account_id == account
+                && i.suspended_at.is_none()
+                && repo.is_none_or(|r| covers(i, r.id))
+                && wants(i.app_id)
+        })
+        .map(|i| (i.app_id, Some(i.clone())))
+        .collect()
+}
+
+fn insert_absent(p: &mut Map<String, Value>, key: &str, value: impl FnOnce() -> Option<Value>) {
+    if !p.contains_key(key)
+        && let Some(v) = value()
+    {
+        p.insert(key.to_owned(), v);
+    }
+}
+
+fn to_value(v: &impl Serialize) -> Option<Value> {
+    serde_json::to_value(v).ok()
+}
+
+fn base_payload(tx: &Tx, e: &Event, mut p: Map<String, Value>) -> Map<String, Value> {
+    let urls = payload_urls();
+    let accounts = tx.table::<Accounts>();
+    let repo = e.repo_id.and_then(|id| tx.table::<Repos>().get(id));
+    insert_absent(&mut p, "action", || e.action.map(Value::from));
+    insert_absent(&mut p, "repository", || {
+        let r = repo?;
+        to_value(&Repository::new(&urls, r, accounts.get(r.owner_id)?))
+    });
+    insert_absent(&mut p, "organization", || {
+        let org = accounts.get(e.org_id.or(repo.map(|r| r.owner_id))?)?;
+        (org.kind == AccountKind::Organization)
+            .then(|| to_value(&OrganizationSimple::new(&urls, org)))
+            .flatten()
+    });
+    insert_absent(&mut p, "sender", || {
+        to_value(&SimpleUser::new(&urls, accounts.get(e.sender_id)?))
+    });
+    p
+}
+
+pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
+    let recipients = recipients(tx, &e);
+    if recipients.is_empty() {
+        return;
+    }
+    let payload = std::mem::take(&mut e.payload);
+    let mut payload = base_payload(tx, &e, payload);
+    let mut recipients = recipients.into_iter().peekable();
+    while let Some((app_id, installation)) = recipients.next() {
+        let mut p = if recipients.peek().is_some() {
+            payload.clone()
+        } else {
+            std::mem::take(&mut payload)
+        };
+        insert_absent(&mut p, "installation", || {
+            installation
+                .as_ref()
+                .map(|i| json!({ "id": i.id, "node_id": i.node_id }))
+        });
+        tx.push_outbox(OutboxEntry {
+            app_id,
+            installation_id: installation.map(|i| i.id),
+            repo_id: e.repo_id,
+            event: e.name,
+            action: e.action,
+            payload: Value::Object(p),
+        });
+    }
+}
+
+pub(crate) fn ping(tx: &mut TxMut<'_>, app_id: i64) {
+    let Some(app) = tx.table::<Apps>().get(app_id).cloned() else {
+        return;
+    };
+    let Some(hook) = app.webhook.as_ref().filter(|w| w.active) else {
+        return;
+    };
+    let mut config = json!({ "content_type": "json", "insecure_ssl": "0", "url": hook.url });
+    if hook.secret.is_some() {
+        config["secret"] = json!("********");
+    }
+    let payload = json!({
+        "zen": ZEN,
+        "hook_id": app.id,
+        "hook": {
+            "type": "App",
+            "id": app.id,
+            "name": "web",
+            "active": hook.active,
+            "events": app.events,
+            "config": config,
+            "updated_at": app.updated_at,
+            "created_at": app.created_at,
+            "app_id": app.id,
+            "deliveries_url": format!("{API_ORIGIN}/app/hook/deliveries"),
+        },
+    });
+    tx.push_outbox(OutboxEntry {
+        app_id,
+        installation_id: None,
+        repo_id: None,
+        event: "ping",
+        action: None,
+        payload,
+    });
+}
+
+pub(crate) fn redeliver(
+    tx: &mut TxMut<'_>,
+    app_id: i64,
+    delivery_id: i64,
+) -> Result<(), HooksError> {
+    let d = tx
+        .table::<Deliveries>()
+        .get(delivery_id)
+        .filter(|d| d.app_id == app_id)
+        .cloned()
+        .ok_or(HooksError::UnknownDelivery(delivery_id))?;
+    let mut payload = match &d.request.payload {
+        Value::Object(o) => o.clone(),
+        _ => Map::new(),
+    };
+    payload.insert(
+        REDELIVERY_KEY.to_owned(),
+        json!({ "guid": d.guid, "event": d.event, "action": d.action }),
+    );
+    tx.push_outbox(OutboxEntry {
+        app_id,
+        installation_id: d.installation_id,
+        repo_id: d.repo_id,
+        event: "",
+        action: None,
+        payload: Value::Object(payload),
+    });
+    Ok(())
+}

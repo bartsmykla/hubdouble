@@ -768,9 +768,24 @@ dependencies = [
 name = "hubdouble-hooks"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "criterion",
+ "hmac",
+ "http",
+ "http-body-util",
  "hubdouble-model",
+ "hubdouble-render",
  "hubdouble-store",
+ "hyper",
+ "hyper-util",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
  "thiserror",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1405,6 +1420,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
 name = "sha2"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1656,6 +1682,17 @@ name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "uuid"
+version = "1.29.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c14b15dffa2f4bd712103e857140aa04a4f2ff6e955c77d7eb8e53ee02a3b64"
+dependencies = [
+ "getrandom",
+ "js-sys",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "walkdir"
