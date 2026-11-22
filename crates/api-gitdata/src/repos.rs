@@ -19,6 +19,7 @@ use crate::common::{
 pub(crate) use compare::compare;
 
 const COMMIT_FILES: usize = 300;
+const MAX_COMMIT_FILES: usize = 3_000;
 const SHA_MEDIA: &str = "application/vnd.github.sha; charset=utf-8";
 const V3_SHA_MEDIA: &str = "application/vnd.github.v3.sha; charset=utf-8";
 
@@ -147,9 +148,15 @@ impl<'a> View<'a> {
         }
     }
 
-    fn with_files(&self, id: ObjectId, c: &Commit, files: &[FileDiff]) -> RepoCommit {
+    fn with_files(
+        &self,
+        id: ObjectId,
+        c: &Commit,
+        all_files: &[FileDiff],
+        shown: &[FileDiff],
+    ) -> RepoCommit {
         let mut out = self.commit(id, c);
-        let (additions, deletions) = files
+        let (additions, deletions) = all_files
             .iter()
             .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions));
         out.stats = Some(Stats {
@@ -158,7 +165,7 @@ impl<'a> View<'a> {
             total: additions + deletions,
         });
         out.files = Some(
-            files
+            shown
                 .iter()
                 .map(|f| DiffEntry::new(&self.links, id, f))
                 .collect(),
@@ -270,6 +277,20 @@ fn no_commit(reference: &str) -> ApiError {
     )
 }
 
+fn commit_page(ctx: &Ctx<'_>) -> Page {
+    let query = ctx.query();
+    let positive = |name| {
+        query
+            .get(name)
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+    };
+    Page {
+        page: positive("page").unwrap_or(1),
+        per_page: positive("per_page").map_or(COMMIT_FILES, |n| n.min(COMMIT_FILES)),
+    }
+}
+
 pub(crate) fn get_commit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let reference = ctx.param("ref")?.to_owned();
     let view = View::of(ctx)?;
@@ -284,12 +305,10 @@ pub(crate) fn get_commit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         return Reply::raw(content_type, id.to_string()).header(ETAG, &format!("\"{id}\""));
     }
     let files = view.files(id, &commit)?;
-    if let Some(page) = explicit_page(ctx) {
-        let reply = Reply::json(&view.with_files(id, &commit, slice(&files, page)))?;
-        return with_link(ctx, reply, page, files.len());
-    }
-    let shown = &files[..files.len().min(COMMIT_FILES)];
-    Reply::json(&view.with_files(id, &commit, shown))
+    let pageable = &files[..files.len().min(MAX_COMMIT_FILES)];
+    let page = commit_page(ctx);
+    let body = view.with_files(id, &commit, &files, slice(pageable, page));
+    with_link(ctx, Reply::json(&body)?, page, pageable.len())
 }
 
 fn touches(git: &Git, tx: &Tx, repo: i64, id: ObjectId, c: &Commit, path: &str) -> bool {
@@ -370,7 +389,8 @@ pub(crate) fn merge(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         return Err(ApiError::internal("a merge made no commit"));
     };
     let files = view.files(made, &commit)?;
-    Reply::json(&view.with_files(made, &commit, &files)).map(|r| r.status(StatusCode::CREATED))
+    Reply::json(&view.with_files(made, &commit, &files, &files))
+        .map(|r| r.status(StatusCode::CREATED))
 }
 
 #[derive(Serialize)]

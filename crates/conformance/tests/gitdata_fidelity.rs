@@ -1,11 +1,13 @@
 #![expect(clippy::unwrap_used, reason = "a broken test fixture must fail")]
 
+use std::collections::BTreeMap;
+
 use http::StatusCode;
 use hubdouble_git::{Commit, ObjectData, Signature};
 use hubdouble_model::Timestamp;
 use hubdouble_testkit::fixture::{ALICE_TOKEN, PUBLIC_REPO_ID};
 use hubdouble_testkit::{GoGithub, TestServer};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 async fn server() -> TestServer {
     TestServer::builder()
@@ -80,5 +82,56 @@ async fn compare_orders_interleaved_branches_before_the_limit_and_pagination() {
             .await;
         assert_eq!(answer.status, StatusCode::OK);
         assert_compare_order(&answer.json(), first, last);
+    }
+}
+
+#[tokio::test]
+async fn get_commit_pages_up_to_300_files_and_keeps_the_whole_commit_stats() {
+    let files: BTreeMap<_, _> = (0..3_001)
+        .map(|n| (format!("file-{n:04}"), "line\n"))
+        .collect();
+    let s = TestServer::builder()
+        .fixture()
+        .register(hubdouble_api_gitdata::register)
+        .entry(json!({
+            "kind": "repository",
+            "owner": "acme",
+            "name": "large-commit",
+            "files": files,
+        }))
+        .start()
+        .await;
+    let client = GoGithub::new(&s).with_token(ALICE_TOKEN);
+    let path = "repos/acme/large-commit/commits/main";
+    for (query, count, first, next) in [
+        ("?per_page=300", 300, "file-0000", Some(2)),
+        ("", 300, "file-0000", Some(2)),
+        ("?per_page=1", 1, "file-0000", Some(2)),
+        ("?page=2", 300, "file-0300", Some(3)),
+        ("?per_page=301", 300, "file-0000", Some(2)),
+        ("?per_page=300&page=10", 300, "file-2700", None),
+        ("?per_page=300&page=11", 0, "", None),
+    ] {
+        let answer = client.get(&format!("{path}{query}")).await;
+        assert_eq!(answer.status, StatusCode::OK);
+        let body = answer.json();
+        let shown = body["files"].as_array().unwrap();
+        assert_eq!(shown.len(), count, "{query}");
+        assert_eq!(
+            body["stats"],
+            json!({"total": 3_001, "additions": 3_001, "deletions": 0})
+        );
+        if let Some(file) = shown.first() {
+            assert_eq!(file["filename"], first);
+        }
+        let link = answer.header("link");
+        if let Some(next) = next {
+            assert!(
+                link.contains(&format!("page={next}>; rel=\"next\"")),
+                "{link}"
+            );
+        } else {
+            assert!(!link.contains("rel=\"next\""), "{link}");
+        }
     }
 }
