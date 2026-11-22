@@ -158,10 +158,15 @@ impl Shared {
 
     pub(crate) async fn reset(&self, snapshot: &Snapshot) -> Result<(), HooksError> {
         self.store.restore(snapshot);
-        let epoch = self.store.epoch();
+        self.forget_older(self.store.epoch()).await
+    }
+
+    pub(crate) async fn forget_older(&self, epoch: u64) -> Result<(), HooksError> {
         {
             let mut st = self.state.lock();
-            let dropped: Vec<Job> = st.queue.drain(..).collect();
+            let (dropped, kept): (Vec<Job>, Vec<Job>) =
+                st.queue.drain(..).partition(|job| job.epoch != epoch);
+            st.queue.extend(kept);
             self.space.add_permits(dropped.len());
             for job in dropped {
                 self.release_job(&job);
