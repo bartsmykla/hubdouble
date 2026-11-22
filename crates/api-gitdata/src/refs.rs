@@ -37,11 +37,7 @@ fn render_ref(ctx: &Ctx<'_>, links: &Links, r: &Ref) -> Result<GitRef, ApiError>
     let kind = ctx.git().object(ctx.tx(), repo, r.target)?.data.kind();
     Ok(GitRef {
         node_id: ref_node_id(repo, &r.name),
-        url: format!(
-            "{}/git/{}",
-            links.api,
-            r.name.strip_prefix("refs/").unwrap_or(&r.name)
-        ),
+        url: format!("{}/git/{}", links.api, r.name),
         object: RefObject {
             kind: kind_name(kind),
             sha: r.target,

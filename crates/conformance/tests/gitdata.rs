@@ -144,6 +144,13 @@ async fn refs_read_by_name_and_by_prefix_and_an_empty_match_is_an_empty_list() {
     assert_eq!(one.status, StatusCode::OK);
     let one = valid("git/get-ref", &one);
     assert_eq!(one["ref"], "refs/heads/main");
+    assert_eq!(
+        one["url"],
+        format!(
+            "{}/repos/acme/public/git/refs/heads/main",
+            client.base().trim_end_matches('/')
+        )
+    );
     assert_eq!(one["object"]["type"], "commit");
     assert_eq!(one["object"]["sha"], main.to_string());
     let tags = valid("git/list-matching-refs", &tags);
@@ -395,7 +402,12 @@ async fn a_commit_and_a_ref_made_through_the_git_data_api_read_back() {
     assert_eq!(body["verification"]["reason"], "unsigned");
     assert_eq!(bad_tree.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(created.status, StatusCode::CREATED);
-    valid("git/create-ref", &created);
+    let url = format!(
+        "{}/repos/acme/public/git/refs/heads/work",
+        client.base().trim_end_matches('/')
+    );
+    assert_eq!(valid("git/create-ref", &created)["url"], url);
+    assert_eq!(created.header("location"), url);
     assert_eq!(again.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(bad_name.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(read.json()["object"]["sha"], sha);
