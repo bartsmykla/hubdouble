@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use hubdouble_model::{AccountKind, App, Event, Installation, RepositorySelection};
+use hubdouble_model::{Access, AccountKind, App, Event, Installation, RepositorySelection};
 use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
 use hubdouble_store::{Accounts, Apps, Deliveries, Installations, OutboxEntry, Repos, Tx, TxMut};
 use serde::Serialize;
@@ -30,6 +30,35 @@ fn subscribes(app: &App, event: &str) -> bool {
     ALWAYS_DELIVERED.contains(&event) || app.events.iter().any(|e| e == event)
 }
 
+fn needs(event: &str, action: Option<&str>) -> Option<(&'static str, Access)> {
+    let level = |write: &[&str]| {
+        if action.is_some_and(|a| write.contains(&a)) {
+            Access::Write
+        } else {
+            Access::Read
+        }
+    };
+    Some(match event {
+        "push" | "create" | "delete" | "release" => ("contents", Access::Read),
+        "issues" | "issue_comment" => ("issues", Access::Read),
+        "pull_request"
+        | "pull_request_review"
+        | "pull_request_review_comment"
+        | "pull_request_review_thread" => ("pull_requests", Access::Read),
+        "check_run" => ("checks", level(&["rerequested", "requested_action"])),
+        "check_suite" => ("checks", level(&["requested", "rerequested"])),
+        "status" => ("statuses", Access::Read),
+        "workflow_run" | "workflow_job" => ("actions", Access::Read),
+        "organization" | "membership" | "member" | "team" => ("members", Access::Read),
+        _ => return None,
+    })
+}
+
+fn granted(i: &Installation, e: &Event) -> bool {
+    needs(e.name, e.action)
+        .is_none_or(|(permission, at_least)| i.permissions.get(permission) >= Some(&at_least))
+}
+
 fn covers(i: &Installation, repo_id: i64) -> bool {
     i.repository_selection == RepositorySelection::All || i.repo_ids.contains(&repo_id)
 }
@@ -44,7 +73,7 @@ pub(crate) fn recipients(tx: &Tx, e: &Event) -> Vec<(i64, Option<Arc<Installatio
         return tx
             .table::<Installations>()
             .get(id)
-            .filter(|i| e.app_id.is_none_or(|a| a == i.app_id) && wants(i.app_id))
+            .filter(|i| e.app_id.is_none_or(|a| a == i.app_id) && granted(i, e) && wants(i.app_id))
             .map(|i| (i.app_id, Some(i.clone())))
             .into_iter()
             .collect();
@@ -69,6 +98,7 @@ pub(crate) fn recipients(tx: &Tx, e: &Event) -> Vec<(i64, Option<Arc<Installatio
             i.account_id == account
                 && i.suspended_at.is_none()
                 && repo.is_none_or(|r| covers(i, r.id))
+                && granted(i, e)
                 && wants(i.app_id)
         })
         .map(|i| (i.app_id, Some(i.clone())))

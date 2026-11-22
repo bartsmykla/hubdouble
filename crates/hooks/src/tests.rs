@@ -5,7 +5,7 @@ use bytes::Bytes;
 use http::Uri;
 use http_body_util::{BodyExt, Full};
 use hubdouble_model::{
-    Account, AccountKind, App, Config, Event, Installation, ManualClock, Repo, RepositorySelection,
+    Access, Account, AccountKind, App, Config, Event, Installation, ManualClock, Repo, RepositorySelection,
     Timestamp, Visibility, Webhook, node_id,
 };
 use hubdouble_store::{
@@ -198,7 +198,10 @@ fn installation(id: i64, app_id: i64, repos: Option<Vec<i64>>) -> Installation {
             RepositorySelection::All
         },
         repo_ids: repos.unwrap_or_default(),
-        permissions: BTreeMap::new(),
+        permissions: BTreeMap::from([
+            ("contents".to_owned(), Access::Read),
+            ("issues".to_owned(), Access::Read),
+        ]),
         events: Vec::new(),
         suspended_at: None,
         suspended_by: None,
@@ -304,6 +307,50 @@ fn recipients_follow_installation_coverage_and_subscription() {
         let mut got: Vec<i64> = store.take_outbox().iter().map(|c| c.entry.app_id).collect();
         got.sort_unstable();
         assert_eq!(got, want, "{name} on {repo_id}");
+    }
+}
+
+#[test]
+fn an_event_reaches_only_installations_granted_its_permission() {
+    // Given two Apps that subscribe to issue_comment and check_run on one repository, and
+    // installation B with contents and checks read but no issues permission
+    let store = world();
+    store
+        .update_quiet(|tx| {
+            let events = ["push", "issue_comment", "check_run"];
+            tx.table_mut::<Apps>().replace(app(APP_A, "alpha", &events))?;
+            tx.table_mut::<Apps>().replace(app(APP_B, "beta", &events))?;
+            let mut a = installation(INSTALL_A, APP_A, None);
+            a.permissions.insert("checks".to_owned(), Access::Write);
+            let mut b = installation(INSTALL_B, APP_B, Some(vec![OTHER]));
+            b.permissions = BTreeMap::from([
+                ("contents".to_owned(), Access::Read),
+                ("checks".to_owned(), Access::Read),
+            ]);
+            tx.table_mut::<Installations>().replace(a)?;
+            tx.table_mut::<Installations>().replace(b)?;
+            Ok(())
+        })
+        .unwrap();
+    let cases = [
+        ("issue_comment", None, vec![APP_A]),
+        ("push", None, vec![APP_A, APP_B]),
+        ("check_run", Some("created"), vec![APP_A, APP_B]),
+        ("check_run", Some("requested_action"), vec![APP_A]),
+    ];
+    for (name, action, want) in cases {
+        // When the event on the repository commits
+        emit_one(
+            &store,
+            Event {
+                action,
+                ..event(name, OTHER)
+            },
+        );
+        // Then only installations with the event's permission at the needed level get it
+        let mut got: Vec<i64> = store.take_outbox().iter().map(|c| c.entry.app_id).collect();
+        got.sort_unstable();
+        assert_eq!(got, want, "{name} {action:?}");
     }
 }
 

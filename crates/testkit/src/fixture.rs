@@ -71,6 +71,7 @@ pub fn seed() -> Vec<Value> {
                "events": ["push", "issues", "issue_comment", "pull_request", "check_run"]}),
         json!({"kind": "installation", "id": INSTALLATION_ID, "app": APP_SLUG, "account": ORG,
                "repositories": [PUBLIC_REPO],
-               "permissions": {"contents": "read", "issues": "write", "metadata": "read"}}),
+               "permissions": {"contents": "read", "issues": "write", "metadata": "read",
+                               "pull_requests": "read"}}),
     ]
 }
