@@ -10,6 +10,21 @@ publish.workspace = true
 
 [dependencies]
 hubdouble-admin.workspace = true
+hubdouble-auth.workspace = true
+hubdouble-gql.workspace = true
+hubdouble-model.workspace = true
+hubdouble-store.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+hubdouble-git.workspace = true
+hubdouble-render.workspace = true
+hubdouble-rest.workspace = true
+serde_json.workspace = true
+
+[[bench]]
+name = "search"
+harness = false
 
 [lints]
 workspace = true

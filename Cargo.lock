@@ -2184,7 +2184,16 @@ dependencies = [
 name = "hubdouble-api-search"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "hubdouble-admin",
+ "hubdouble-auth",
+ "hubdouble-git",
+ "hubdouble-gql",
+ "hubdouble-model",
+ "hubdouble-render",
+ "hubdouble-rest",
+ "hubdouble-store",
+ "serde_json",
 ]
 
 [[package]]
