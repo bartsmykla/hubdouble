@@ -1,0 +1,36 @@
+[package]
+name = "hubdouble-server"
+description = "Environment parsing, listener, HTTP pipeline, error writer, ETag, faults, blobs and graceful shutdown"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hubdouble-admin.workspace = true
+hubdouble-auth.workspace = true
+hubdouble-git.workspace = true
+hubdouble-gql.workspace = true
+hubdouble-hooks.workspace = true
+hubdouble-model.workspace = true
+hubdouble-render.workspace = true
+hubdouble-rest.workspace = true
+hubdouble-store.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+hyper = { workspace = true, features = ["client"] }
+
+[lints]
+workspace = true
