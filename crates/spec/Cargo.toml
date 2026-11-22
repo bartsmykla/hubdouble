@@ -1,0 +1,15 @@
+[package]
+name = "hubdouble-spec"
+description = "GitHub's REST operation table and route segment tree, generated from the pinned OpenAPI bundle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+percent-encoding.workspace = true
+
+[lints]
+workspace = true
