@@ -4,6 +4,10 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "Marvin Attack timing side channel in rsa 0.9, reached only through pgp. hubdouble is a local test double: it signs with a fixed, public Ed25519 test key, never with RSA, and holds no secret an attacker can time" },
+    { id = "RUSTSEC-2026-0387", reason = "Non-constant-time operations in crypto-bigint 0.5, reached only through pgp's cx448. hubdouble is a local test double: it signs with a fixed, public Ed25519 test key, never with X448, and holds no secret an attacker can time" },
+]
 
 [licenses]
 version = 2
