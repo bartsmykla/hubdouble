@@ -154,17 +154,46 @@ fn routes_needing(case: Case) -> Vec<(Method, String)> {
 }
 
 fn concrete(template: &str, owner: &str, repo: &str) -> String {
+    let repository_id = fixture::PRIVATE_REPO_ID.to_string();
     template
         .split('/')
         .map(|s| match s {
             "{owner}" | "{org}" => owner,
             "{repo}" => repo,
-            "{repository_id}" => "999999999",
+            "{repository_id}" => &repository_id,
             s if s.starts_with('{') => "1",
             s => s,
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn installation_token(server: &TestServer, token: &str, app_id: i64, installation_id: i64) {
+    let now = server.clock.now();
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            let id = tx.next_id();
+            tx.table_mut::<Tokens>().insert(Token {
+                id,
+                token: token.to_owned(),
+                kind: TokenKind::Installation,
+                app_id: Some(app_id),
+                installation_id: Some(installation_id),
+                user_id: None,
+                repo_ids: None,
+                permissions: BTreeMap::new(),
+                scopes: Vec::new(),
+                expires_at: None,
+                revoked: false,
+                owner_seeded: false,
+                created_at: now,
+            })?;
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("add the token {token}: {e:?}"));
 }
 
 async fn send(client: &GoGithub, method: &Method, path: &str) -> Answer {
@@ -176,21 +205,28 @@ async fn send(client: &GoGithub, method: &Method, path: &str) -> Answer {
 }
 
 #[tokio::test]
-async fn every_repository_route_answers_404_for_a_repository_that_does_not_exist() {
-    // Given a user whose token is valid and a repository name that no account holds
+async fn every_repository_route_answers_404_for_a_private_repository_outside_the_installation() {
+    // Given an installation token of the fixture App, whose installation covers only the
+    // public repository, and the org's existing private repository
     let server = TestServer::builder()
         .frame(hubdouble_api::register_all)
         .fixture()
         .start()
         .await;
-    let client = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    installation_token(
+        &server,
+        "ghs_public_only",
+        fixture::APP_ID,
+        fixture::INSTALLATION_ID,
+    );
+    let client = GoGithub::new(&server).with_token("ghs_public_only");
 
     for (method, template) in routes_needing(Case::UnseenRepository) {
-        // When the route is called on that repository
-        let path = concrete(&template, fixture::ORG, "does-not-exist");
+        // When the route is called on that private repository
+        let path = concrete(&template, fixture::ORG, fixture::PRIVATE_REPO);
         let answer = send(&client, &method, &path).await;
 
-        // Then GitHub's answer for a repository the caller cannot see is 404
+        // Then GitHub answers 404, as for a repository that does not exist
         assert_eq!(answer.status, StatusCode::NOT_FOUND, "{method} {path}");
     }
 }
@@ -213,31 +249,7 @@ async fn every_route_with_a_permission_answers_403_to_an_installation_without_it
         )
         .start()
         .await;
-    let now = server.clock.now();
-    server
-        .server
-        .services()
-        .store
-        .update(|tx| {
-            let id = tx.next_id();
-            tx.table_mut::<Tokens>().insert(Token {
-                id,
-                token: "ghs_metadata_only".to_owned(),
-                kind: TokenKind::Installation,
-                app_id: Some(4009),
-                installation_id: Some(5009),
-                user_id: None,
-                repo_ids: None,
-                permissions: BTreeMap::new(),
-                scopes: Vec::new(),
-                expires_at: None,
-                revoked: false,
-                owner_seeded: false,
-                created_at: now,
-            })?;
-            Ok(())
-        })
-        .unwrap();
+    installation_token(&server, "ghs_metadata_only", 4009, 5009);
     let client = GoGithub::new(&server).with_token("ghs_metadata_only");
 
     for (method, template) in routes_needing(Case::MissingPermission) {

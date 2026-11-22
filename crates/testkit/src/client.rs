@@ -7,6 +7,8 @@ use http::{HeaderMap, Method, StatusCode};
 use serde_json::Value;
 
 use hubdouble_admin::Services;
+use hubdouble_auth::{authenticate, can_see};
+use hubdouble_model::Repo;
 use hubdouble_store::{Accounts, Repos};
 
 use crate::TestServer;
@@ -106,26 +108,32 @@ fn case(x: &Exchange<'_>, c: &Checked, services: Option<&Services>) -> Case {
         200..=399 => Case::Success,
         403 if x.headers.contains_key("x-accepted-github-permissions") => Case::MissingPermission,
         422 => Case::Invalid,
-        404 if services.is_some_and(|s| names_absent_repository(s, &c.route, x.path)) => {
+        404 if services.is_some_and(|s| names_hidden_repository(s, &c.route, x)) => {
             Case::UnseenRepository
         }
         _ => Case::Other,
     }
 }
 
-fn names_absent_repository(services: &Services, route: &str, path: &str) -> bool {
-    let parts: Vec<&str> = answer::api_path(path)
+fn names_hidden_repository(services: &Services, route: &str, x: &Exchange<'_>) -> bool {
+    let parts: Vec<&str> = answer::api_path(x.path)
         .trim_start_matches('/')
         .split('/')
         .collect();
-    let absent = |f: &dyn Fn(&hubdouble_store::Tx) -> bool| {
-        services.store.view(|tx| Ok(f(tx))).unwrap_or(false)
+    let hidden = |find: &dyn Fn(&hubdouble_store::Tx) -> Option<Arc<Repo>>| {
+        services
+            .store
+            .view(|tx| {
+                let actor = authenticate(tx, &*services.clock, x.request_headers)?;
+                Ok(find(tx).is_some_and(|repo| !can_see(tx, &actor, &repo)))
+            })
+            .unwrap_or(false)
     };
     if parts.first() == Some(&"repositories") {
         return parts
             .get(1)
             .and_then(|id| id.parse::<i64>().ok())
-            .is_some_and(|id| absent(&|tx| tx.table::<Repos>().get(id).is_none()));
+            .is_some_and(|id| hidden(&|tx| tx.table::<Repos>().get(id).cloned()));
     }
     let template: Vec<&str> = route
         .split_once(' ')
@@ -142,11 +150,11 @@ fn names_absent_repository(services: &Services, route: &str, path: &str) -> bool
     let (Some(owner), Some(repo)) = (at("{owner}"), at("{repo}")) else {
         return false;
     };
-    absent(&|tx| {
+    hidden(&|tx| {
         tx.table::<Accounts>()
             .by_login(owner)
             .and_then(|o| tx.table::<Repos>().by_name(o.id, repo))
-            .is_none()
+            .cloned()
     })
 }
 
