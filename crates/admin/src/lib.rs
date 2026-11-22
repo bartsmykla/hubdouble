@@ -2,6 +2,7 @@ mod contract;
 mod faults;
 mod history;
 mod http;
+mod installation_hook;
 mod kinds;
 mod log;
 mod reads;

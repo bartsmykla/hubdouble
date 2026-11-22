@@ -581,6 +581,7 @@ pub(crate) fn app_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<()
         created_at: now,
         updated_at: now,
     })?;
+    hubdouble_hooks::ping(&mut ctx.tx, id);
     Ok(())
 }
 
@@ -665,7 +666,7 @@ pub(crate) fn installation_kind(
     }
     let id = id_or_next(ctx, s.id);
     let now = ctx.clock.now();
-    ctx.tx.table_mut::<Installations>().insert(Installation {
+    let installation = ctx.tx.table_mut::<Installations>().insert(Installation {
         id,
         node_id: node_id::entity(node_id::INSTALLATION, id),
         app_id: app.id,
@@ -679,5 +680,5 @@ pub(crate) fn installation_kind(
         created_at: now,
         updated_at: now,
     })?;
-    Ok(())
+    crate::installation_hook::created(&mut ctx.tx, &installation, &app, &account)
 }
