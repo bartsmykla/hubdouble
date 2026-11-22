@@ -189,7 +189,7 @@ Seeded commits and tags are deterministic: author, committer and tagger default 
 | `GET .../actions/jobs/{id}/logs` | `302` to `/_blobs/{id}`; the target answers `HEAD` with `Content-Length` and `GET` with `Range` as `206` (client `internal/dispatch/evidence.go:190-240`) | T9 |
 | `GET .../releases/assets/{id}` | JSON by default; `Accept: application/octet-stream` answers `302` to the bytes (`internal/dispatch/assets.go:181`) | T10 |
 | `GET .../git/blobs/{sha}` | JSON by default; `Accept: application/vnd.github.raw` or `application/vnd.github.v3.raw` (go-github's `GetBlobRaw`, client `internal/dispatch/autofix_paths.go:184`) answers the raw bytes | T4 |
-| `POST` and `PATCH .../check-runs` | `actions[]` with `label`, `description`, `identifier` stored and returned (`internal/dispatch/checks.go:172`) | T8 |
+| `POST` and `PATCH .../check-runs` | `actions[]` with `label`, `description`, `identifier` stored, so a requested action names one of them (the REST answer has no actions member, as on GitHub) (`internal/dispatch/checks.go:172`) | T8 |
 | `GET .../commits/{ref}` | JSON by default; `Accept: application/vnd.github.v3.sha` answers the 40-hex SHA as text, and `304` when `If-None-Match` holds that SHA (go-github `GetCommitSHA1`, client `internal/dispatch/review_runtime.go:17`, `internal/reviewadmission/runtime.go:126`) | T4 |
 | `GET .../contents/{path}` | file, directory listing, and `application/vnd.github.raw`; the root path | T4 |
 | `DELETE .../pulls/{n}/requested_reviewers` | JSON body with `reviewers` and `team_reviewers`; `422` without `reviewers` (`internal/dispatch/dispatch.go:944-955`) | T6 |
