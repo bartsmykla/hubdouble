@@ -406,7 +406,17 @@ async fn log_range(server: &TestServer, path: &str) {
         .await;
     assert_eq!(logs.status, StatusCode::FOUND);
     let path = logs.header("location").strip_prefix(&server.base).unwrap();
-    assert!(path.starts_with("/_blobs/"));
+    let id = path.strip_prefix("/_blobs/").unwrap().as_bytes();
+    assert_eq!(id.len(), 36);
+    for (index, byte) in id.iter().enumerate() {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            assert_eq!(*byte, b'-');
+        } else {
+            assert!(byte.is_ascii_hexdigit());
+        }
+    }
+    assert_eq!(id[14], b'4');
+    assert!(matches!(id[19], b'8' | b'9' | b'a' | b'b'));
     let root = GoGithub::new(server);
     let metadata = root.call(Method::HEAD, path).await;
     assert_eq!(metadata.status, StatusCode::OK);
