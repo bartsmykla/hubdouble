@@ -206,6 +206,7 @@ Use `selected` to give an installation access to named repositories. The reposit
 | `login` | User login string | Yes | None |
 | `role` | `admin` or `member` | No | Current role, or `member` for a new membership |
 | `state` | `active` or `pending` | No | Current state, or `active` for a new membership |
+| `public` | Boolean | No | Current visibility, or `false` for a new membership |
 | `sender` | User login string | No | The first active org admin, or the org if it has no active admin |
 
 ```yaml

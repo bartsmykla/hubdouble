@@ -67,7 +67,7 @@ The App routes accept a numeric App ID in place of the slug. App and user reads 
 | `DELETE /_hubdouble/repos/{owner}/{repo}` | Optional `sender` | `204`. Removes the repository. |
 | `PATCH /_hubdouble/releases/{release_id}` | Optional `sender`, `tag_name`, `target_commitish`, `name`, `body`, `draft`, and `prerelease`. | `200` with the updated release object. |
 | `GET /_hubdouble/org/{org}/members/{login}` | None | `200` with the membership object, including `url`, `organization_url`, `organization`, `user`, `role`, and `state`. |
-| `PUT /_hubdouble/org/{org}/members/{login}` | Optional `sender`, `role` (`member` or `admin`), and `state` (`active` or `pending`). A new membership defaults to `member` and `active`. | `204`. Creates or updates the membership. |
+| `PUT /_hubdouble/org/{org}/members/{login}` | Optional `sender`, `role` (`member` or `admin`), `state` (`active` or `pending`), and `public` (boolean). A new membership defaults to `member`, `active`, and private. | `204`. Creates or updates the membership. |
 | `DELETE /_hubdouble/org/{org}/members/{login}` | Optional `sender` | `204`. Removes the membership. |
 | `PUT /_hubdouble/repository/{owner}/{repo}/collaborators/{login}` | Required `permission` and optional `sender` | `204`. Sets the collaborator's permission. |
 | `DELETE /_hubdouble/repository/{owner}/{repo}/collaborators/{login}` | Optional `sender` | `204`. Removes the collaborator. |

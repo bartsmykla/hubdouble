@@ -13,7 +13,7 @@ use hubdouble_store::{Accounts, Memberships, Repos, Teams, Tx, TxMut};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use crate::{admin_teams, events, rest};
+use crate::{PublicMemberships, admin_teams, events, rest};
 
 pub fn register(admin: &mut Admin) {
     admin.kind("org_membership", seed_membership);
@@ -121,6 +121,7 @@ struct MembershipSeed {
 struct MembershipInput {
     role: Option<OrgRole>,
     state: Option<MembershipState>,
+    public: Option<bool>,
     sender: Option<String>,
 }
 
@@ -180,6 +181,15 @@ fn set_membership(
         state,
     };
     tx.table_mut::<Memberships>().replace(membership.clone())?;
+    if let Some(public) = input.public {
+        let mut table = tx.table_mut::<PublicMemberships>();
+        let ids = &mut table.get_mut().0;
+        if public {
+            ids.insert(id);
+        } else {
+            ids.remove(&id);
+        }
+    }
     match (old_state, state) {
         (None, MembershipState::Pending) => {
             events::invitation(tx, &source, &membership, &user, now);
@@ -233,6 +243,9 @@ fn remove_membership(
         .table_mut::<Memberships>()
         .remove(id)
         .ok_or_else(ApiError::not_found)?;
+    if tx.table::<PublicMemberships>().0.contains(&id) {
+        tx.table_mut::<PublicMemberships>().get_mut().0.remove(&id);
+    }
     if membership.state == MembershipState::Active {
         events::organization(tx, &source, "member_removed", &membership, &user);
         let teams: Vec<_> = tx

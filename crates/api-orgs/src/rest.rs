@@ -1,16 +1,23 @@
 use std::sync::Arc;
 
 use hubdouble_auth::{self as auth, Actor, Target};
-use hubdouble_model::{Account, AccountKind, ApiError, Repo, Team, TeamMember};
+use hubdouble_model::{
+    Account, AccountKind, ApiError, MembershipState, Repo, Requirement, Team, TeamMember,
+};
 use hubdouble_render::{RepoPermissions, Repository, TeamMembership};
 use hubdouble_rest::{Ctx, Registry, Reply};
-use hubdouble_store::{Accounts, Teams, Tx};
+use hubdouble_store::{Accounts, Memberships, Teams, Tx};
 
 use crate::hierarchy::TeamViewer;
-use crate::{MEMBERS, METADATA, TEAM_REPOSITORY, hierarchy, view};
+use crate::{MEMBERS, METADATA, PublicMemberships, TEAM_REPOSITORY, hierarchy, view};
 
 pub fn register(rest: &mut Registry) {
     rest.handle("orgs/check-membership-for-user", MEMBERS, check_member);
+    rest.handle(
+        "orgs/check-public-membership-for-user",
+        Requirement::public(),
+        check_public_member,
+    );
     rest.handle("teams/list", MEMBERS, list_teams);
     rest.handle("teams/get-by-name", MEMBERS, get_team);
     rest.handle("teams/get-membership-for-user-in-org", MEMBERS, membership);
@@ -58,6 +65,18 @@ fn check_member(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     }
     let user = user(ctx.tx(), login)?;
     hierarchy::org_role(ctx.tx(), org.id, user.id).ok_or_else(ApiError::not_found)?;
+    Ok(Reply::empty())
+}
+
+fn check_public_member(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    let tx = ctx.tx();
+    let org = organization(tx, ctx.param("org")?)?;
+    let user = user(tx, ctx.param("username")?)?;
+    tx.table::<Memberships>()
+        .of(org.id, user.id)
+        .filter(|m| m.state == MembershipState::Active)
+        .filter(|m| tx.table::<PublicMemberships>().0.contains(&m.id))
+        .ok_or_else(ApiError::not_found)?;
     Ok(Reply::empty())
 }
 

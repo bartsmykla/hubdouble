@@ -194,6 +194,35 @@ async fn org_and_team_reads_use_members_grants_and_the_team_hierarchy() {
 }
 
 #[tokio::test]
+async fn organization_membership_redirect_ends_at_public_membership() {
+    let server = start(setup().entry(json!({
+        "kind": "org_membership", "org": "acme", "login": "alice", "public": true,
+    })))
+    .await;
+    let client = GoGithub::enterprise(&server).with_token(fixture::CAROL_TOKEN);
+    for (user, status) in [("alice", 204), ("bob", 404), ("carol", 404)] {
+        let response = assert_status(&client, &format!("orgs/acme/members/{user}"), 302).await;
+        let path = response
+            .header("location")
+            .strip_prefix(client.base())
+            .unwrap();
+        assert_eq!(path, format!("orgs/acme/public_members/{user}"));
+        assert_status(&client, path, status).await;
+    }
+    let anonymous = GoGithub::enterprise(&server);
+    assert_status(&anonymous, "orgs/acme/public_members/ALICE", 204).await;
+    let update = server
+        .admin(
+            Method::PUT,
+            "org/acme/members/alice",
+            Some(&json!({"public": false})),
+        )
+        .await;
+    assert_eq!(update.status, StatusCode::NO_CONTENT);
+    assert_status(&anonymous, "orgs/acme/public_members/alice", 404).await;
+}
+
+#[tokio::test]
 async fn repository_checks_return_team_permissions_and_legacy_collaborator_roles() {
     let server = start(setup()).await;
     let client = GoGithub::enterprise(&server).with_token(MEMBERS_TOKEN);
