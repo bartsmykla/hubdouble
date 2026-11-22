@@ -107,12 +107,39 @@ fn base_payload(tx: &Tx, e: &Event, mut p: Map<String, Value>) -> Map<String, Va
     p
 }
 
+fn webhook_label(l: &mut Value) {
+    if let Some(l) = l.as_object_mut() {
+        l.remove("archived_at");
+        l.remove("archived_by");
+    }
+}
+
+/// GitHub's webhook `label` has no `archived_at` or `archived_by` and its webhook `issue` has no
+/// `closed_by`, which the REST forms that tracks render carry.
+fn webhook_form(p: &mut Map<String, Value>) {
+    if let Some(l) = p.get_mut("label") {
+        webhook_label(l);
+    }
+    for holder in ["issue", "pull_request"] {
+        let Some(h) = p.get_mut(holder).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        if holder == "issue" {
+            h.remove("closed_by");
+        }
+        if let Some(labels) = h.get_mut("labels").and_then(Value::as_array_mut) {
+            labels.iter_mut().for_each(webhook_label);
+        }
+    }
+}
+
 pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
     let recipients = recipients(tx, &e);
     if recipients.is_empty() {
         return;
     }
-    let payload = std::mem::take(&mut e.payload);
+    let mut payload = std::mem::take(&mut e.payload);
+    webhook_form(&mut payload);
     let mut payload = base_payload(tx, &e, payload);
     let mut recipients = recipients.into_iter().peekable();
     while let Some((app_id, installation)) = recipients.next() {

@@ -35,7 +35,7 @@ pub struct SimpleUser {
 impl SimpleUser {
     #[must_use]
     pub fn new(urls: &Urls, a: &m::Account) -> SimpleUser {
-        let api = format!("{}/users/{}", urls.api, a.login);
+        let api = format!("{}/users/{}", urls.api, crate::escape(&a.login));
         let html_url = match (a.kind, a.login.strip_suffix("[bot]")) {
             (m::AccountKind::Bot, Some(slug)) => format!("{}/apps/{slug}", urls.web),
             _ => format!("{}/{}", urls.web, a.login),
