@@ -18,7 +18,7 @@ const NO_GITHUB_422: &str = "the pinned description lists 422, but no input sent
 const APP_ONLY_422: &str =
     "the pinned description lists 422, the docs name no cause, and only an App can call it";
 
-const PENDING: &[(&str, Case, &str)] = &[
+const DESCRIBED_NOT_SENT: &[(&str, Case, &str)] = &[
     (
         "GET /app/hook/deliveries/{delivery_id}",
         Case::Invalid,
@@ -293,11 +293,13 @@ fn every_inventory_route_gets_a_checked_answer_for_every_case_that_applies() {
     let mut missing = Vec::new();
     for route in inventory() {
         for case in required(&registry, &route) {
-            let pending = PENDING.iter().any(|(r, c, _)| *r == route && *c == case);
+            let unsent = DESCRIBED_NOT_SENT
+                .iter()
+                .any(|(r, c, _)| *r == route && *c == case);
             let found = proved.contains(&(route.clone(), case));
-            if found == pending {
+            if found == unsent {
                 let state = if found {
-                    "pending but proved"
+                    "described-not-sent but proved"
                 } else {
                     "no checked"
                 };
