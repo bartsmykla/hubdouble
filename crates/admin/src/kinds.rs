@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use hubdouble_model::node_id;
 use hubdouble_model::{
-    Access, Account, AccountKind, ApiError, App, Collaborator, Installation, Membership,
+    Access, Account, AccountKind, ApiError, App, Collaborator, Event, Installation, Membership,
     MembershipState, OrgRole, Repo, RepoRole, RepositorySelection, Timestamp, Token, TokenKind,
     Visibility, Webhook,
 };
@@ -368,6 +368,8 @@ struct RepoSeed {
     tags: Vec<TagSeed>,
     #[serde(default)]
     commits: Vec<CommitSeed>,
+    #[serde(default)]
+    sender: Option<String>,
 }
 
 pub(crate) fn repository_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<(), ApiError> {
@@ -382,6 +384,10 @@ pub(crate) fn apply_repository(
 ) -> Result<(), ApiError> {
     let s: RepoSeed = decode(v)?;
     let owner = account(&ctx.tx, &s.owner)?.id;
+    let sender = match &s.sender {
+        Some(login) => user(&ctx.tx, login)?.id,
+        None => owner,
+    };
     let visibility = match (s.visibility.as_deref(), s.private) {
         (Some(v), _) => Visibility::from_rest(v).ok_or_else(|| {
             ApiError::unprocessable(format!("visibility {v} is not public, private or internal"))
@@ -472,6 +478,19 @@ pub(crate) fn apply_repository(
             ..repo
         })?;
     }
+    hubdouble_hooks::emit(
+        &mut ctx.tx,
+        Event {
+            name: "repository",
+            action: Some("created"),
+            repo_id: Some(id),
+            org_id: None,
+            sender_id: sender,
+            app_id: None,
+            installation_id: None,
+            payload: serde_json::Map::new(),
+        },
+    );
     Ok(())
 }
 

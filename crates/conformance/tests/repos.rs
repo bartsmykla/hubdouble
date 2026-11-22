@@ -111,27 +111,13 @@ fn delivered_as(deliveries: &[Delivery], event: &str, action: Option<&str>) -> V
             panic!("no {event}.{action:?} delivery in {got:?}")
         });
     let payload = found.json();
-    let mut octokit = payload.clone();
     if event == "release" {
         let release = &payload["release"];
         if let Err(e) = validate::openapi_response("repos/get-release-by-tag", 200, release) {
             panic!("{event}.{action:?} release: {e:?}");
         }
-        let newer = |v: &mut Value, keys: &[&str]| {
-            if let Some(o) = v.as_object_mut() {
-                for k in keys {
-                    o.remove(*k);
-                }
-            }
-        };
-        newer(&mut octokit["release"], &["immutable", "updated_at"]);
-        if let Some(assets) = octokit["release"]["assets"].as_array_mut() {
-            for a in assets {
-                newer(a, &["digest"]);
-            }
-        }
     }
-    if let Err(e) = validate::webhook_payload(event, action, &octokit) {
+    if let Err(e) = validate::webhook_payload(event, action, &payload) {
         panic!("{event}.{action:?}: {e:?}");
     }
     payload
@@ -752,6 +738,13 @@ async fn repository_admin_writes_deliver_their_repository_actions() {
     // Given
     let server = start(watcher().to_vec()).await;
     // When
+    let create = server
+        .admin(
+            Method::POST,
+            "repository",
+            Some(&json!({"owner": "acme", "name": "fresh", "sender": "alice"})),
+        )
+        .await;
     let edit = server
         .admin(
             Method::PATCH,
@@ -767,8 +760,12 @@ async fn repository_admin_writes_deliver_their_repository_actions() {
         .admin(Method::DELETE, "repos/acme/prompts", Some(&json!({})))
         .await;
     let gone = alice(&server).get("repos/acme/prompts").await;
-    let got = deliveries(&server, 5).await;
+    let got = deliveries(&server, 6).await;
     // Then
+    assert!(create.status.is_success(), "{:?}", create.body);
+    let created = delivered(&got, "repository", "created");
+    assert_eq!(created["repository"]["full_name"], json!("acme/fresh"));
+    assert_eq!(created["sender"]["login"], json!("alice"));
     assert_eq!(edit.status, StatusCode::OK);
     assert_eq!(edit.json()["full_name"], json!("acme/prompts"));
     assert_eq!(renamed.status, StatusCode::OK);

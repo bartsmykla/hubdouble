@@ -36,18 +36,34 @@ static OPENAPI: LazyLock<OpenApi> = LazyLock::new(|| {
     OpenApi { doc, registry }
 });
 
-fn allow_user_view_type(mut schema: Value) -> Value {
-    if let Some(props) = schema
-        .pointer_mut("/definitions/user/properties")
-        .and_then(Value::as_object_mut)
-    {
-        props.insert("user_view_type".to_owned(), json!({ "type": "string" }));
+fn allow_newer_fields(mut schema: Value) -> Value {
+    let newer = [
+        ("user", "user_view_type", json!({ "type": "string" })),
+        ("release", "immutable", json!({ "type": "boolean" })),
+        (
+            "release",
+            "updated_at",
+            json!({ "type": ["string", "null"] }),
+        ),
+        (
+            "release-asset",
+            "digest",
+            json!({ "type": ["string", "null"] }),
+        ),
+    ];
+    for (definition, field, field_schema) in newer {
+        if let Some(props) = schema
+            .pointer_mut(&format!("/definitions/{definition}/properties"))
+            .and_then(Value::as_object_mut)
+        {
+            props.insert(field.to_owned(), field_schema);
+        }
     }
     schema
 }
 
 static OCTOKIT_REGISTRY: LazyLock<(Value, Registry<'static>)> = LazyLock::new(|| {
-    let schema: Value = allow_user_view_type(
+    let schema: Value = allow_newer_fields(
         serde_json::from_str(OCTOKIT).unwrap_or_else(|e| panic!("parse the octokit schema: {e}")),
     );
     let registry = Registry::new()
