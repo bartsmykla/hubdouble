@@ -366,6 +366,68 @@ fn an_event_reaches_only_installations_granted_its_permission() {
 }
 
 #[test]
+fn an_app_with_checks_write_gets_check_events_without_subscribing() {
+    // Given App A with checks write and App B with checks read, neither subscribed to check
+    // events, and installations that grant both checks write
+    let store = world();
+    store
+        .update_quiet(|tx| {
+            let mut a = app(APP_A, "alpha", &["push"]);
+            a.permissions.insert("checks".to_owned(), Access::Write);
+            let mut b = app(APP_B, "beta", &["push"]);
+            b.permissions.insert("checks".to_owned(), Access::Read);
+            tx.table_mut::<Apps>().replace(a)?;
+            tx.table_mut::<Apps>().replace(b)?;
+            let mut ia = installation(INSTALL_A, APP_A, None);
+            ia.permissions.insert("checks".to_owned(), Access::Write);
+            let mut ib = installation(INSTALL_B, APP_B, Some(vec![OTHER]));
+            ib.permissions.insert("checks".to_owned(), Access::Write);
+            tx.table_mut::<Installations>().replace(ia)?;
+            tx.table_mut::<Installations>().replace(ib)?;
+            Ok(())
+        })
+        .unwrap();
+    for (name, action) in [
+        ("check_run", Some("created")),
+        ("check_run", Some("requested_action")),
+        ("check_suite", Some("completed")),
+        ("check_suite", Some("rerequested")),
+    ] {
+        // When the check event on the repository commits
+        emit_one(
+            &store,
+            Event {
+                action,
+                ..event(name, OTHER)
+            },
+        );
+        // Then only the App with checks write gets it
+        let got: Vec<i64> = store.take_outbox().iter().map(|c| c.entry.app_id).collect();
+        assert_eq!(got, [APP_A], "{name} {action:?}");
+    }
+    // And an installation that grants only checks read still misses the write-level actions
+    store
+        .update_quiet(|tx| {
+            let mut ia = installation(INSTALL_A, APP_A, None);
+            ia.permissions.insert("checks".to_owned(), Access::Read);
+            tx.table_mut::<Installations>().replace(ia)?;
+            Ok(())
+        })
+        .unwrap();
+    for (action, want) in [("created", vec![APP_A]), ("requested_action", vec![])] {
+        emit_one(
+            &store,
+            Event {
+                action: Some(action),
+                ..event("check_run", OTHER)
+            },
+        );
+        let got: Vec<i64> = store.take_outbox().iter().map(|c| c.entry.app_id).collect();
+        assert_eq!(got, want, "check_run {action}");
+    }
+}
+
+#[test]
 fn installation_event_reaches_only_its_app_with_the_data_before_the_change() {
     // Given two Apps installed on one account
     let store = world();

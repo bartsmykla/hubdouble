@@ -27,7 +27,10 @@ fn hook_active(app: &App) -> bool {
 }
 
 fn subscribes(app: &App, event: &str) -> bool {
-    ALWAYS_DELIVERED.contains(&event) || app.events.iter().any(|e| e == event)
+    ALWAYS_DELIVERED.contains(&event)
+        || app.events.iter().any(|e| e == event)
+        || matches!(event, "check_run" | "check_suite")
+            && app.permissions.get("checks") >= Some(&Access::Write)
 }
 
 /// What an installation must hold to receive an event.
