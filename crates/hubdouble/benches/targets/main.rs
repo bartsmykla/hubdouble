@@ -184,12 +184,14 @@ struct Receiver {
     runtime: Runtime,
     url: String,
     payload_bytes: Arc<AtomicUsize>,
+    accepted: Arc<AtomicUsize>,
 }
 
 impl Receiver {
     fn start(delay: Duration) -> Receiver {
         let runtime = runtime(1);
         let payload_bytes = Arc::new(AtomicUsize::new(0));
+        let accepted = Arc::new(AtomicUsize::new(0));
         let listener = runtime
             .block_on(TcpListener::bind("127.0.0.1:0"))
             .unwrap_or_else(|e| fail("bind the receiver", e));
@@ -197,8 +199,10 @@ impl Receiver {
             .local_addr()
             .unwrap_or_else(|e| fail("read the receiver address", e));
         let size = payload_bytes.clone();
+        let count = accepted.clone();
         runtime.spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
+                count.fetch_add(1, Ordering::Relaxed);
                 let size = size.clone();
                 tokio::spawn(async move {
                     let service =
@@ -226,7 +230,21 @@ impl Receiver {
             runtime,
             url: format!("http://{addr}/hook"),
             payload_bytes,
+            accepted,
         }
+    }
+
+    fn connections_row(&self, load: &str) -> Row {
+        let pool = hubdouble_hooks::Options::default().workers;
+        Row::new(
+            format!("{load}: webhook connections opened"),
+            Some(float(self.accepted.load(Ordering::Relaxed))),
+            "conns",
+            Goal::Below(float(pool) + 0.5),
+        )
+        .note(format!(
+            "delivery attempts share a pool of {pool} keep-alive connections"
+        ))
     }
 }
 
@@ -900,6 +918,7 @@ fn in_process(dir: &Path, rows: &mut Vec<Row>) {
         "µs",
         Goal::Below(20.0),
     ));
+    rows.push(receiver.connections_row("In-process rows"));
     drop(receiver);
     running.runtime.shutdown_background();
 
@@ -1173,6 +1192,7 @@ fn slow_receiver(dir: &Path, client_runtime: &Runtime, rows: &mut Vec<Row>) {
             .map(|(peak, before)| peak.saturating_sub(before)),
     };
     run.rows(rows);
+    rows.push(receiver.connections_row("Slow receiver"));
     running.runtime.shutdown_background();
     receiver.runtime.shutdown_background();
 }
@@ -1338,6 +1358,7 @@ fn fast_receiver(dir: &Path, client_runtime: &Runtime, rows: &mut Vec<Row>) {
             "{FAST_EVENTS} deliveries of {size} B, {answered} answered 200, {held:.1} MiB of requests and responses kept"
         )),
     );
+    rows.push(receiver.connections_row("Fast receiver"));
     running.runtime.shutdown_background();
     receiver.runtime.shutdown_background();
 }
