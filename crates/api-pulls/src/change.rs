@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use http::StatusCode;
 use hubdouble_admin::SeedCtx;
-use hubdouble_auth::Actor;
+use hubdouble_auth::{Actor, repo_role};
 use hubdouble_git::{Git, GitError};
 use hubdouble_model::{
-    ApiError, FieldError, Issue, IssueState, Pull, PullRef, Repo, Timestamp, node_id,
+    ApiError, FieldError, Issue, IssueState, Pull, PullRef, Repo, RepoRole, Timestamp, node_id,
 };
 use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::{Accounts, Counters, Issues, Repos, Sequence, Tx, TxMut};
@@ -268,6 +268,7 @@ fn nullable_body<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BodyEdit, D::
 pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let input: Edit = ctx.body()?;
     let mut issue = Issue::clone(read::issue(ctx)?);
+    may_edit(ctx, &issue)?;
     let before = issue.state;
     let author = sender(ctx.actor())?;
     let now = ctx.now();
@@ -302,6 +303,35 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         events::emit(tx, git, &issue, author, action, json!({}))?;
     }
     Reply::json(&render::detail(ctx.git(), ctx.tx(), ctx.urls(), &issue)?)
+}
+
+fn can_push(tx: &Tx, actor: &Actor, repo: &Repo) -> bool {
+    match actor {
+        Actor::User { user, .. } => repo_role(tx, user.id, repo) >= Some(RepoRole::Write),
+        _ => true,
+    }
+}
+
+fn may_edit(ctx: &Ctx<'_>, issue: &Issue) -> Result<(), ApiError> {
+    let tx = ctx.tx();
+    let actor = ctx.actor();
+    if let Actor::User { user, .. } = actor
+        && user.id == issue.user_id
+    {
+        return Ok(());
+    }
+    let head = issue
+        .pull
+        .as_ref()
+        .and_then(|p| p.head.repo_id)
+        .and_then(|id| tx.table::<Repos>().get(id));
+    if can_push(tx, actor, ctx.repo()?) || head.is_some_and(|h| can_push(tx, actor, h)) {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(
+            "Must have write access to the repository or be the author",
+        ))
+    }
 }
 
 fn edit(

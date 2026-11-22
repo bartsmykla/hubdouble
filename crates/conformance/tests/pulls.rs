@@ -50,6 +50,49 @@ async fn get(client: &GoGithub, path: &str, op: &str) -> Value {
 }
 
 #[tokio::test]
+async fn only_the_author_or_a_writer_edits_a_pull_request() {
+    // Given PR 1 by alice and PR 2 by carol, who has no role on acme/public
+    let mut by_carol = seeded("develop", false);
+    by_carol["user"] = json!(fixture::CAROL);
+    let server = fixture()
+        .entry(seeded("main", false))
+        .entry(by_carol)
+        .start()
+        .await;
+    let carol = GoGithub::enterprise(&server).with_token(fixture::CAROL_TOKEN);
+    // When
+    let edit_other = carol
+        .call_json(Method::PATCH, NUM, &json!({"title": "Taken over"}))
+        .await;
+    let edit_own = carol
+        .call_json(
+            Method::PATCH,
+            "repos/acme/public/pulls/2",
+            &json!({"title": "Mine"}),
+        )
+        .await;
+    // Then
+    assert_eq!(edit_other.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        get(&carol, NUM, "pulls/get").await["title"],
+        "Feature against main"
+    );
+    assert_eq!(
+        checked("pulls/update", StatusCode::OK, &edit_own)["title"],
+        "Mine"
+    );
+    assert_eq!(
+        edit(
+            &writer(&server),
+            "repos/acme/public/pulls/2",
+            json!({"title": "Edited by a writer"})
+        )
+        .await["title"],
+        "Edited by a writer"
+    );
+}
+
+#[tokio::test]
 async fn list_filters_pages_and_sorts_before_render() {
     // Given go-github v93 github/pulls.go:185, with the options from internal/versioning/change_projects.go:873-877.
     let server = fixture()
