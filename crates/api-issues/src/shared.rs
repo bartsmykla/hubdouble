@@ -26,7 +26,13 @@ pub(crate) const WRITE: Requirement = Requirement {
     scopes: &[],
 };
 
-pub(crate) const CREATE_ISSUE: Requirement = Requirement {
+pub(crate) const ISSUES_READ: Requirement = Requirement {
+    any_of: &[Grant::read("issues")],
+    scope: Scope::Repo,
+    scopes: &[],
+};
+
+pub(crate) const ISSUES_WRITE: Requirement = Requirement {
     any_of: &[Grant::write("issues")],
     scope: Scope::Repo,
     scopes: &[],

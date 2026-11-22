@@ -338,6 +338,26 @@ async fn a_comment_takes_issues_write_or_pull_requests_write() {
     assert_eq!(a["user"]["type"], json!("Bot"));
     assert_eq!(a["performed_via_github_app"]["id"], json!(APP_ID));
     assert_eq!(by_pulls_grant.json()["user"]["login"], json!("pr-app[bot]"));
+    let pulls = client(&server, PR_APP_TOKEN);
+    for path in [format!("{REPO}/issues"), format!("{REPO}/issues/{number}")] {
+        let denied = pulls.get(&path).await;
+        assert_eq!(denied.status, StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(
+            denied.header("x-accepted-github-permissions"),
+            "issues=read"
+        );
+    }
+    let denied = pulls
+        .post(
+            &format!("{REPO}/issues/comments/{}/reactions", a["id"]),
+            &json!({"content": "+1"}),
+        )
+        .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        denied.header("x-accepted-github-permissions"),
+        "issues=write"
+    );
 }
 
 #[tokio::test]

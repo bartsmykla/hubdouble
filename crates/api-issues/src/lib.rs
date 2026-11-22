@@ -10,7 +10,7 @@ use hubdouble_admin::Registrar;
 
 pub use shared::{comment_view, issue_view};
 
-use crate::shared::{CREATE_ISSUE, READ, WRITE};
+use crate::shared::{ISSUES_READ, ISSUES_WRITE, READ, WRITE};
 
 /// Registers what T7 owns: the issue event side table, the issue, label, comment and reaction
 /// operations, and the `Issue`, `IssueComment` and `Repository.issue` GraphQL types and fields.
@@ -18,9 +18,9 @@ pub fn register(r: &mut Registrar<'_>) {
     r.store.register_table::<events::IssueEvents>();
 
     let rest = &mut *r.rest;
-    rest.handle("issues/list-for-repo", READ, issues::list);
-    rest.handle("issues/create", CREATE_ISSUE, issues::create);
-    rest.handle("issues/get", READ, issues::get);
+    rest.handle("issues/list-for-repo", ISSUES_READ, issues::list);
+    rest.handle("issues/create", ISSUES_WRITE, issues::create);
+    rest.handle("issues/get", ISSUES_READ, issues::get);
     rest.handle("issues/update", WRITE, issues::update);
     rest.handle("issues/list-events", READ, events::list);
     rest.handle("issues/add-labels", WRITE, issues::add_labels);
@@ -40,7 +40,7 @@ pub fn register(r: &mut Registrar<'_>) {
     rest.handle("reactions/list-for-issue-comment", READ, reactions::list);
     rest.handle(
         "reactions/create-for-issue-comment",
-        WRITE,
+        ISSUES_WRITE,
         reactions::create,
     );
 
