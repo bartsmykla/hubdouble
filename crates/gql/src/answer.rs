@@ -135,6 +135,7 @@ fn read_error<'a>(error: &'a Value, query: &str) -> Result<ErrorAt<'a>, AnswerEr
                             | "MISSING_PAGINATION_BOUNDARIES"
                             | "EXCESSIVE_PAGINATION"
                             | "INVALID_PAGINATION"
+                            | "INVALID_CURSOR_ARGUMENTS"
                             | "MAX_NODE_LIMIT_EXCEEDED"
                             | "VALIDATION"
                     )

@@ -29,12 +29,73 @@ pub struct Conn {
     pub total_count: usize,
 }
 
+pub(crate) enum IncompletePage {
+    MissingSize,
+    InvalidCursor(CursorError),
+}
+
+pub(crate) struct PartialConnection {
+    pub(crate) connection: Arc<Conn>,
+    pub(crate) page: IncompletePage,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CursorErrorFields {
+    Nodes,
+    Page,
+    PageInfoFields,
+}
+
+pub(crate) struct CursorError {
+    pub(crate) fields: CursorErrorFields,
+    pub(crate) error: GqlError,
+}
+
+impl CursorError {
+    fn new(type_name: &str, argument: &str, cursor: &str) -> Result<Self, GqlError> {
+        use CursorErrorFields::{Nodes, Page, PageInfoFields};
+        let (fields, kind) = match type_name {
+            "RefConnection" | "PullRequestCommitConnection" => {
+                (PageInfoFields, ErrorType::Validation)
+            }
+            "SearchResultItemConnection" => (PageInfoFields, ErrorType::InvalidCursorArguments),
+            "PullRequestConnection" | "PullRequestReviewConnection" | "TeamConnection" => {
+                (Page, ErrorType::InvalidCursorArguments)
+            }
+            "PullRequestReviewThreadConnection" | "PullRequestReviewCommentConnection" => {
+                (Nodes, ErrorType::InvalidCursorArguments)
+            }
+            "RepositoryCollaboratorConnection" => {
+                return Err(GqlError::new(
+                    ErrorType::InvalidCursorArguments,
+                    format!("`{cursor}` does not appear to be a valid cursor."),
+                ));
+            }
+            _ => {
+                return Err(GqlError::new(
+                    ErrorType::Unprocessable,
+                    format!("`{argument}` does not appear to be a valid cursor."),
+                ));
+            }
+        };
+        let message = if kind == ErrorType::Validation {
+            format!("Invalid input: {cursor:?}")
+        } else {
+            format!("`{cursor}` does not appear to be a valid cursor.")
+        };
+        Ok(Self {
+            fields,
+            error: GqlError::new(kind, message),
+        })
+    }
+}
+
 /// Slices `items` by `first`, `last`, `after` and `before` into a [`Conn`] named `type_name`
 /// (`PullRequestConnection`), an empty page included.
 ///
 /// # Errors
 ///
-/// GitHub's error for a connection without `first` or `last`, or with more than 100.
+/// GitHub's error for a negative page size, a size above 100, or both sizes.
 pub fn connection<T>(
     type_name: &'static str,
     items: &[T],
@@ -50,20 +111,29 @@ pub fn connection<T>(
             "Passing both `first` and `last` to paginate the connection is not supported.",
         ));
     }
+    let empty = || Conn {
+        type_name,
+        edges: Vec::new(),
+        page_info: PageInfo::default(),
+        total_count: items.len(),
+    };
     if first.is_none() && last.is_none() {
-        return Err(GqlError::new(
-            ErrorType::MissingPaginationBoundaries,
-            "You must provide a `first` or `last` value to properly paginate the connection.",
-        ));
+        return Ok(partial(empty(), IncompletePage::MissingSize));
     }
-    let mut start = 0;
-    let mut end = items.len();
-    if let Some(after) = args.get::<String>("after")? {
-        start = position(items, &cursor, &after, "after")? + 1;
-    }
-    if let Some(before) = args.get::<String>("before")? {
-        end = position(items, &cursor, &before, "before")?;
-    }
+    let mut invalid = None;
+    let mut start =
+        boundary(items, &cursor, args.get("after")?, "after", &mut invalid).map_or(0, |i| i + 1);
+    let mut end = boundary(items, &cursor, args.get("before")?, "before", &mut invalid)
+        .unwrap_or(items.len());
+    let error = if let Some((argument, token)) = invalid {
+        let error = CursorError::new(type_name, argument, &token)?;
+        if error.fields != CursorErrorFields::Nodes {
+            return Ok(partial(empty(), IncompletePage::InvalidCursor(error)));
+        }
+        Some(error)
+    } else {
+        None
+    };
     end = end.max(start);
     if let Some(first) = first {
         end = end.min(start + first);
@@ -84,14 +154,18 @@ pub fn connection<T>(
         start_cursor: edges.first().map(|e| e.cursor.clone()),
         end_cursor: edges.last().map(|e| e.cursor.clone()),
     };
-    Ok(Resolved::Object {
+    let connection = Conn {
         type_name,
-        value: Arc::new(Conn {
+        edges,
+        page_info,
+        total_count: items.len(),
+    };
+    Ok(match error {
+        Some(error) => partial(connection, IncompletePage::InvalidCursor(error)),
+        None => Resolved::Object {
             type_name,
-            edges,
-            page_info,
-            total_count: items.len(),
-        }),
+            value: Arc::new(connection),
+        },
     })
 }
 
@@ -101,15 +175,10 @@ fn page_size(args: &Args, name: &str) -> Result<Option<usize>, GqlError> {
     let Some(n) = args.get::<i64>(name)? else {
         return Ok(None);
     };
-    let n = usize::try_from(n).ok().filter(|n| *n > 0).ok_or_else(|| {
-        let requirement = if n < 0 {
-            "cannot be less than zero"
-        } else {
-            "must be at least 1"
-        };
+    let n = usize::try_from(n).map_err(|_| {
         GqlError::new(
             ErrorType::InvalidPagination,
-            format!("`{name}` on the connection {requirement}."),
+            format!("`{name}` on the connection cannot be less than zero."),
         )
     })?;
     if n > MAX_PAGE {
@@ -123,19 +192,27 @@ fn page_size(args: &Args, name: &str) -> Result<Option<usize>, GqlError> {
     Ok(Some(n))
 }
 
-fn position<T>(
+fn boundary<T>(
     items: &[T],
     cursor: &impl Fn(&T) -> String,
-    wanted: &str,
-    name: &str,
-) -> Result<usize, GqlError> {
-    items
-        .iter()
-        .position(|i| cursor(i) == wanted)
-        .ok_or_else(|| {
-            GqlError::new(
-                ErrorType::Unprocessable,
-                format!("`{name}` does not appear to be a valid cursor."),
-            )
-        })
+    wanted: Option<String>,
+    argument: &'static str,
+    invalid: &mut Option<(&'static str, String)>,
+) -> Option<usize> {
+    let wanted = wanted?;
+    let index = items.iter().position(|i| cursor(i) == wanted);
+    if index.is_none() {
+        invalid.get_or_insert((argument, wanted));
+    }
+    index
+}
+
+fn partial(connection: Conn, page: IncompletePage) -> Resolved {
+    Resolved::Object {
+        type_name: connection.type_name,
+        value: Arc::new(PartialConnection {
+            connection: Arc::new(connection),
+            page,
+        }),
+    }
 }

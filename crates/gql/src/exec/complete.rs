@@ -1,12 +1,15 @@
 use std::any::{Any, TypeId};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use apollo_compiler::ast::Type;
+use apollo_compiler::executable::{Selection, SelectionSet};
 use apollo_compiler::schema::ExtendedType;
 use serde_json::Value;
 
 use super::{Exec, Fields, Groups, Null, Out, Parent, Path, Seg};
-use crate::contract::{Conn, Ctx, ErrorType, Obj, Resolved};
+use crate::connection::{IncompletePage, PartialConnection};
+use crate::contract::{Conn, Ctx, ErrorType, GqlError, Obj, Resolved};
 
 impl<'r> Exec<'r> {
     pub(super) fn is_leaf(&self, name: &str) -> bool {
@@ -92,9 +95,25 @@ impl<'r> Exec<'r> {
         match out {
             Out::Edge(e) => self.object(cx, Parent::Edge(e), named, fields, path),
             Out::PageInfo(p) => self.object(cx, Parent::PageInfo(p), named, fields, path),
+            Out::InvalidPageInfo(cursor) => {
+                self.object(cx, Parent::InvalidPageInfo(cursor), named, fields, path)
+            }
             Out::R(Resolved::Object { type_name, value }) => {
                 if let Err(message) = self.check(type_name, &value, named) {
                     return self.internal(&message, fields, path);
+                }
+                if let Some(partial) = value.downcast_ref::<PartialConnection>() {
+                    let obj = Obj {
+                        type_name,
+                        value: partial.connection.clone(),
+                    };
+                    let parent = match &partial.page {
+                        IncompletePage::MissingSize => Parent::Unpaged(&obj),
+                        IncompletePage::InvalidCursor(cursor) => {
+                            Parent::InvalidConnection(&obj, cursor)
+                        }
+                    };
+                    return self.object(cx, parent, type_name, fields, path);
                 }
                 let obj = Obj { type_name, value };
                 self.object(cx, Parent::Obj(&obj), type_name, fields, path)
@@ -111,6 +130,19 @@ impl<'r> Exec<'r> {
         fields: &Fields<'r>,
         path: &Path<'_>,
     ) -> Result<Value, Null> {
+        if matches!(parent, Parent::Unpaged(_)) {
+            let mut visited = HashSet::new();
+            if fields
+                .iter()
+                .any(|f| self.selects_page_items(&f.selection_set, &mut visited))
+            {
+                self.field_error(GqlError::new(
+                    ErrorType::MissingPaginationBoundaries,
+                    "You must provide a `first` or `last` value to properly paginate the connection.",
+                ), fields[0], path);
+                return Err(Null);
+            }
+        }
         let mut groups = Groups::default();
         let mut visited = Vec::new();
         for f in fields {
@@ -118,6 +150,25 @@ impl<'r> Exec<'r> {
         }
         self.set(cx, parent, type_name, &groups, Some(path))
             .map(Value::Object)
+    }
+
+    fn selects_page_items(&self, set: &'r SelectionSet, visited: &mut HashSet<&'r str>) -> bool {
+        set.selections.iter().any(|part| match part {
+            Selection::Field(field) => matches!(field.name.as_str(), "nodes" | "edges"),
+            Selection::InlineFragment(fragment) => {
+                self.selects_page_items(&fragment.selection_set, visited)
+            }
+            Selection::FragmentSpread(spread) => {
+                visited.insert(spread.fragment_name.as_str())
+                    && self
+                        .doc
+                        .fragments
+                        .get(&spread.fragment_name)
+                        .is_some_and(|fragment| {
+                            self.selects_page_items(&fragment.selection_set, visited)
+                        })
+            }
+        })
     }
 
     fn check(
@@ -130,7 +181,7 @@ impl<'r> Exec<'r> {
             return Err(format!("{type_name} is not a possible type of {expected}"));
         }
         let actual = (**value).type_id();
-        if actual == TypeId::of::<Conn>() {
+        if actual == TypeId::of::<Conn>() || actual == TypeId::of::<PartialConnection>() {
             return Ok(());
         }
         let Some(o) = self.registry.objects.get(type_name) else {

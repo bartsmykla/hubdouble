@@ -239,7 +239,7 @@ fn connections_need_first_or_last_up_to_100() {
         w.run(
             &format!(
                 "{{ repository(owner: \"o\", name: \"one\") {{ pullRequest(number: 1) {{
-                     reviewThreads{args} {{ totalCount }} }} }} }}"
+                     reviewThreads{args} {{ nodes {{ path }} }} }} }} }}"
             ),
             &Value::Null,
         )

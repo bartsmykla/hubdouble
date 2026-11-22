@@ -26,9 +26,10 @@ pub enum ErrorType {
     /// A connection with `first` or `last` above 100.
     ExcessivePagination,
     InvalidPagination,
+    InvalidCursorArguments,
     MaxNodeLimitExceeded,
     InvalidFieldInput,
-    /// A document or variable error; GitHub sends these without a `type`.
+    /// A GraphQL error that GitHub returns without a `type`.
     Validation,
 }
 
@@ -44,6 +45,7 @@ impl ErrorType {
             ErrorType::MissingPaginationBoundaries => "MISSING_PAGINATION_BOUNDARIES",
             ErrorType::ExcessivePagination => "EXCESSIVE_PAGINATION",
             ErrorType::InvalidPagination => "INVALID_PAGINATION",
+            ErrorType::InvalidCursorArguments => "INVALID_CURSOR_ARGUMENTS",
             ErrorType::MaxNodeLimitExceeded => "MAX_NODE_LIMIT_EXCEEDED",
             ErrorType::InvalidFieldInput | ErrorType::Validation => "VALIDATION",
         }

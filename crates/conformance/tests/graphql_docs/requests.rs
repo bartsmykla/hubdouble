@@ -102,7 +102,6 @@ async fn connections_check_boundaries_and_return_cursors_in_both_directions() {
     };
     for (boundary, error) in [
         ("", "MISSING_PAGINATION_BOUNDARIES"),
-        ("first:0", "INVALID_PAGINATION"),
         ("last:-1", "INVALID_PAGINATION"),
         ("first:101", "EXCESSIVE_PAGINATION"),
         ("last:101", "EXCESSIVE_PAGINATION"),
@@ -166,6 +165,183 @@ async fn connections_check_boundaries_and_return_cursors_in_both_directions() {
     assert_eq!(empty["nodes"], json!([]));
     assert_eq!(empty["pageInfo"]["startCursor"], Value::Null);
     assert_eq!(empty["pageInfo"]["endCursor"], Value::Null);
+}
+
+#[tokio::test]
+async fn zero_page_sizes_keep_counts_and_return_empty_pages() {
+    let server = server().await;
+    let api = Graphql::new(client(&server, fixture::ALICE_TOKEN));
+    for (size, next, previous) in [("first", true, false), ("last", false, true)] {
+        let doc = format!(
+            r#"{{ repository(owner:"acme",name:"docs") {{
+                refs(refPrefix:"refs/heads/prompts/", {size}:0) {{
+                    totalCount nodes {{ name }} edges {{ cursor }}
+                    pageInfo {{ hasNextPage hasPreviousPage startCursor endCursor }}
+                }}
+            }} }}"#
+        );
+        let data = success(&api, &doc, Value::Null).await;
+        assert_eq!(
+            data["repository"]["refs"],
+            json!({
+                "totalCount":2,"nodes":[],"edges":[],"pageInfo":{
+                    "hasNextPage":next,"hasPreviousPage":previous,"startCursor":null,"endCursor":null
+                }
+            })
+        );
+    }
+}
+
+#[tokio::test]
+async fn only_connections_that_select_page_items_require_a_size() {
+    let server = server().await;
+    let api = Graphql::new(client(&server, fixture::ALICE_TOKEN));
+    let doc = r#"{
+        repository(owner:"acme",name:"docs") {
+            count:refs(refPrefix:"refs/heads/prompts/") {totalCount}
+            meta:refs(refPrefix:"refs/heads/prompts/") {
+                pageInfo {hasNextPage hasPreviousPage startCursor endCursor}
+            }
+        }
+    }"#;
+    let data = success(&api, doc, Value::Null).await;
+    assert_eq!(
+        data["repository"],
+        json!({
+            "count":{"totalCount":2},"meta":{"pageInfo":{
+                "hasNextPage":false,"hasPreviousPage":false,"startCursor":null,"endCursor":null
+            }}
+        })
+    );
+    for selection in ["items:nodes {name}", "items:edges {cursor}"] {
+        let doc = format!(
+            r#"{{
+            repository(owner:"acme",name:"docs") {{
+                page:refs(refPrefix:"refs/heads/prompts/") {{ ...Items }}
+                name
+            }}
+        }} fragment Items on RefConnection {{ {selection} }}"#
+        );
+        let response = api.query(&doc, &Value::Null).await;
+        assert_eq!(response.status, StatusCode::OK);
+        let body = response.json();
+        assert_eq!(
+            body["data"]["repository"],
+            json!({"page":null,"name":"docs"})
+        );
+        assert_eq!(body["errors"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["errors"][0]["type"], "MISSING_PAGINATION_BOUNDARIES");
+        assert_eq!(body["errors"][0]["path"], json!(["repository", "page"]));
+    }
+}
+
+#[tokio::test]
+async fn invalid_cursors_report_errors_on_selected_child_fields() {
+    let server = server().await;
+    let api = Graphql::new(client(&server, fixture::ALICE_TOKEN));
+    let doc = r#"{
+        repository(owner:"acme",name:"docs") {
+            forward:refs(refPrefix:"refs/heads/prompts/",first:1,after:"bogus") {
+                totalCount items:nodes {name} links:edges {cursor}
+                meta:pageInfo {start:startCursor end:endCursor}
+            }
+            backward:refs(refPrefix:"refs/heads/prompts/",last:1,before:"bogus") {
+                pageInfo {endCursor previous:hasPreviousPage hasNextPage}
+            }
+            count:refs(refPrefix:"refs/heads/prompts/",first:1,after:"bogus") {totalCount}
+            name
+        }
+    }"#;
+    let response = api.query(doc, &Value::Null).await;
+    assert_eq!(response.status, StatusCode::OK);
+    let body = response.json();
+    assert_eq!(
+        body["data"]["repository"],
+        json!({
+            "forward":{"totalCount":2,"items":null,"links":null,"meta":{"start":null,"end":null}},
+            "backward":null,"count":{"totalCount":2},"name":"docs"
+        })
+    );
+    let errors = body["errors"].as_array().unwrap();
+    assert!(errors.iter().all(|error| error.get("type").is_none()));
+    let paths: Vec<_> = errors.iter().map(|error| &error["path"]).collect();
+    assert_eq!(
+        paths,
+        [
+            &json!(["repository", "forward", "items"]),
+            &json!(["repository", "forward", "links"]),
+            &json!(["repository", "forward", "meta", "start"]),
+            &json!(["repository", "forward", "meta", "end"]),
+            &json!(["repository", "backward", "pageInfo", "endCursor"]),
+            &json!(["repository", "backward", "pageInfo", "previous"]),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn typed_cursor_errors_keep_each_connections_partial_data() {
+    let server = server().await;
+    let api = Graphql::new(client(&server, fixture::ALICE_TOKEN));
+    let doc = r#"{
+        repository(owner:"acme",name:"docs") {
+            collaborators(first:1,after:"bogus") {nodes{login}}
+            pullRequest(number:1) {
+                threads:reviewThreads(first:1,after:"bogus") {
+                    totalCount nodes{id} edges{cursor} pageInfo{startCursor}
+                }
+                reviews(first:1,after:"bogus") {
+                    nodes{id} pageInfo{startCursor}
+                }
+            }
+        }
+        organization(login:"acme") {
+            teams(first:1,after:"bogus") {nodes{databaseId} pageInfo{startCursor}}
+        }
+        results:search(type:ISSUE,query:"repo:acme/docs is:pr",first:1,after:"bogus") {
+            issueCount nodes{__typename} pageInfo{start:startCursor}
+        }
+    }"#;
+    let response = api.query(doc, &Value::Null).await;
+    assert_eq!(response.status, StatusCode::OK);
+    let body = response.json();
+    assert_eq!(body["data"]["organization"], Value::Null);
+    assert_eq!(body["data"]["repository"]["collaborators"], Value::Null);
+    let pull = &body["data"]["repository"]["pullRequest"];
+    assert_eq!(pull["reviews"], Value::Null);
+    let threads = &pull["threads"];
+    assert_eq!(threads["totalCount"], 1);
+    assert_eq!(threads["nodes"], Value::Null);
+    assert!(threads["edges"][0]["cursor"].is_string());
+    assert_eq!(
+        threads["pageInfo"]["startCursor"],
+        threads["edges"][0]["cursor"]
+    );
+    assert_eq!(
+        body["data"]["results"],
+        json!({
+            "issueCount":3,"nodes":null,"pageInfo":{"start":null}
+        })
+    );
+    let errors = body["errors"].as_array().unwrap();
+    assert!(
+        errors
+            .iter()
+            .all(|e| e["type"] == "INVALID_CURSOR_ARGUMENTS")
+    );
+    let paths = [
+        json!(["repository", "collaborators"]),
+        json!(["repository", "pullRequest", "threads", "nodes"]),
+        json!(["repository", "pullRequest", "reviews", "nodes"]),
+        json!(["repository", "pullRequest", "reviews", "pageInfo"]),
+        json!(["organization", "teams", "nodes"]),
+        json!(["organization", "teams", "pageInfo"]),
+        json!(["results", "nodes"]),
+        json!(["results", "pageInfo", "start"]),
+    ];
+    assert_eq!(errors.len(), paths.len());
+    for path in paths {
+        assert!(errors.iter().any(|error| error["path"] == path), "{body}");
+    }
 }
 
 #[tokio::test]

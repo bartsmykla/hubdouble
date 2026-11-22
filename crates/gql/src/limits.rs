@@ -197,7 +197,7 @@ impl<'a> Cost<'a> {
                     .and_then(|n| usize::try_from(n).ok()),
                 _ => None,
             }?;
-            (1..=MAX_PAGE).contains(&size).then_some(size)
+            (size <= MAX_PAGE).then_some(size)
         })
     }
 
