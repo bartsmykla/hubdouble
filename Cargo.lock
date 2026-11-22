@@ -2005,7 +2005,22 @@ dependencies = [
 name = "hubdouble-api-repos"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "criterion",
+ "http",
+ "http-body-util",
  "hubdouble-admin",
+ "hubdouble-auth",
+ "hubdouble-git",
+ "hubdouble-gql",
+ "hubdouble-hooks",
+ "hubdouble-model",
+ "hubdouble-render",
+ "hubdouble-rest",
+ "hubdouble-store",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
 ]
 
 [[package]]
