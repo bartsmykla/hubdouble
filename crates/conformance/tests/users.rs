@@ -742,9 +742,9 @@ async fn user_reads_answer_public_and_private_profiles() {
     let org = ok(&org, "users/get-by-username");
     assert_eq!(org["type"], "Organization");
     assert_eq!(org["public_repos"], 1);
-    assert_eq!(bot.status, StatusCode::OK);
-    assert_eq!(bot.json()["type"], "Bot");
-    assert_eq!(bot.json()["login"], "fixture-app[bot]");
+    let bot = ok(&bot, "users/get-by-username");
+    assert_eq!(bot["type"], "Bot");
+    assert_eq!(bot["login"], "fixture-app[bot]");
     assert_eq!(missing_login.status, StatusCode::NOT_FOUND);
     assert_eq!(missing_id.status, StatusCode::NOT_FOUND);
     assert_eq!(unauthenticated.status, StatusCode::UNAUTHORIZED);
