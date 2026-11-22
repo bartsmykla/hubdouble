@@ -5,8 +5,8 @@ use bytes::Bytes;
 use http::Uri;
 use http_body_util::{BodyExt, Full};
 use hubdouble_model::{
-    Access, Account, AccountKind, App, Config, Event, Installation, ManualClock, Repo, RepositorySelection,
-    Timestamp, Visibility, Webhook, node_id,
+    Access, Account, AccountKind, App, Config, Event, Installation, ManualClock, Repo,
+    RepositorySelection, Timestamp, Visibility, Webhook, node_id,
 };
 use hubdouble_store::{
     Accounts, Apps, Counters, Deliveries, Installations, Repos, Sequence, Store, StoreBuilder,
@@ -318,8 +318,10 @@ fn an_event_reaches_only_installations_granted_its_permission() {
     store
         .update_quiet(|tx| {
             let events = ["push", "issue_comment", "check_run"];
-            tx.table_mut::<Apps>().replace(app(APP_A, "alpha", &events))?;
-            tx.table_mut::<Apps>().replace(app(APP_B, "beta", &events))?;
+            tx.table_mut::<Apps>()
+                .replace(app(APP_A, "alpha", &events))?;
+            tx.table_mut::<Apps>()
+                .replace(app(APP_B, "beta", &events))?;
             let mut a = installation(INSTALL_A, APP_A, None);
             a.permissions.insert("checks".to_owned(), Access::Write);
             let mut b = installation(INSTALL_B, APP_B, Some(vec![OTHER]));
@@ -691,6 +693,79 @@ async fn an_event_past_the_byte_budget_is_logged_failed_without_an_attempt() {
     hooks.drain().await.unwrap();
     assert!(bodies.recv().await.is_some());
     assert_eq!(hooks.stats().waiting_bytes, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn past_the_log_byte_budget_the_oldest_deliveries_lose_their_bodies() {
+    let numbered = |n: i64| {
+        let mut e = event("push", WIDGET);
+        e.payload.insert("n".to_owned(), json!(n));
+        e
+    };
+    let store = world();
+    let sizing = world();
+    let (sized, hits) = start(&sizing, |_| {});
+    let _sized_bodies = answer_all(hits);
+    emit_one(&sizing, numbered(1));
+    sized.drain().await.unwrap();
+    let d = sizing
+        .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
+        .unwrap()
+        .unwrap();
+    let headers =
+        |h: &BTreeMap<String, String>| -> usize { h.iter().map(|(k, v)| k.len() + v.len()).sum() };
+    let one = d.request.payload.len()
+        + headers(&d.request.headers)
+        + d.response.payload.as_ref().map_or(0, String::len)
+        + headers(&d.response.headers);
+    let limit = 2 * one;
+    // Given a log budget of two delivered requests and responses, and three workers
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 3;
+        o.log_bytes = limit;
+    });
+    for n in 1..=3 {
+        emit_one(&store, numbered(n));
+    }
+    let mut by_n = BTreeMap::new();
+    for _ in 0..3 {
+        let hit = hits.recv().await.unwrap();
+        by_n.insert(hit.json()["n"].as_i64().unwrap(), hit);
+    }
+    // When deliveries 2 and 3 finish while delivery 1 is still in flight
+    by_n.remove(&2).unwrap().reply.send(200).unwrap();
+    by_n.remove(&3).unwrap().reply.send(200).unwrap();
+    hooks.shared.wait_stats(|s| s.in_flight == 1).await;
+    // Then the bodies waiting behind delivery 1 count toward the budget
+    assert!(hooks.stats().log_bytes <= limit);
+    // When delivery 1 finishes and a fourth event is delivered
+    by_n.remove(&1).unwrap().reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+    let _bodies = answer_all(hits);
+    emit_one(&store, numbered(4));
+    hooks.drain().await.unwrap();
+    // Then every delivery is still listed with its status, the oldest ones without bodies
+    assert_eq!(logged_ids(&store, APP_A), vec![1, 2, 3, 4]);
+    let all: Vec<_> = store
+        .view(|tx| Ok(tx.table::<Deliveries>().children(APP_A).cloned().collect()))
+        .unwrap();
+    let kept: Vec<bool> = all
+        .iter()
+        .map(|d| {
+            let full = !d.request.payload.is_empty() && d.response.payload.is_some();
+            assert_eq!(d.request.headers.is_empty(), !full);
+            full
+        })
+        .collect();
+    assert_eq!(kept, vec![false, false, true, true]);
+    assert!(
+        all.iter()
+            .all(|d| d.status_code == 200 && d.event == "push")
+    );
+    assert!(hooks.stats().log_bytes <= limit);
+    // And a delivery without its body cannot be redelivered
+    let again = store.update(|tx| Ok(redeliver(tx, APP_A, 1)));
+    assert_eq!(again.unwrap(), Err(HooksError::UnknownDelivery(1)));
 }
 
 #[tokio::test(start_paused = true)]

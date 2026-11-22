@@ -128,7 +128,7 @@ fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .tx()
         .table::<Deliveries>()
         .get(ctx.param_i64("delivery_id")?)
-        .filter(|delivery| delivery.app_id == app.id)
+        .filter(|delivery| delivery.app_id == app.id && !delivery.request.payload.is_empty())
         .ok_or_else(ApiError::not_found)?;
     Reply::json(&HookDelivery::new(delivery))
 }

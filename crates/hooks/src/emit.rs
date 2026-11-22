@@ -251,7 +251,7 @@ pub(crate) fn redeliver(
     let d = tx
         .table::<Deliveries>()
         .get(delivery_id)
-        .filter(|d| d.app_id == app_id)
+        .filter(|d| d.app_id == app_id && !d.request.payload.is_empty())
         .cloned()
         .ok_or(HooksError::UnknownDelivery(delivery_id))?;
     tx.push_outbox(OutboxEntry {

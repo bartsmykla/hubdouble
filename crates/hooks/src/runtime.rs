@@ -76,10 +76,51 @@ struct AppLog {
     logged: Option<VecDeque<i64>>,
 }
 
+fn header_bytes(h: &BTreeMap<String, String>) -> usize {
+    h.iter().map(|(k, v)| k.len() + v.len()).sum()
+}
+
+fn body_bytes(d: &Delivery) -> usize {
+    d.request.payload.len()
+        + header_bytes(&d.request.headers)
+        + d.response.payload.as_ref().map_or(0, String::len)
+        + header_bytes(&d.response.headers)
+}
+
+fn strip(d: &mut Delivery) {
+    d.request.payload = Bytes::new();
+    d.request.headers = BTreeMap::new();
+    d.response.payload = None;
+    d.response.headers = BTreeMap::new();
+}
+
+#[derive(Default)]
+struct Bodies {
+    held: usize,
+    kept: BTreeMap<i64, (i64, usize)>,
+}
+
+impl Bodies {
+    fn hold(&mut self, app: i64, d: &Delivery) {
+        let bytes = body_bytes(d);
+        self.held += bytes;
+        if let Some((_, old)) = self.kept.insert(d.id, (app, bytes)) {
+            self.held -= old;
+        }
+    }
+
+    fn release(&mut self, id: i64) {
+        if let Some((_, bytes)) = self.kept.remove(&id) {
+            self.held -= bytes;
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     queue: VecDeque<Job>,
     apps: HashMap<i64, AppLog>,
+    bodies: Bodies,
     unlogged: BTreeSet<i64>,
     in_flight: BTreeMap<u64, usize>,
     max_queued: usize,
@@ -186,6 +227,7 @@ impl Shared {
                 if let Some(log) = st.apps.get_mut(&app) {
                     log.ready.remove(&id);
                 }
+                st.bodies.release(id);
                 st.unlogged.remove(&id);
             }
         }
@@ -210,6 +252,7 @@ impl Shared {
             in_flight: st.in_flight.values().sum(),
             unlogged: st.unlogged.len(),
             waiting_bytes: self.store.outbox_use().bytes,
+            log_bytes: st.bodies.held,
         }
     }
 
@@ -429,11 +472,14 @@ impl Shared {
             return None;
         }
         *st.in_flight.entry(job.epoch).or_default() += 1;
+        st.bodies.held += job.body.len() + header_bytes(&job.headers);
+        self.prune(&mut st);
         Some(job)
     }
 
     async fn attempt(&self, job: Job) {
         let (app, id, epoch) = (job.app_id, job.id, job.epoch);
+        let sent = job.body.len() + header_bytes(&job.headers);
         let delivered_at = self.clock.now();
         let started = Instant::now();
         let outcome = tokio::time::timeout(
@@ -450,6 +496,7 @@ impl Shared {
         .unwrap_or_else(|_| Outcome::failed("Timed out"));
         let delivery = job.logged(delivered_at, started.elapsed().as_secs_f64(), outcome);
         let mut st = self.state.lock();
+        st.bodies.held -= sent;
         self.finish(&mut st, app, id, Some((epoch, delivery)));
         if let Some(n) = st.in_flight.get_mut(&epoch) {
             *n -= 1;
@@ -464,6 +511,7 @@ impl Shared {
         log.running.remove(&id);
         match delivery {
             Some(d) => {
+                st.bodies.hold(app, &d.1);
                 log.ready.insert(id, d);
             }
             None => {
@@ -471,10 +519,45 @@ impl Shared {
             }
         }
         self.flush(st, app);
+        self.prune(st);
+    }
+
+    fn prune(&self, st: &mut State) {
+        let limit = self.options.log_bytes;
+        let mut logged = Vec::new();
+        while st.bodies.held > limit {
+            let Some((id, (app, bytes))) = st.bodies.kept.pop_first() else {
+                break;
+            };
+            st.bodies.held -= bytes;
+            match st.apps.get_mut(&app).and_then(|log| log.ready.get_mut(&id)) {
+                Some((_, d)) => strip(d),
+                None => logged.push(id),
+            }
+        }
+        if logged.is_empty() {
+            return;
+        }
+        let _ = self.store.update(|tx| {
+            let mut table = tx.table_mut::<Deliveries>();
+            for id in logged {
+                if let Some(d) = table.get(id) {
+                    let mut d = (**d).clone();
+                    strip(&mut d);
+                    table.replace(d)?;
+                }
+            }
+            Ok(())
+        });
     }
 
     fn flush(&self, st: &mut State, app: i64) {
-        let State { apps, unlogged, .. } = st;
+        let State {
+            apps,
+            unlogged,
+            bodies,
+            ..
+        } = st;
         let Some(log) = apps.get_mut(&app) else {
             return;
         };
@@ -487,6 +570,7 @@ impl Shared {
         let capacity = self.options.log_capacity.max(1);
         let logged = &mut log.logged;
         let mut inserted = Vec::new();
+        let mut gone = Vec::new();
         let _ = self.store.update(|tx| {
             let epoch = self.store.epoch();
             let logged = logged.get_or_insert_with(|| {
@@ -497,21 +581,24 @@ impl Shared {
             });
             let mut table = tx.table_mut::<Deliveries>();
             for (e, d) in ready.values() {
-                if *e != epoch {
-                    continue;
-                }
-                if table.insert(d.clone()).is_ok() {
+                if *e == epoch && table.insert(d.clone()).is_ok() {
                     logged.push_back(d.id);
                     inserted.push(d);
+                } else {
+                    gone.push(d.id);
                 }
                 while logged.len() > capacity {
                     if let Some(old) = logged.pop_front() {
                         table.remove(old);
+                        gone.push(old);
                     }
                 }
             }
             Ok(())
         });
+        for id in gone {
+            bodies.release(id);
+        }
         if let Some(observe) = &self.options.observer {
             for d in inserted {
                 observe(&Notice::Delivery {

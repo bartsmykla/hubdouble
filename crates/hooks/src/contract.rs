@@ -50,7 +50,8 @@ pub fn ping(tx: &mut TxMut<'_>, app_id: i64) {
 ///
 /// # Errors
 ///
-/// [`HooksError::UnknownDelivery`] when the App has no such delivery.
+/// [`HooksError::UnknownDelivery`] when the App has no such delivery, or when the delivery lost
+/// its body to [`Options::log_bytes`].
 pub fn redeliver(tx: &mut TxMut<'_>, app_id: i64, delivery_id: i64) -> Result<(), HooksError> {
     crate::emit::redeliver(tx, app_id, delivery_id)
 }
@@ -72,6 +73,11 @@ pub struct Options {
     pub timeout: Duration,
     /// The delivery log ring size per App.
     pub log_capacity: usize,
+    /// The most request and response bytes (headers and bodies) that in-flight, finishing and
+    /// logged deliveries of every App hold together. Past it the oldest deliveries lose their
+    /// request and response and keep their other fields; such a delivery cannot be read in full
+    /// or redelivered.
+    pub log_bytes: usize,
     /// The most bytes of a receiver's answer body that are read and logged; the rest is dropped.
     pub response_bytes: usize,
     pub connector: Arc<dyn Connector>,
@@ -104,6 +110,9 @@ pub enum Notice<'a> {
 /// The default of [`Options::response_bytes`].
 pub const RESPONSE_BYTES: usize = 4 * 1024;
 
+/// The default of [`Options::log_bytes`].
+pub const LOG_BYTES: usize = 16 * 1024 * 1024;
+
 impl Default for Options {
     fn default() -> Options {
         Options {
@@ -112,6 +121,7 @@ impl Default for Options {
             queue_bytes: QUEUE_BYTES,
             timeout: Duration::from_secs(10),
             log_capacity: 50_000,
+            log_bytes: LOG_BYTES,
             response_bytes: RESPONSE_BYTES,
             connector: Arc::new(TcpConnector),
             observer: None,
@@ -130,6 +140,10 @@ pub struct Stats {
     pub unlogged: usize,
     /// The payload bytes that committed events waiting for an attempt hold.
     pub waiting_bytes: usize,
+    /// The request and response bytes that in-flight, finishing and logged deliveries hold,
+    /// bounded by
+    /// [`Options::log_bytes`].
+    pub log_bytes: usize,
 }
 
 /// The running publisher, delivery queue and workers.
