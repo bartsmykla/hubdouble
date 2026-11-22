@@ -69,9 +69,31 @@ pub(crate) fn full_name(tx: &Tx, repo: &Repo) -> String {
 }
 
 pub(crate) fn user(tx: &Tx, urls: &Urls, id: i64) -> Option<r::SimpleUser> {
-    tx.table::<Accounts>()
-        .get(id)
-        .map(|a| r::SimpleUser::new(urls, a))
+    tx.table::<Accounts>().get(id).map(|a| simple_user(urls, a))
+}
+
+fn simple_user(urls: &Urls, a: &Account) -> r::SimpleUser {
+    let mut v = r::SimpleUser::new(urls, a);
+    let escaped = r::escape(&a.login);
+    if escaped != a.login {
+        let raw = format!("/users/{}", a.login);
+        let path = format!("/users/{escaped}");
+        for url in [
+            &mut v.url,
+            &mut v.followers_url,
+            &mut v.following_url,
+            &mut v.gists_url,
+            &mut v.starred_url,
+            &mut v.subscriptions_url,
+            &mut v.organizations_url,
+            &mut v.repos_url,
+            &mut v.events_url,
+            &mut v.received_events_url,
+        ] {
+            *url = url.replace(&raw, &path);
+        }
+    }
+    v
 }
 
 pub(crate) fn association(tx: &Tx, repo: &Repo, user_id: i64) -> &'static str {
@@ -208,7 +230,7 @@ pub(crate) fn pull_view(
         urls,
         i,
         full,
-        Some(r::SimpleUser::new(urls, author)),
+        Some(simple_user(urls, author)),
         branch(tx, urls, &p.head, author),
         branch(tx, urls, &p.base, author),
     )?;
@@ -284,8 +306,9 @@ pub(crate) fn emit(
     action: &'static str,
     repo: &Repo,
     sender: i64,
-    payload: Map<String, Value>,
+    mut payload: Map<String, Value>,
 ) {
+    webhook_form(&mut payload);
     hubdouble_hooks::emit(
         tx,
         Event {
@@ -299,6 +322,29 @@ pub(crate) fn emit(
             payload,
         },
     );
+}
+
+fn webhook_form(p: &mut Map<String, Value>) {
+    fn label(l: &mut Value) {
+        if let Some(l) = l.as_object_mut() {
+            l.remove("archived_at");
+            l.remove("archived_by");
+        }
+    }
+    if let Some(l) = p.get_mut("label") {
+        label(l);
+    }
+    for holder in ["issue", "pull_request"] {
+        let Some(h) = p.get_mut(holder).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        if holder == "issue" {
+            h.remove("closed_by");
+        }
+        if let Some(labels) = h.get_mut("labels").and_then(Value::as_array_mut) {
+            labels.iter_mut().for_each(label);
+        }
+    }
 }
 
 /// Emits `issues.<action>`, or `pull_request.<action>` when `issue` is a pull request, with
