@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
 use std::sync::Arc;
 
@@ -94,6 +95,31 @@ pub(crate) fn topo(
         }
     }
     Ok(out)
+}
+
+pub(crate) fn compare_order(
+    odb: &Odb,
+    head: ObjectId,
+    exclude: &HashSet<ObjectId>,
+) -> Result<Vec<(ObjectId, Arc<Commit>)>, GitError> {
+    if exclude.contains(&head) {
+        return Ok(Vec::new());
+    }
+    let mut seen = HashSet::from([head]);
+    let mut queue = BinaryHeap::from([(odb.commit(head)?.committer.time, Reverse(1), head)]);
+    let mut commits = Vec::new();
+    while let Some((_, _, id)) = queue.pop() {
+        let commit = odb.commit(id)?;
+        for &parent in &commit.parents {
+            if !exclude.contains(&parent) && seen.insert(parent) {
+                let time = odb.commit(parent)?.committer.time;
+                queue.push((time, Reverse(seen.len()), parent));
+            }
+        }
+        commits.push((id, commit));
+    }
+    commits.reverse();
+    Ok(commits)
 }
 
 pub(crate) fn log(

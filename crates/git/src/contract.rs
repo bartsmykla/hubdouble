@@ -832,7 +832,7 @@ impl Git {
             merge_base,
             ahead_by: count(ahead_set.difference(&behind_set).count()),
             behind_by: count(behind_set.difference(&ahead_set).count()),
-            commits: history::topo(&odb, head, &behind_set)?,
+            commits: history::compare_order(&odb, head, &behind_set)?,
             files: diff::file_diffs(&odb, &changes)?,
         })
     }
