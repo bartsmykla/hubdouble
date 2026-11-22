@@ -132,6 +132,32 @@ async fn pending_reviews_publish_file_and_line_comments_with_the_review() {
 }
 
 #[tokio::test]
+async fn go_github_can_reply_through_the_review_comment_collection() {
+    let server = fixture_server().await;
+    let client = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    let path = format!("{PULL}/comments");
+    let root = rest!(
+        client,
+        POST,
+        path,
+        "pulls/create-review-comment",
+        201,
+        json!({"body": "Root", "path": "src/feature.txt", "line": 1, "commit_id": head_sha(&server)})
+    );
+    let parent = field_id(&root, "id");
+    let reply = rest!(
+        client,
+        POST,
+        path,
+        "pulls/create-review-comment",
+        201,
+        json!({"body": "Reply", "in_reply_to": parent})
+    );
+    assert_eq!(reply["in_reply_to_id"], parent);
+    assert_eq!(reply["body"], "Reply");
+}
+
+#[tokio::test]
 async fn review_comments_replies_and_reactions_share_the_same_records() {
     let server = fixture_server().await;
     let client = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
