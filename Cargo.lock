@@ -1953,7 +1953,19 @@ dependencies = [
 name = "hubdouble-api-gitdata"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
+ "criterion",
+ "http",
  "hubdouble-admin",
+ "hubdouble-auth",
+ "hubdouble-git",
+ "hubdouble-gql",
+ "hubdouble-model",
+ "hubdouble-render",
+ "hubdouble-rest",
+ "hubdouble-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
