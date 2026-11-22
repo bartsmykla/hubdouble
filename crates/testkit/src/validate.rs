@@ -51,6 +51,11 @@ fn allow_newer_fields(mut schema: Value) -> Value {
             "digest",
             json!({ "type": ["string", "null"] }),
         ),
+        (
+            "repository$transferred/properties/changes/properties/owner/properties/from",
+            "organization",
+            json!({ "$ref": "#/definitions/organization" }),
+        ),
     ];
     for (definition, field, field_schema) in newer {
         if let Some(props) = schema

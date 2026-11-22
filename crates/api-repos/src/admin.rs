@@ -7,7 +7,7 @@ use hubdouble_admin::{
     AdminHandler, AdminRequest, Registrar, Services, error_response, json_response, read_json,
 };
 use hubdouble_model::{AccountKind, ApiError, Release, Repo, Visibility};
-use hubdouble_render::{Repository, SimpleUser, Urls};
+use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
 use hubdouble_rest::Params;
 use hubdouble_store::{Accounts, Releases, Repos, Tx, TxMut};
 use serde::Deserialize;
@@ -226,14 +226,13 @@ fn edit_repo(
         crate::emit(tx, "repository", "renamed", id, sender, changes_of(changes));
     }
     if transferred.is_some() {
-        let key = if previous_owner.kind == AccountKind::Organization {
-            "organization"
-        } else {
-            "user"
-        };
         let urls = Urls::new(tx.config(), "");
-        let changes =
-            json!({ "owner": { "from": { key: SimpleUser::new(&urls, &previous_owner) } } });
+        let from = if previous_owner.kind == AccountKind::Organization {
+            json!({ "organization": OrganizationSimple::new(&urls, &previous_owner) })
+        } else {
+            json!({ "user": SimpleUser::new(&urls, &previous_owner) })
+        };
+        let changes = json!({ "owner": { "from": from } });
         crate::emit(
             tx,
             "repository",

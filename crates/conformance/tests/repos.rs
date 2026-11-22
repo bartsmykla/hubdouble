@@ -757,6 +757,33 @@ async fn release_admin_writes_deliver_published_and_edited() {
 }
 
 #[tokio::test]
+async fn a_transfer_from_an_organization_names_it_as_the_previous_owner() {
+    // Given the watcher App is installed on the organization and on the new owner
+    let mut seed = watcher().to_vec();
+    seed.push(
+        json!({"kind": "installation", "id": 5003, "app": "watcher", "account": "alice",
+                     "repository_selection": "all"}),
+    );
+    let server = start(seed).await;
+    // When acme transfers a repository to alice
+    let transfer = server
+        .admin(
+            Method::PATCH,
+            "repos/acme/public",
+            Some(&json!({"owner": "alice", "sender": "alice"})),
+        )
+        .await;
+    let got = deliveries(&server, 1).await;
+    // Then the new owner's installation gets the event with acme as an organization
+    assert_eq!(transfer.status, StatusCode::OK, "{:?}", transfer.body);
+    let transferred = delivered(&got, "repository", "transferred");
+    let from = &transferred["changes"]["owner"]["from"];
+    assert_eq!(from["organization"]["login"], json!("acme"));
+    assert_eq!(from.get("user"), None);
+    assert_eq!(transferred["installation"]["id"], json!(5003));
+}
+
+#[tokio::test]
 async fn repository_admin_writes_deliver_their_repository_actions() {
     // Given
     let server = start(watcher().to_vec()).await;
