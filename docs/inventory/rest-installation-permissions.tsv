@@ -67,6 +67,7 @@ GET /repos/{owner}/{repo}/issues/comments	issues=read;pull_requests=read
 DELETE /repos/{owner}/{repo}/issues/comments/{comment_id}	issues=write;pull_requests=write
 GET /repos/{owner}/{repo}/issues/comments/{comment_id}	issues=read;pull_requests=read
 PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}	issues=write;pull_requests=write
+GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions	issues=read
 POST /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions	issues=write
 GET /repos/{owner}/{repo}/issues/{issue_number}	issues=read
 PATCH /repos/{owner}/{repo}/issues/{issue_number}	issues=write;pull_requests=write

@@ -67,6 +67,7 @@ GET /repos/{owner}/{repo}/issues/comments
 DELETE /repos/{owner}/{repo}/issues/comments/{comment_id}
 GET /repos/{owner}/{repo}/issues/comments/{comment_id}
 PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}
+GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions
 POST /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions
 GET /repos/{owner}/{repo}/issues/{issue_number}
 PATCH /repos/{owner}/{repo}/issues/{issue_number}

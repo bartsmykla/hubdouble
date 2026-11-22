@@ -38,7 +38,11 @@ pub fn register(r: &mut Registrar<'_>) {
     rest.handle("issues/get-comment", READ, comments::get);
     rest.handle("issues/update-comment", WRITE, comments::update);
     rest.handle("issues/delete-comment", WRITE, comments::delete);
-    rest.handle("reactions/list-for-issue-comment", READ, reactions::list);
+    rest.handle(
+        "reactions/list-for-issue-comment",
+        ISSUES_READ,
+        reactions::list,
+    );
     rest.handle(
         "reactions/create-for-issue-comment",
         ISSUES_WRITE,

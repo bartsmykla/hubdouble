@@ -11,6 +11,15 @@ use std::process::Command;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+const SMOKE_REST_ROUTES: &[&str] = &[
+    "GET /app",
+    "GET /app/hook/deliveries",
+    "GET /app/hook/deliveries/{delivery_id}",
+    "GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs",
+    "GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions",
+    "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+];
+
 pub(super) fn run(root: &Path, args: &[String]) -> Result<()> {
     let (checkout, check) = options(args)?;
     let (module, version) = module_version(&fs::read_to_string(checkout.join("go.mod"))?)?;
@@ -138,7 +147,8 @@ fn command(command: &mut Command) -> Result<()> {
     Ok(())
 }
 
-fn route_list(routes: BTreeSet<String>) -> String {
+fn route_list(mut routes: BTreeSet<String>) -> String {
+    routes.extend(SMOKE_REST_ROUTES.iter().map(|route| (*route).to_owned()));
     let mut routes: Vec<_> = routes.into_iter().collect();
     routes.sort_unstable_by(|a, b| route_key(a).cmp(&route_key(b)));
     routes.join("\n") + "\n"
@@ -189,6 +199,13 @@ fn save(root: &Path, output: &BTreeMap<PathBuf, String>, check: bool) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rest_inventory_contains_the_smoke_reactions_route() {
+        let route = "GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions";
+        let generated = route_list(BTreeSet::from(["GET /app".to_owned()]));
+        assert!(generated.lines().any(|line| line == route));
+    }
 
     #[test]
     fn check_reports_added_changed_and_removed_files_without_writes() {
