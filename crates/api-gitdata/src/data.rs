@@ -17,6 +17,7 @@ use crate::common::{
     object_node_id, parse_oid, sender, signature_of, unprocessable, wrapped_base64,
 };
 use crate::refs::RefObject;
+use crate::tree_view::{entry_kind, render_tree};
 
 pub(crate) const RAW: &str = "application/vnd.github.raw; charset=utf-8";
 
@@ -99,115 +100,6 @@ pub(crate) fn get_blob(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     })
 }
 
-#[derive(Serialize)]
-struct TreeItem {
-    path: String,
-    mode: &'static str,
-    #[serde(rename = "type")]
-    kind: &'static str,
-    sha: ObjectId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    size: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    url: Option<String>,
-}
-
-#[derive(Serialize)]
-struct GitTree {
-    sha: ObjectId,
-    url: String,
-    tree: Vec<TreeItem>,
-    truncated: bool,
-}
-
-fn entry_kind(mode: EntryMode) -> ObjectKind {
-    match mode {
-        EntryMode::Tree => ObjectKind::Tree,
-        EntryMode::Submodule => ObjectKind::Commit,
-        EntryMode::File | EntryMode::Executable | EntryMode::Symlink => ObjectKind::Blob,
-    }
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one recursive walk step needs the store, the repository and where it is"
-)]
-fn tree_items(
-    git: &Git,
-    tx: &Tx,
-    repo: i64,
-    links: &Links,
-    prefix: &str,
-    entries: &[TreeEntry],
-    recursive: bool,
-    out: &mut Vec<TreeItem>,
-) -> Result<(), ApiError> {
-    for e in entries {
-        let path = if prefix.is_empty() {
-            e.name.clone()
-        } else {
-            format!("{prefix}/{}", e.name)
-        };
-        let kind = entry_kind(e.mode);
-        let (size, url, children) = match kind {
-            ObjectKind::Blob => match git.object(tx, repo, e.id)?.data {
-                ObjectData::Blob(data) => (Some(data.len()), Some(links.object(kind, e.id)), None),
-                _ => (None, Some(links.object(kind, e.id)), None),
-            },
-            ObjectKind::Tree => {
-                let children = match recursive.then(|| git.object(tx, repo, e.id)) {
-                    Some(Ok(o)) => match o.data {
-                        ObjectData::Tree(t) => Some(t),
-                        _ => None,
-                    },
-                    Some(Err(err)) => return Err(err.into()),
-                    None => None,
-                };
-                (None, Some(links.object(kind, e.id)), children)
-            }
-            ObjectKind::Commit | ObjectKind::Tag => (None, None, None),
-        };
-        out.push(TreeItem {
-            path: path.clone(),
-            mode: e.mode.as_str(),
-            kind: kind_name(kind),
-            sha: e.id,
-            size,
-            url,
-        });
-        if let Some(children) = children {
-            tree_items(git, tx, repo, links, &path, &children, true, out)?;
-        }
-    }
-    Ok(())
-}
-
-fn render_tree(
-    ctx: &Ctx<'_>,
-    id: ObjectId,
-    entries: &[TreeEntry],
-    recursive: bool,
-) -> Result<GitTree, ApiError> {
-    let links = Links::of(ctx)?;
-    let mut tree = Vec::with_capacity(entries.len());
-    tree_items(
-        ctx.git(),
-        ctx.tx(),
-        ctx.repo()?.id,
-        &links,
-        "",
-        entries,
-        recursive,
-        &mut tree,
-    )?;
-    Ok(GitTree {
-        sha: id,
-        url: links.object(ObjectKind::Tree, id),
-        tree,
-        truncated: false,
-    })
-}
-
 pub(crate) fn tree_of(
     git: &Git,
     tx: &Tx,
@@ -237,7 +129,7 @@ pub(crate) fn get_tree(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         _ => ApiError::not_found(),
     })?;
     let recursive = ctx.query().get("recursive").is_some();
-    Reply::json(&render_tree(ctx, id, &entries, recursive)?)
+    Reply::json(&render_tree(ctx, id, entries, recursive)?)
 }
 
 fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
@@ -410,7 +302,7 @@ pub(crate) fn create_tree(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let ObjectData::Tree(entries) = git.object(tx, repo, id)?.data else {
         return Err(ApiError::internal("a written tree is not a tree"));
     };
-    let tree = render_tree(ctx, id, &entries, false)?;
+    let tree = render_tree(ctx, id, entries, false)?;
     Reply::json(&tree)?
         .status(StatusCode::CREATED)
         .header(LOCATION, &tree.url)

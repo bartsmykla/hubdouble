@@ -3,6 +3,7 @@ mod data;
 mod graphql;
 mod refs;
 mod repos;
+mod tree_view;
 
 use hubdouble_admin::Registrar;
 use hubdouble_git::{
