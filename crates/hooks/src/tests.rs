@@ -1059,6 +1059,36 @@ async fn an_attempt_after_the_idle_limit_opens_a_new_connection() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_webhook_url_change_drops_the_old_origins_idle_connections() {
+    let store = world();
+    let (hooks, hits) = start(&store, |o| o.workers = 1);
+    let mut bodies = answer_all(hits);
+    // Given a delivery whose connection to the App's first origin went back to the pool
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    assert!(bodies.recv().await.is_some());
+    assert_eq!(hooks.shared.pool.idle(), 1);
+    // When the App's URL moves to another origin and a delivery after the idle limit returns
+    // its connection
+    store
+        .update_quiet(|tx| {
+            let mut a = app(APP_A, "alpha", &["push", "issue_comment"]);
+            if let Some(w) = a.webhook.as_mut() {
+                w.url = "http://moved.test/hook".to_owned();
+            }
+            tx.table_mut::<Apps>().replace(a)?;
+            Ok(())
+        })
+        .unwrap();
+    tokio::time::advance(crate::delivery::IDLE_REUSE).await;
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    assert!(bodies.recv().await.is_some());
+    // Then the pool holds only the new origin's connection
+    assert_eq!(hooks.shared.pool.idle(), 1);
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_delivery_log_is_a_ring_per_app() {
     let store = world();
     let (hooks, hits) = start(&store, |o| o.log_capacity = 2);

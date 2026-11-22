@@ -1,6 +1,16 @@
 use serde_json::{Value, json};
 
-const UNITS: [&str; 8] = ["", "µs", "ms", "MB", "MiB", "conns", "events", "req/s"];
+const UNITS: [&str; 9] = [
+    "",
+    "µs",
+    "ms",
+    "MB",
+    "MiB",
+    "conns",
+    "deliveries",
+    "events",
+    "req/s",
+];
 
 #[derive(Clone, Copy)]
 pub(crate) enum Goal {

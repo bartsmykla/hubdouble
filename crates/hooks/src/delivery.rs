@@ -138,7 +138,8 @@ async fn read_capped(mut body: hyper::body::Incoming, cap: usize) -> Option<(Vec
 type Sender = SendRequest<Full<Bytes>>;
 
 /// Idle keep-alive connections per webhook origin, at most `per_origin` each and each for at most
-/// [`IDLE_REUSE`], so attempts reuse them as an HTTP client with a connection pool does.
+/// [`IDLE_REUSE`], so attempts reuse them as an HTTP client with a connection pool does. A
+/// returned connection drops the stale and closed ones of every origin.
 pub(crate) struct Pool {
     idle: Mutex<HashMap<String, Vec<(Sender, Instant)>>>,
     per_origin: usize,
@@ -165,11 +166,19 @@ impl Pool {
 
     fn give(&self, origin: String, sender: Sender) {
         let mut idle = self.idle.lock();
+        idle.retain(|_, senders| {
+            senders.retain(|(pooled, since)| pooled.is_ready() && since.elapsed() < IDLE_REUSE);
+            !senders.is_empty()
+        });
         let senders = idle.entry(origin).or_default();
-        senders.retain(|(pooled, since)| pooled.is_ready() && since.elapsed() < IDLE_REUSE);
         if senders.len() < self.per_origin && sender.is_ready() {
             senders.push((sender, Instant::now()));
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn idle(&self) -> usize {
+        self.idle.lock().values().map(Vec::len).sum()
     }
 }
 

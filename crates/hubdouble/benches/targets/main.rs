@@ -1355,9 +1355,15 @@ fn fast_receiver(dir: &Path, client_runtime: &Runtime, rows: &mut Vec<Row>) {
             growth_kib,
         )
         .note(format!(
-            "{FAST_EVENTS} deliveries of {size} B, {answered} answered 200, {held:.1} MiB of requests and responses kept"
+            "{FAST_EVENTS} deliveries of {size} B, {held:.1} MiB of requests and responses kept"
         )),
     );
+    rows.push(Row::new(
+        "Fast receiver: deliveries in the log answered 200",
+        Some(float(answered)),
+        "deliveries",
+        Goal::Above(float(FAST_EVENTS - 1)),
+    ));
     rows.push(receiver.connections_row("Fast receiver"));
     running.runtime.shutdown_background();
     receiver.runtime.shutdown_background();

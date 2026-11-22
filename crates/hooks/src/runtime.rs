@@ -137,7 +137,7 @@ pub(crate) struct Shared {
     drains: mpsc::UnboundedSender<oneshot::Sender<i64>>,
     last_id: AtomicI64,
     tasks: Mutex<Vec<JoinHandle<()>>>,
-    pool: Pool,
+    pub(crate) pool: Pool,
 }
 
 impl Shared {
