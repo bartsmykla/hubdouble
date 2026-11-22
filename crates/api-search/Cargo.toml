@@ -1,0 +1,15 @@
+[package]
+name = "hubdouble-api-search"
+description = "T11: Search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+hubdouble-admin.workspace = true
+
+[lints]
+workspace = true
