@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use hubdouble_model::{Access, Installation, RepositorySelection};
 use hubdouble_store::{Repos, Tx};
 
+use crate::check::implicit_metadata;
 use crate::error::AuthError;
 
 /// The most repositories one installation token may name, as GitHub limits it.
@@ -73,7 +74,8 @@ pub fn narrow(
     let permissions = match req.permissions {
         Some(asked) if !asked.is_empty() => {
             for (name, level) in asked {
-                if installation.permissions.get(name).is_none_or(|g| g < level) {
+                let granted = implicit_metadata(name, installation.permissions.get(name).copied());
+                if granted.is_none_or(|g| g < *level) {
                     return Err(AuthError::PermissionNotGranted);
                 }
             }

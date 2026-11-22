@@ -338,7 +338,7 @@ fn installation_level(
     implicit_metadata(permission, level)
 }
 
-fn implicit_metadata(permission: &str, level: Option<Access>) -> Option<Access> {
+pub(crate) fn implicit_metadata(permission: &str, level: Option<Access>) -> Option<Access> {
     if permission == "metadata" {
         level.max(Some(Access::Read))
     } else {

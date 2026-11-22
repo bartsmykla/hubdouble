@@ -658,6 +658,19 @@ fn narrowing_keeps_within_the_installation_grant() {
             assert_eq!(all.repo_ids, None);
             assert_eq!(all.permissions, i.permissions);
 
+            assert!(!i.permissions.contains_key("metadata"));
+            let with_metadata = perms(&[("contents", Access::Read), ("metadata", Access::Read)]);
+            let got = narrow(
+                tx,
+                &i,
+                &NarrowRequest {
+                    permissions: Some(&with_metadata),
+                    ..NarrowRequest::default()
+                },
+            )
+            .expect("metadata read is implicit");
+            assert_eq!(got.permissions, with_metadata);
+
             let beyond = perms(&[("contents", Access::Admin)]);
             let unknown = perms(&[("actions", Access::Read)]);
             for p in [&beyond, &unknown] {
