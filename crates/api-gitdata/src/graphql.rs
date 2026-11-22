@@ -12,6 +12,7 @@ use serde_json::json;
 
 use crate::WRITE_CONTENTS;
 use crate::common::{decode_base64, signature_of};
+use crate::refs::{denied_workflow, workflow_refusal};
 
 const REF_CONNECTION: &str = "RefConnection";
 
@@ -592,6 +593,16 @@ pub(crate) fn update_refs(m: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, G
             Some(b) => optional_oid(b)?,
             None => m.git.resolve_ref(&m.tx, repo.id, &u.name).ok(),
         };
+        if let Some(target) = after {
+            let base = m
+                .git
+                .resolve_ref(&m.tx, repo.id, &u.name)
+                .or_else(|_| m.git.resolve_ref(&m.tx, repo.id, "HEAD"))
+                .ok();
+            if let Some(path) = denied_workflow(&m.tx, m.git, m.actor, &repo, base, target)? {
+                return Err(unprocessable(workflow_refusal(&path)));
+            }
+        }
         m.git
             .update_ref(
                 &mut m.tx,

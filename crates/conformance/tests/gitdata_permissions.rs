@@ -7,6 +7,7 @@ use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer, fixture, validate
 use serde_json::{Value, json};
 
 const DOC: &str = include_str!("../../../docs/inventory/graphql/createCommit.graphql");
+const UPDATE_REFS: &str = include_str!("../../../docs/inventory/graphql/updateRefs.graphql");
 const READ_ONLY: &str = "ghs_contents_read";
 const CONTENTS: &str = "ghs_contents_only";
 const WORKFLOWS: &str = "ghs_contents_and_workflows";
@@ -178,6 +179,35 @@ async fn rest_ref_update_rejects_a_workflow_change_without_the_grant() {
         .await;
     checked("git/update-ref", StatusCode::UNPROCESSABLE_ENTITY, &denied);
     assert_eq!(branch_sha(&client, "main").await, plain);
+}
+
+#[tokio::test]
+async fn update_refs_rejects_a_workflow_change_without_the_grant() {
+    // Given
+    let server = server_with_tokens().await;
+    let client = GoGithub::new(&server).with_token(CONTENTS);
+    let main = branch_sha(&client, "main").await;
+    let sha = detached_commit(&client, &main, ".github/workflows/check.yml").await;
+    let repo = client.get("repos/acme/public").await.json();
+    let input = json!({"input": {"repositoryId": repo["node_id"], "refUpdates": [
+        {"name": "refs/heads/main", "beforeOid": main, "afterOid": sha, "force": false}
+    ]}});
+    // When
+    let denied = Graphql::new(GoGithub::new(&server).with_token(CONTENTS))
+        .query(UPDATE_REFS, &input)
+        .await
+        .json();
+    let main_after_denial = branch_sha(&client, "main").await;
+    let allowed = Graphql::new(GoGithub::new(&server).with_token(WORKFLOWS))
+        .query(UPDATE_REFS, &input)
+        .await
+        .json();
+    // Then
+    assert_eq!(denied["data"]["updateRefs"], Value::Null, "{denied}");
+    assert_eq!(denied["errors"][0]["type"], "UNPROCESSABLE");
+    assert_eq!(main_after_denial, main);
+    assert!(allowed.get("errors").is_none(), "{allowed}");
+    assert_eq!(branch_sha(&client, "main").await, sha);
 }
 
 async fn branch_sha(client: &GoGithub, branch: &str) -> String {

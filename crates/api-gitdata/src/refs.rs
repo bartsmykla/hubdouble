@@ -3,9 +3,10 @@ use std::sync::Arc;
 use http::StatusCode;
 use http::header::LOCATION;
 use hubdouble_auth::{Actor, Target, authorize};
-use hubdouble_git::{EntryMode, GitError, ObjectData, ObjectId, Ref, TreeEntry};
-use hubdouble_model::ApiError;
+use hubdouble_git::{EntryMode, Git, GitError, ObjectData, ObjectId, Ref, TreeEntry};
+use hubdouble_model::{ApiError, Repo};
 use hubdouble_rest::{Ctx, Reply};
+use hubdouble_store::Tx;
 use serde::{Deserialize, Serialize};
 
 use crate::WRITE_WORKFLOWS;
@@ -157,88 +158,117 @@ fn check_workflows(
     target: ObjectId,
     operation: &str,
 ) -> Result<(), ApiError> {
-    if base == Some(target) || !matches!(ctx.actor(), Actor::Installation { .. }) {
-        return Ok(());
+    match denied_workflow(ctx.tx(), ctx.git(), ctx.actor(), ctx.repo()?, base, target)? {
+        Some(path) => Err(ApiError::unprocessable(workflow_refusal(&path))
+            .with_docs(format!("{DOCS}#{operation}"))),
+        None => Ok(()),
     }
-    let before = workflow_tree(ctx, base)?;
-    let after = workflow_tree(ctx, Some(target))?;
+}
+
+pub(crate) fn workflow_refusal(path: &str) -> String {
+    format!(
+        "refusing to allow a GitHub App to create or update workflow `{path}` without `workflows` permission"
+    )
+}
+
+/// The first `.github/workflows` path a ref move from `base` to `target` changes when the actor
+/// is an installation without `workflows: write`; `None` when the move is allowed.
+pub(crate) fn denied_workflow(
+    tx: &Tx,
+    git: &Git,
+    actor: &Actor,
+    repo: &Arc<Repo>,
+    base: Option<ObjectId>,
+    target: ObjectId,
+) -> Result<Option<String>, ApiError> {
+    if base == Some(target) || !matches!(actor, Actor::Installation { .. }) {
+        return Ok(None);
+    }
+    let trees = Trees {
+        tx,
+        git,
+        repo: repo.id,
+    };
+    let before = trees.workflows(base)?;
+    let after = trees.workflows(Some(target))?;
     if before == after {
-        return Ok(());
+        return Ok(None);
     }
-    match authorize(
-        ctx.tx(),
-        ctx.actor(),
-        &WRITE_WORKFLOWS,
-        Target::Repo(ctx.repo()?),
-    ) {
-        Ok(()) => return Ok(()),
+    match authorize(tx, actor, &WRITE_WORKFLOWS, Target::Repo(repo)) {
+        Ok(()) => return Ok(None),
         Err(error) if error.status == 403 => (),
         Err(error) => return Err(error),
     }
-    if let Some(path) = changed_path(ctx, before, after, WORKFLOWS)? {
-        return Err(ApiError::unprocessable(format!(
-            "refusing to allow a GitHub App to create or update workflow `{path}` without `workflows` permission"
-        )).with_docs(format!("{DOCS}#{operation}")));
-    }
-    Ok(())
+    trees.changed_path(before, after, WORKFLOWS)
 }
 
-fn workflow_tree(ctx: &Ctx<'_>, target: Option<ObjectId>) -> Result<Option<ObjectId>, ApiError> {
-    let Some(target) = target else {
-        return Ok(None);
-    };
-    let repo = ctx.repo()?.id;
-    match ctx
-        .git()
-        .expression(ctx.tx(), repo, &format!("{target}:{WORKFLOWS}"))
-    {
-        Ok(object) if matches!(object.data, ObjectData::Tree(_)) => Ok(Some(object.id)),
-        Ok(_) | Err(GitError::NotFound | GitError::WrongKind) => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+struct Trees<'a> {
+    tx: &'a Tx,
+    git: &'a Git,
+    repo: i64,
 }
 
-fn tree_entries(ctx: &Ctx<'_>, id: Option<ObjectId>) -> Result<Arc<[TreeEntry]>, ApiError> {
-    let Some(id) = id else {
-        return Ok(Arc::from([]));
-    };
-    match ctx.git().object(ctx.tx(), ctx.repo()?.id, id)?.data {
-        ObjectData::Tree(entries) => Ok(entries),
-        _ => Err(GitError::WrongKind.into()),
+impl Trees<'_> {
+    fn workflows(&self, target: Option<ObjectId>) -> Result<Option<ObjectId>, ApiError> {
+        let Some(target) = target else {
+            return Ok(None);
+        };
+        match self
+            .git
+            .expression(self.tx, self.repo, &format!("{target}:{WORKFLOWS}"))
+        {
+            Ok(object) if matches!(object.data, ObjectData::Tree(_)) => Ok(Some(object.id)),
+            Ok(_) | Err(GitError::NotFound | GitError::WrongKind) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
-}
 
-fn changed_path(
-    ctx: &Ctx<'_>,
-    before: Option<ObjectId>,
-    after: Option<ObjectId>,
-    prefix: &str,
-) -> Result<Option<String>, ApiError> {
-    if before == after {
-        return Ok(None);
-    }
-    let before = tree_entries(ctx, before)?;
-    let after = tree_entries(ctx, after)?;
-    let prior = before
-        .iter()
-        .map(|entry| (entry, after.iter().find(|next| next.name == entry.name)));
-    let added = after
-        .iter()
-        .filter(|next| before.iter().all(|entry| entry.name != next.name))
-        .map(|entry| (entry, None));
-    for (entry, other) in prior.chain(added) {
-        if Some(entry) == other {
-            continue;
-        }
-        let path = format!("{prefix}/{}", entry.name);
-        if entry.mode != EntryMode::Tree || other.is_some_and(|item| item.mode != EntryMode::Tree) {
-            return Ok(Some(path));
-        }
-        if let Some(path) = changed_path(ctx, Some(entry.id), other.map(|item| item.id), &path)? {
-            return Ok(Some(path));
+    fn entries(&self, id: Option<ObjectId>) -> Result<Arc<[TreeEntry]>, ApiError> {
+        let Some(id) = id else {
+            return Ok(Arc::from([]));
+        };
+        match self.git.object(self.tx, self.repo, id)?.data {
+            ObjectData::Tree(entries) => Ok(entries),
+            _ => Err(GitError::WrongKind.into()),
         }
     }
-    Ok(None)
+
+    fn changed_path(
+        &self,
+        before: Option<ObjectId>,
+        after: Option<ObjectId>,
+        prefix: &str,
+    ) -> Result<Option<String>, ApiError> {
+        if before == after {
+            return Ok(None);
+        }
+        let before = self.entries(before)?;
+        let after = self.entries(after)?;
+        let prior = before
+            .iter()
+            .map(|entry| (entry, after.iter().find(|next| next.name == entry.name)));
+        let added = after
+            .iter()
+            .filter(|next| before.iter().all(|entry| entry.name != next.name))
+            .map(|entry| (entry, None));
+        for (entry, other) in prior.chain(added) {
+            if Some(entry) == other {
+                continue;
+            }
+            let path = format!("{prefix}/{}", entry.name);
+            if entry.mode != EntryMode::Tree
+                || other.is_some_and(|item| item.mode != EntryMode::Tree)
+            {
+                return Ok(Some(path));
+            }
+            if let Some(path) =
+                self.changed_path(Some(entry.id), other.map(|item| item.id), &path)?
+            {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
+    }
 }
 
 pub(crate) fn delete_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
