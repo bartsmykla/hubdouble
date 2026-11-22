@@ -12,6 +12,7 @@ publish.workspace = true
 bytes.workspace = true
 http.workspace = true
 http-body-util.workspace = true
+hubdouble-auth.workspace = true
 hubdouble-git.workspace = true
 hubdouble-gql.workspace = true
 hubdouble-hooks.workspace = true

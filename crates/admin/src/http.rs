@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http::header::{AUTHORIZATION, CONTENT_TYPE};
+use http::header::CONTENT_TYPE;
 use http::{HeaderValue, Method, Request, StatusCode};
 use http_body_util::{BodyExt, Full, Limited};
 use hubdouble_model::{ApiError, FieldError};
@@ -69,21 +69,6 @@ fn gone() -> AdminResponse {
     error_response(&ApiError::new(410, "The cursor is older than the log"))
 }
 
-fn authorized(request: &Request<Incoming>, token: &str) -> bool {
-    let Some(value) = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-    else {
-        return false;
-    };
-    let given = value
-        .strip_prefix("Bearer ")
-        .or_else(|| value.strip_prefix("bearer "))
-        .or_else(|| value.strip_prefix("token "));
-    given.is_some_and(|g| g.trim() == token)
-}
-
 /// Reads a request body as JSON, `{}` when it is empty.
 ///
 /// # Errors
@@ -141,8 +126,10 @@ impl Admin {
         request: Request<Incoming>,
         services: Arc<Services>,
     ) -> AdminResponse {
-        if !authorized(&request, &services.config.admin_token) {
-            return error_response(&ApiError::unauthorized());
+        if let Err(e) =
+            hubdouble_auth::authenticate_admin(request.headers(), &services.config.admin_token)
+        {
+            return error_response(&e);
         }
         let segs = segments(request.uri().path());
         let query = Query::parse(request.uri().query().unwrap_or(""));
