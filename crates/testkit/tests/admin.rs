@@ -127,3 +127,14 @@ async fn a_counted_fault_answers_that_many_requests_then_stops() {
     let faults = server.admin(Method::GET, "faults", None).await.json();
     assert_eq!(faults, json!([]));
 }
+
+#[tokio::test]
+async fn drain_and_reset_answer_no_content() {
+    let server = TestServer::builder().fixture().start().await;
+
+    let drained = server.admin(Method::POST, "hooks/drain", None).await;
+    let reset = server.admin(Method::POST, "reset", None).await;
+
+    assert_eq!(drained.status, StatusCode::NO_CONTENT);
+    assert_eq!(reset.status, StatusCode::NO_CONTENT);
+}
