@@ -1,4 +1,5 @@
 mod common;
+mod contents;
 mod data;
 mod graphql;
 mod refs;
@@ -51,7 +52,7 @@ pub fn register(r: &mut Registrar<'_>) {
     rest.handle("git/update-ref", WRITE_CONTENTS, refs::update_ref);
     rest.handle("git/delete-ref", WRITE_CONTENTS, refs::delete_ref);
     rest.handle("git/get-tag", READ_CONTENTS, data::get_tag);
-    rest.handle("repos/get-content", READ_CONTENTS, repos::get_content);
+    rest.handle("repos/get-content", READ_CONTENTS, contents::get_content);
     rest.handle("repos/list-commits", READ_CONTENTS, repos::list_commits);
     rest.handle("repos/get-commit", READ_CONTENTS, repos::get_commit);
     rest.handle("repos/compare-commits", READ_CONTENTS, repos::compare);

@@ -4,7 +4,6 @@ use http::StatusCode;
 use http::header::{ETAG, LINK};
 use hubdouble_git::{
     Commit, EntryMode, FileDiff, FileStatus, Git, GitError, ObjectData, ObjectId, ObjectKind,
-    TreeEntry,
 };
 use hubdouble_model::{ApiError, Repo};
 use hubdouble_render::{SimpleUser, Urls};
@@ -13,190 +12,13 @@ use hubdouble_store::{Rulesets, Tx};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    GitPerson, Links, ObjectLink, ParentLink, Verification, accepted_media, accepts, commit_at,
-    network_repo, object_node_id, sender, unprocessable, user_of, wrapped_base64,
+    GitPerson, Links, ObjectLink, ParentLink, Verification, accepts, commit_at, network_repo,
+    object_node_id, sender, unprocessable, user_of,
 };
-use crate::data::RAW;
 
 const COMMIT_FILES: usize = 300;
 const COMPARE_COMMITS: usize = 250;
 const SHA_MEDIA: &str = "application/vnd.github.sha; charset=utf-8";
-
-#[derive(Serialize)]
-struct ContentLinks {
-    #[serde(rename = "self")]
-    own: String,
-    git: Option<String>,
-    html: Option<String>,
-}
-
-#[derive(Serialize)]
-struct Content {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    encoding: Option<&'static str>,
-    size: usize,
-    name: String,
-    path: String,
-    #[serde(rename = "content", skip_serializing_if = "Option::is_none")]
-    data: Option<String>,
-    sha: ObjectId,
-    url: String,
-    git_url: Option<String>,
-    html_url: Option<String>,
-    download_url: Option<String>,
-    #[serde(rename = "_links")]
-    links: ContentLinks,
-}
-
-#[derive(Serialize)]
-struct Directory {
-    #[serde(flatten)]
-    content: Content,
-    entries: Vec<Content>,
-}
-
-struct At<'a> {
-    links: &'a Links,
-    reference: &'a str,
-}
-
-impl At<'_> {
-    fn content(
-        &self,
-        kind: &'static str,
-        path: &str,
-        sha: ObjectId,
-        object: ObjectKind,
-        size: usize,
-        content: Option<String>,
-    ) -> Content {
-        let name = path.rsplit('/').next().unwrap_or(path).to_owned();
-        let own = format!("{}/contents/{path}?ref={}", self.links.api, self.reference);
-        let view = if kind == "dir" { "tree" } else { "blob" };
-        let html = format!("{}/{view}/{}/{path}", self.links.web, self.reference);
-        let git = (kind != "submodule").then(|| self.links.object(object, sha));
-        Content {
-            kind,
-            encoding: content.is_some().then_some("base64"),
-            size,
-            name,
-            path: path.to_owned(),
-            data: content,
-            sha,
-            url: own.clone(),
-            git_url: git.clone(),
-            html_url: Some(html.clone()),
-            download_url: (kind == "file")
-                .then(|| format!("{}/raw/{}/{path}", self.links.web, self.reference)),
-            links: ContentLinks {
-                own,
-                git,
-                html: Some(html),
-            },
-        }
-    }
-}
-
-fn listing_kind(mode: EntryMode) -> &'static str {
-    match mode {
-        EntryMode::Tree => "dir",
-        EntryMode::Submodule => "submodule",
-        EntryMode::Symlink => "symlink",
-        EntryMode::File | EntryMode::Executable => "file",
-    }
-}
-
-pub(crate) fn get_content(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
-    let repo = ctx.repo()?;
-    let path = ctx.param("path")?.trim_matches('/').to_owned();
-    let reference = ctx
-        .query()
-        .get("ref")
-        .filter(|r| !r.is_empty())
-        .unwrap_or(&repo.default_branch)
-        .to_owned();
-    let (git, tx) = (ctx.git(), ctx.tx());
-    let (commit, _) = commit_at(git, tx, repo.id, &reference)
-        .ok_or_else(|| ApiError::new(404, format!("No commit found for the ref {reference}")))?;
-    let object = git
-        .expression(tx, repo.id, &format!("{commit}:{path}"))
-        .map_err(|_| ApiError::not_found())?;
-    let links = Links::of(ctx)?;
-    let at = At {
-        links: &links,
-        reference: &reference,
-    };
-    match object.data {
-        ObjectData::Blob(data) => {
-            if let Some(media) = accepted_media(ctx, "raw") {
-                let content_type = match media {
-                    "application/vnd.github.raw+json" => {
-                        "application/vnd.github.raw+json; charset=utf-8"
-                    }
-                    "application/vnd.github.v3.raw" => {
-                        "application/vnd.github.v3.raw; charset=utf-8"
-                    }
-                    "application/vnd.github.v3.raw+json" => {
-                        "application/vnd.github.v3.raw+json; charset=utf-8"
-                    }
-                    _ => RAW,
-                };
-                return Ok(Reply::raw(content_type, data.to_vec()));
-            }
-            Reply::json(&at.content(
-                "file",
-                &path,
-                object.id,
-                ObjectKind::Blob,
-                data.len(),
-                Some(wrapped_base64(&data)),
-            ))
-        }
-        ObjectData::Tree(entries) => {
-            let listing = entries
-                .iter()
-                .map(|e| entry_content(git, tx, repo.id, &at, &path, e))
-                .collect::<Result<Vec<_>, _>>()?;
-            if accepts(ctx, "object") {
-                let content = at.content("dir", &path, object.id, ObjectKind::Tree, 0, None);
-                Reply::json(&Directory {
-                    content,
-                    entries: listing,
-                })
-            } else {
-                Reply::json(&listing)
-            }
-        }
-        ObjectData::Commit(_) | ObjectData::Tag(_) => Err(ApiError::not_found()),
-    }
-}
-
-fn entry_content(
-    git: &Git,
-    tx: &Tx,
-    repo: i64,
-    at: &At<'_>,
-    dir: &str,
-    e: &TreeEntry,
-) -> Result<Content, ApiError> {
-    let path = if dir.is_empty() {
-        e.name.clone()
-    } else {
-        format!("{dir}/{}", e.name)
-    };
-    let kind = listing_kind(e.mode);
-    let (object, size) = match e.mode {
-        EntryMode::Tree => (ObjectKind::Tree, 0),
-        EntryMode::Submodule => (ObjectKind::Commit, 0),
-        _ => match git.object(tx, repo, e.id)?.data {
-            ObjectData::Blob(d) => (ObjectKind::Blob, d.len()),
-            _ => (ObjectKind::Blob, 0),
-        },
-    };
-    Ok(at.content(kind, &path, e.id, object, size, None))
-}
 
 #[derive(Serialize)]
 struct CommitDetail {
