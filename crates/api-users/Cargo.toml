@@ -9,7 +9,29 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
+hmac.workspace = true
+http.workspace = true
 hubdouble-admin.workspace = true
+hubdouble-auth.workspace = true
+hubdouble-gql.workspace = true
+hubdouble-model.workspace = true
+hubdouble-render.workspace = true
+hubdouble-rest.workspace = true
+hubdouble-store.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+criterion.workspace = true
+hubdouble-git.workspace = true
+
+[[bench]]
+name = "users"
+harness = false
 
 [lints]
 workspace = true
