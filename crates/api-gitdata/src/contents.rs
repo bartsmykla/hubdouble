@@ -10,6 +10,8 @@ use crate::common::{Links, accepted_media, accepts, commit_at, wrapped_base64};
 use crate::data::RAW;
 
 const MAX_SYMLINKS: usize = 40;
+const MAX_DIRECTORY_ENTRIES: usize = 1_000;
+const MAX_INLINE_BYTES: usize = 1024 * 1024;
 
 #[derive(Serialize)]
 struct ContentLinks {
@@ -59,20 +61,23 @@ impl At<'_> {
         sha: ObjectId,
         object: ObjectKind,
         size: usize,
-        content: Option<String>,
+        content: Option<(&'static str, String)>,
     ) -> Content {
         let name = path.rsplit('/').next().unwrap_or(path).to_owned();
         let own = format!("{}/contents/{path}?ref={}", self.links.api, self.reference);
         let view = if kind == "dir" { "tree" } else { "blob" };
         let html = format!("{}/{view}/{}/{path}", self.links.web, self.reference);
         let git = (kind != "submodule").then(|| self.links.object(object, sha));
+        let (encoding, data) = content.map_or((None, None), |(encoding, data)| {
+            (Some(encoding), Some(data))
+        });
         Content {
             kind,
-            encoding: content.is_some().then_some("base64"),
+            encoding,
             size,
             name,
             path: path.to_owned(),
-            data: content,
+            data,
             sha,
             url: own.clone(),
             git_url: git.clone(),
@@ -201,6 +206,7 @@ pub(crate) fn get_content(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         ObjectData::Tree(entries) => {
             let listing = entries
                 .iter()
+                .take(MAX_DIRECTORY_ENTRIES)
                 .map(|e| entry_content(&tree, &at, path, e))
                 .collect::<Result<Vec<_>, _>>()?;
             if accepts(ctx, "object") {
@@ -235,13 +241,18 @@ fn file(
         };
         return Ok(Reply::raw(content_type, data.to_vec()));
     }
+    let content = if data.len() > MAX_INLINE_BYTES {
+        ("none", String::new())
+    } else {
+        ("base64", wrapped_base64(data))
+    };
     Reply::json(&at.content(
         "file",
         path,
         id,
         ObjectKind::Blob,
         data.len(),
-        Some(wrapped_base64(data)),
+        Some(content),
     ))
 }
 

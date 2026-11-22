@@ -3,11 +3,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use http::StatusCode;
+use http::header::ACCEPT;
+use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use hubdouble_git::{Commit, EntryMode, FileChange, ObjectData, Signature};
 use hubdouble_model::Timestamp;
 use hubdouble_testkit::fixture::{ALICE_ID, ALICE_TOKEN, PUBLIC_REPO_ID};
-use hubdouble_testkit::{GoGithub, TestServer};
+use hubdouble_testkit::{Answer, GoGithub, TestServer};
 use serde_json::{Value, json};
 
 async fn server() -> TestServer {
@@ -211,4 +212,84 @@ async fn file_symlinks_keep_the_link_sha_and_read_the_target_bytes() {
     assert_eq!(direct["size"], 3);
     assert_eq!(direct["content"], "e30K\n");
     assert_eq!(direct["git_url"], listed[1]["git_url"]);
+}
+
+async fn contents_with_media(client: &GoGithub, path: &str, media: Option<&'static str>) -> Answer {
+    if let Some(media) = media {
+        client
+            .call_headers(
+                Method::GET,
+                path,
+                HeaderMap::from_iter([(ACCEPT, HeaderValue::from_static(media))]),
+            )
+            .await
+    } else {
+        client.get(path).await
+    }
+}
+
+#[tokio::test]
+async fn contents_caps_directory_entries_and_large_file_inline_data() {
+    const INLINE_LIMIT: usize = 1024 * 1024;
+    const OBJECT: &str = "application/vnd.github.object+json";
+    const RAW: &str = "application/vnd.github.raw+json";
+    let s = server().await;
+    let data: Arc<[u8]> = vec![b'x'; INLINE_LIMIT + 1].into();
+    let mut changes: Vec<_> = (0..1_001)
+        .map(|n| write(&format!("wide/{n:04}"), b"x".as_slice(), EntryMode::File))
+        .collect();
+    changes.extend([
+        write("boundary", &data[..INLINE_LIMIT], EntryMode::File),
+        write("large", data.clone(), EntryMode::File),
+    ]);
+    commit_files(&s, &changes);
+    let client = GoGithub::new(&s).with_token(ALICE_TOKEN);
+    let dir_path = "repos/acme/public/contents/wide";
+    let file_path = "repos/acme/public/contents/large";
+
+    let mut counts = Vec::new();
+    for media in [None, Some(OBJECT), Some(RAW)] {
+        let answer = contents_with_media(&client, dir_path, media).await;
+        assert_eq!(answer.status, StatusCode::OK);
+        let body = answer.json();
+        let entries = if media == Some(OBJECT) {
+            &body["entries"]
+        } else {
+            &body
+        }
+        .as_array()
+        .unwrap();
+        assert_eq!(entries[0]["name"], "0000");
+        assert_eq!(entries[999]["name"], "0999");
+        counts.push(entries.len());
+    }
+    let mut inline = Vec::new();
+    for media in [None, Some(OBJECT)] {
+        let answer = contents_with_media(&client, file_path, media).await;
+        assert_eq!(answer.status, StatusCode::OK);
+        let body = answer.json();
+        assert_eq!(body["size"], INLINE_LIMIT + 1);
+        inline.push((
+            body["encoding"].as_str().unwrap().to_owned(),
+            body["content"].as_str().unwrap().len(),
+        ));
+    }
+    assert_eq!(
+        (counts, inline),
+        (vec![1_000; 3], vec![("none".to_owned(), 0); 2])
+    );
+
+    let boundary = client
+        .get("repos/acme/public/contents/boundary")
+        .await
+        .json();
+    assert_eq!(boundary["encoding"], "base64");
+    assert_eq!(boundary["content"].as_str().unwrap().get(..4), Some("eHh4"));
+    let raw = contents_with_media(&client, file_path, Some(RAW)).await;
+    assert_eq!(raw.status, StatusCode::OK);
+    assert_eq!(
+        raw.header("content-type"),
+        "application/vnd.github.raw+json; charset=utf-8"
+    );
+    assert!(raw.body.as_ref() == data.as_ref());
 }
