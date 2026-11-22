@@ -1972,7 +1972,18 @@ dependencies = [
 name = "hubdouble-api-issues"
 version = "0.1.0"
 dependencies = [
+ "criterion",
+ "http",
  "hubdouble-admin",
+ "hubdouble-auth",
+ "hubdouble-gql",
+ "hubdouble-hooks",
+ "hubdouble-model",
+ "hubdouble-render",
+ "hubdouble-rest",
+ "hubdouble-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
