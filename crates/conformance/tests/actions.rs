@@ -12,8 +12,11 @@ use std::collections::BTreeSet;
 
 use http::header::{self, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
-use hubdouble_store::WorkflowRuns;
-use hubdouble_testkit::fixture::{ALICE_TOKEN, BOB_TOKEN, WEBHOOK_SECRET};
+use hubdouble_model::{Issue, IssueState, Pull, PullRef, Timestamp, node_id};
+use hubdouble_store::{Counters, Issues, WorkflowRuns};
+use hubdouble_testkit::fixture::{
+    ALICE_ID, ALICE_TOKEN, BOB_TOKEN, PUBLIC_REPO_ID, WEBHOOK_SECRET,
+};
 use hubdouble_testkit::validate::webhook_payload;
 use hubdouble_testkit::{GoGithub, TestServer};
 use serde_json::json;
@@ -201,6 +204,93 @@ async fn workflow_run_filters_apply_together_before_pagination() {
             assert!(!two["workflow_runs"][0][field].is_null(), "{field}");
         }
     }
+}
+
+fn open_pull_request(server: &TestServer, head: &str) -> (i64, String) {
+    let services = server.server.services();
+    services
+        .store
+        .update(|tx| {
+            let sha = services
+                .git
+                .resolve_ref(tx, PUBLIC_REPO_ID, &format!("refs/heads/{head}"))
+                .unwrap()
+                .to_string();
+            let id = tx.next_id();
+            let pull_id = tx.next_id();
+            let number = tx.table_mut::<Counters>().next_number(PUBLIC_REPO_ID);
+            let side = |name: &str| PullRef {
+                repo_id: Some(PUBLIC_REPO_ID),
+                ref_name: name.to_owned(),
+                sha: sha.clone(),
+            };
+            tx.table_mut::<Issues>().insert(Issue {
+                id,
+                node_id: node_id::entity(node_id::ISSUE, id),
+                repo_id: PUBLIC_REPO_ID,
+                number,
+                title: "feature".to_owned(),
+                body: None,
+                user_id: ALICE_ID,
+                state: IssueState::Open,
+                state_reason: None,
+                locked: false,
+                active_lock_reason: None,
+                label_ids: Vec::new(),
+                assignee_ids: Vec::new(),
+                closed_by: None,
+                created_at: Timestamp::SEED,
+                updated_at: Timestamp::SEED,
+                closed_at: None,
+                last_edited_at: None,
+                pull: Some(Pull {
+                    id: pull_id,
+                    node_id: node_id::entity(node_id::PULL_REQUEST, pull_id),
+                    head: side(head),
+                    base: side("main"),
+                    draft: false,
+                    merged_at: None,
+                    merge_commit_sha: None,
+                    merged_by: None,
+                    mergeable: Some(true),
+                    maintainer_can_modify: false,
+                    requested_reviewers: Vec::new(),
+                    requested_teams: Vec::new(),
+                }),
+            })?;
+            Ok((number, sha))
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn workflow_runs_leave_out_pull_requests_when_client_excludes_them() {
+    // Given a run on the head of an open pull request
+    let server = server("none").await;
+    let client = client(&server);
+    let (number, sha) = open_pull_request(&server, "feature");
+    let run = dispatch(&client, "feature").await["workflow_run_id"]
+        .as_i64()
+        .unwrap();
+    let list =
+        |exclude: &str| format!("{ACTIONS}/runs?{exclude}head_sha={sha}&page=1&per_page=100");
+
+    // When the runs of that head are listed with and without exclude_pull_requests, as
+    // client's ciSuites lists them (internal/dispatch/ci.go:200)
+    let excluded = valid(
+        "list-workflow-runs-for-repo",
+        &client.get(&list("exclude_pull_requests=true&")).await,
+    );
+    let included = valid("list-workflow-runs-for-repo", &client.get(&list("")).await);
+
+    // Then only the answer without the option names the pull request
+    assert_eq!(excluded["total_count"], 1);
+    assert_eq!(excluded["workflow_runs"][0]["id"], run);
+    assert_eq!(excluded["workflow_runs"][0]["pull_requests"], json!([]));
+    assert_eq!(
+        included["workflow_runs"][0]["pull_requests"][0]["number"],
+        number
+    );
 }
 
 #[tokio::test]
