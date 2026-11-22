@@ -319,6 +319,23 @@ A team member must be an active member of the org. Put a parent team before its 
     subject_type: file
 ```
 
+## `issue_link`
+
+Links a pull request to an issue by hand, as the issue's Development sidebar does on GitHub. The issue and the pull request are in the same repository. GraphQL `Issue.closedByPullRequestsReferences` lists the pull request unless `excludeUserLinked` is `true`.
+
+| Field | Type | Required | Default |
+| --- | --- | --- | --- |
+| `repository` | `owner/repo` string | Yes | None |
+| `issue_number` | Integer | Yes | None |
+| `pull_number` | Integer | Yes | None |
+
+```yaml
+- kind: issue_link
+  repository: workshop/demo
+  issue_number: 2
+  pull_number: 1
+```
+
 ## `check_run`
 
 | Field | Type | Required | Default |

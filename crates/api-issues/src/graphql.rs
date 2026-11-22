@@ -8,6 +8,7 @@ use hubdouble_model::{
 use hubdouble_store::{Accounts, IssueComments, Issues, Repos};
 use serde::Serialize;
 
+use crate::links::IssueLinks;
 use crate::shared::{ISSUES_READ, READ, full_name};
 
 const PULLS_READ: Requirement = Requirement {
@@ -103,20 +104,20 @@ fn closed_by(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError
     let issue = obj.get::<Issue>()?;
     let include_closed = args.get::<bool>("includeClosedPrs")?.unwrap_or(false);
     let user_linked_only = args.get::<bool>("userLinkedOnly")?.unwrap_or(false);
+    let exclude_user_linked = args.get::<bool>("excludeUserLinked")?.unwrap_or(false);
     let repo = read_repo(ctx, issue.repo_id, &PULLS_READ)?;
     let full = full_name(ctx.tx, repo);
-    let pulls: Vec<&Arc<Issue>> = if user_linked_only {
+    let issues = ctx.tx.table::<Issues>();
+    let mut pulls: Vec<&Arc<Issue>> = if user_linked_only {
         Vec::new()
     } else {
-        ctx.tx
-            .table::<Issues>()
+        issues
             .in_repo(repo.id)
             .filter(|i| {
                 i.pull
                     .as_ref()
                     .is_some_and(|p| p.base.ref_name == repo.default_branch)
             })
-            .filter(|i| include_closed || i.state == IssueState::Open)
             .filter(|i| {
                 i.body
                     .as_deref()
@@ -124,11 +125,23 @@ fn closed_by(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError
             })
             .collect()
     };
+    if !exclude_user_linked {
+        pulls.extend(
+            ctx.tx
+                .table::<IssueLinks>()
+                .children(issue.id)
+                .filter_map(|l| issues.get(l.pull_issue_id))
+                .filter(|p| read_repo(ctx, p.repo_id, &PULLS_READ).is_ok()),
+        );
+    }
+    pulls.retain(|p| include_closed || p.state == IssueState::Open);
+    pulls.sort_by_key(|p| p.id);
+    pulls.dedup_by_key(|p| p.id);
     connection(
         "PullRequestConnection",
         &pulls,
         args,
-        |p| p.number.to_string(),
+        |p| p.id.to_string(),
         |p| Resolved::Object {
             type_name: "PullRequest",
             value: Arc::<Issue>::clone(p),

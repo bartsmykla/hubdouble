@@ -984,3 +984,51 @@ async fn implement_issue_reads_the_issue_and_the_open_pull_requests_that_close_i
         );
     }
 }
+
+#[tokio::test]
+async fn implement_issue_lists_an_open_pull_request_linked_by_hand() {
+    // Given
+    let server = start().await;
+    let issue = open_issue(&as_alice(&server), &json!({"title": "bug"})).await;
+    let n = issue["number"].as_i64().unwrap();
+    let keyword = pull_request(&server, "fix", &format!("Fixes #{n}"), IssueState::Open);
+    let by_hand = pull_request(&server, "wip", "work in progress", IssueState::Open);
+    let closed_by_hand = pull_request(&server, "old", "", IssueState::Closed);
+    for pull in [by_hand, closed_by_hand] {
+        let link = json!({"repository": format!("{ORG}/{PUBLIC_REPO}"),
+                          "issue_number": n, "pull_number": pull});
+        let answer = server.admin(Method::POST, "issue_link", Some(&link)).await;
+        assert_eq!(answer.status, StatusCode::CREATED);
+    }
+    let alice = Graphql::new(as_alice(&server));
+    let vars = json!({"owner": ORG, "name": PUBLIC_REPO, "number": n});
+    let numbers = |answer: &Value| -> Vec<i64> {
+        answer["data"]["repository"]["issue"]["closedByPullRequestsReferences"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["number"].as_i64().unwrap())
+            .collect()
+    };
+    let only = |argument: &str| {
+        format!(
+            "query($owner: String!, $name: String!, $number: Int!) {{
+               repository(owner: $owner, name: $name) {{ issue(number: $number) {{
+                 closedByPullRequestsReferences(first: 20, {argument}: true) {{ nodes {{ number }} }}
+               }} }} }}"
+        )
+    };
+    // When
+    let found = alice.query(IMPLEMENT_ISSUE, &vars).await.json();
+    let user_linked = alice.query(&only("userLinkedOnly"), &vars).await.json();
+    let keyword_only = alice.query(&only("excludeUserLinked"), &vars).await.json();
+    // Then
+    assert_eq!(numbers(&found), [keyword, by_hand]);
+    assert_eq!(
+        found["data"]["repository"]["issue"]["closedByPullRequestsReferences"]["nodes"][1],
+        json!({"number": by_hand, "state": "OPEN", "headRefName": "feature",
+               "headRepository": {"nameWithOwner": "acme/public"}})
+    );
+    assert_eq!(numbers(&user_linked), [by_hand]);
+    assert_eq!(numbers(&keyword_only), [keyword]);
+}

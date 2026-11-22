@@ -4,6 +4,7 @@ mod events;
 mod graphql;
 mod issues;
 mod labels;
+mod links;
 mod reactions;
 mod shared;
 
@@ -13,10 +14,13 @@ pub use shared::{comment_view, issue_view};
 
 use crate::shared::{ISSUES_READ, ISSUES_WRITE, READ, WRITE};
 
-/// Registers what T7 owns: the issue event side table, the issue, label, comment and reaction
-/// operations, and the `Issue`, `IssueComment` and `Repository.issue` GraphQL types and fields.
+/// Registers what T7 owns: the issue event and manual link side tables, the `issue_link` kind,
+/// the issue, label, comment and reaction operations, and the `Issue`, `IssueComment` and
+/// `Repository.issue` GraphQL types and fields.
 pub fn register(r: &mut Registrar<'_>) {
     r.store.register_table::<events::IssueEvents>();
+    r.store.register_table::<links::IssueLinks>();
+    r.admin.kind("issue_link", links::seed);
 
     let rest = &mut *r.rest;
     rest.handle("issues/list-for-repo", ISSUES_READ, issues::list);
