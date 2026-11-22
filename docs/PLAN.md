@@ -311,6 +311,7 @@ impl Registry {
     pub fn handle(&mut self, operation_id: &str, req: Requirement, h: Handler); // panics on an unknown or already registered operation
     pub fn extra(&mut self, method: Method, path: &str, operation_id: &'static str, req: Requirement, h: Handler); // routes outside the OpenAPI bundle
     pub fn extra_authenticating(/* as extra */); // the handler checks its own bearer (the Actions runtime token); it runs as Actor::Anonymous
+    pub fn extra_writing(/* as extra */); // a GET that changes state (/orgs/{org}/sso records SSO); the server runs it in Store::update
 }
 ```
 

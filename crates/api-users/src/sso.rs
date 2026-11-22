@@ -6,11 +6,11 @@ use hubdouble_rest::{Ctx, Registry, Reply};
 use hubdouble_store::Accounts;
 
 use crate::oauth::login_cookie;
-use crate::params::{Form, hidden, html_escape, page};
+use crate::params::Form;
 use crate::state;
 
 pub(crate) fn register(registry: &mut Registry) {
-    registry.extra(
+    registry.extra_writing(
         Method::GET,
         "/orgs/{org}/sso",
         "oauth/sso-page",
@@ -37,29 +37,25 @@ fn org(ctx: &Ctx<'_>) -> Result<(i64, String), ApiError> {
 }
 
 fn sso_page(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
-    let (_, org) = org(ctx)?;
     let query = ctx.query();
-    let action = format!(
-        "{}/orgs/{}/sso",
-        ctx.urls().base,
-        hubdouble_render::escape(&org)
-    );
-    let body = format!(
-        "<form id=\"sso\" method=\"post\" action=\"{}\">{}{}\
-         <button>Continue</button></form>\
-         <script>document.getElementById(\"sso\").submit()</script>",
-        html_escape(&action),
-        hidden("return_to", query.get("return_to")),
-        hidden("login", query.get("login")),
-    );
-    Ok(page(&format!("Single sign-on to {org}"), &body))
+    let return_to = query.get("return_to").map(str::to_owned);
+    let login = query.get("login").map(str::to_owned);
+    complete(ctx, return_to.as_deref(), login.as_deref())
 }
 
 fn sso(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let form = Form::read(ctx)?;
+    complete(ctx, form.get("return_to"), form.get("login"))
+}
+
+fn complete(
+    ctx: &mut Ctx<'_>,
+    return_to: Option<&str>,
+    login: Option<&str>,
+) -> Result<Reply, ApiError> {
     let (org, _) = org(ctx)?;
     let base = ctx.urls().base.clone();
-    let target = match form.get("return_to") {
+    let target = match return_to {
         None => format!("{base}/"),
         Some(path) if path.starts_with('/') && !path.starts_with("//") => format!("{base}{path}"),
         Some(url) if url == base || url.starts_with(&format!("{base}/")) => url.to_owned(),
@@ -67,7 +63,6 @@ fn sso(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             return Err(ApiError::unprocessable("return_to must be on this origin"));
         }
     };
-    let login = form.get("login");
     let user = state::signed_in(ctx.tx(), login, ctx.header(COOKIE.as_str()))?;
     let (user_id, user_login) = (user.id, user.login.clone());
     record_sso(ctx.tx_mut()?, user_id, org)?;

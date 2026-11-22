@@ -148,7 +148,7 @@ impl Inner {
             urls,
         };
         let mut who = Who::default();
-        let read = parts.method == Method::GET || parts.method == Method::HEAD;
+        let read = (parts.method == Method::GET || parts.method == Method::HEAD) && !entry.writes;
         let store = &self.services.store;
         let result = catch_unwind(AssertUnwindSafe(|| {
             if read {

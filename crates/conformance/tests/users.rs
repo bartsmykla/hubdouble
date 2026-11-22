@@ -659,14 +659,18 @@ async fn sso_is_required_until_the_user_signs_in_through_the_org_sso_page() {
 
     // When
     let blocked = client.get("orgs/acme-sso/repos?per_page=1").await;
-    let page = raw(
+    let followed = raw(
         server.addr,
         "GET",
-        &format!("/orgs/acme-sso/sso?{}", form(&[("return_to", &return_to)])),
+        &format!(
+            "/orgs/acme-sso/sso?{}",
+            form(&[("return_to", &return_to), ("login", fixture::ALICE)])
+        ),
         &[],
         "",
     )
     .await;
+    let reached = client.get("orgs/acme-sso/repos?per_page=1").await;
     let recorded = raw(
         server.addr,
         "POST",
@@ -684,7 +688,6 @@ async fn sso_is_required_until_the_user_signs_in_through_the_org_sso_page() {
     )
     .await;
     let unknown = raw(server.addr, "POST", "/orgs/nope/sso", &[], "").await;
-    let reached = client.get("orgs/acme-sso/repos?per_page=1").await;
 
     // Then
     assert_eq!(blocked.status, StatusCode::FORBIDDEN);
@@ -692,8 +695,12 @@ async fn sso_is_required_until_the_user_signs_in_through_the_org_sso_page() {
         blocked.header("x-github-sso"),
         format!("required; url={}/orgs/acme-sso/sso", server.base)
     );
-    assert_eq!(page.status, 200);
-    assert!(page.body.contains("/orgs/acme-sso/sso"));
+    assert_eq!(followed.status, 302);
+    assert_eq!(
+        followed.header("location"),
+        format!("{}{return_to}", server.base)
+    );
+    assert_eq!(reached.status, StatusCode::OK);
     assert_eq!(recorded.status, 302);
     assert_eq!(
         recorded.header("location"),
@@ -701,7 +708,6 @@ async fn sso_is_required_until_the_user_signs_in_through_the_org_sso_page() {
     );
     assert_eq!(foreign.status, 422);
     assert_eq!(unknown.status, 404);
-    assert_eq!(reached.status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -897,7 +903,6 @@ async fn pages_and_the_sso_header_use_the_base_origin_when_the_web_origin_differ
         .as_str()
         .expect("access")
         .to_owned();
-    let page = raw(addr, "GET", "/orgs/sso-org/sso", &[], "").await;
     let bearer = format!("Bearer {access}");
     let profile = raw(
         addr,
@@ -915,6 +920,14 @@ async fn pages_and_the_sso_header_use_the_base_origin_when_the_web_origin_differ
         "",
     )
     .await;
+    let signed_on = raw(
+        addr,
+        "GET",
+        "/orgs/sso-org/sso?login=erin&return_to=/after",
+        &[],
+        "",
+    )
+    .await;
 
     // Then
     assert_eq!(blocked.status, 403);
@@ -929,6 +942,6 @@ async fn pages_and_the_sso_header_use_the_base_origin_when_the_web_origin_differ
             .starts_with(&format!("{CALLBACK}?"))
     );
     assert_eq!(authorized.location_query("state"), "st-1");
-    assert!(page.body.contains(&format!("{base}/orgs/sso-org/sso")));
+    assert_eq!(signed_on.header("location"), format!("{base}/after"));
     assert_eq!(profile.json()["html_url"], "https://github.example/erin");
 }
