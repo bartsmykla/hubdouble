@@ -6,7 +6,7 @@ use hubdouble_store::{Accounts, CheckSuites, Installations, Repos, Tx, TxMut};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::view::{View, user};
+use crate::view::View;
 
 const RUN_SUITE: &[&str] = &[
     "id",
@@ -71,14 +71,8 @@ fn send(
     sender: i64,
     (name, action): (&'static str, Option<&'static str>),
     to: To,
-    mut payload: Map<String, Value>,
+    payload: Map<String, Value>,
 ) {
-    let urls = Urls::new(tx.config(), "");
-    if let Some(account) = tx.table::<Accounts>().get(sender)
-        && let Ok(sender) = object(&user(&urls, account))
-    {
-        payload.insert("sender".to_owned(), sender);
-    }
     let (app_id, installation_id) = match to {
         To::Subscribers => (None, None),
         To::Owner(app) => {

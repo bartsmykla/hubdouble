@@ -14,32 +14,6 @@ pub fn commit(tx: &Tx, git: &Git, repo: i64, reference: &str) -> Option<ObjectId
     git.peel_to_commit(tx, repo, object.id).ok()
 }
 
-/// [`SimpleUser::new`] with the login escaped in the API URLs, as GitHub writes a bot's
-/// `users/<slug>%5Bbot%5D`.
-pub fn user(urls: &Urls, account: &Account) -> SimpleUser {
-    let mut user = SimpleUser::new(urls, account);
-    let escaped = escape(&account.login);
-    if escaped != account.login {
-        let from = format!("/users/{}", account.login);
-        let to = format!("/users/{escaped}");
-        for url in [
-            &mut user.url,
-            &mut user.followers_url,
-            &mut user.following_url,
-            &mut user.gists_url,
-            &mut user.starred_url,
-            &mut user.subscriptions_url,
-            &mut user.organizations_url,
-            &mut user.repos_url,
-            &mut user.events_url,
-            &mut user.received_events_url,
-        ] {
-            *url = url.replacen(&from, &to, 1);
-        }
-    }
-    user
-}
-
 pub fn no_commit(reference: &str) -> ApiError {
     ApiError::unprocessable(format!("No commit found for SHA: {reference}"))
 }
@@ -130,7 +104,7 @@ impl<'a> View<'a> {
         self.tx
             .table::<Accounts>()
             .get(id)
-            .map(|account| user(self.urls, account))
+            .map(|account| SimpleUser::new(self.urls, account))
     }
 
     pub fn app(&self, id: i64) -> Option<Integration> {
