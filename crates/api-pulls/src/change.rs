@@ -91,10 +91,10 @@ pub(crate) fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let actor = (sender(ctx.actor())?, ctx.now());
     let (tx, git) = ctx.tx_mut_and_git()?;
     let created = open(tx, git, &repo, &head, input, actor, None)?;
-    Ok(
-        Reply::json(&render::detail(ctx.git(), ctx.tx(), ctx.urls(), &created)?)?
-            .status(StatusCode::CREATED),
-    )
+    let rendered = render::detail(ctx.git(), ctx.tx(), ctx.urls(), &created)?;
+    Reply::json(&rendered)?
+        .status(StatusCode::CREATED)
+        .header(http::header::LOCATION, &rendered.url)
 }
 
 fn repository_named<'a>(tx: &'a Tx, owner: &str, name: &str) -> Option<&'a Arc<Repo>> {
