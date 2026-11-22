@@ -448,6 +448,12 @@ pub struct Git {
 }
 
 impl Git {
+    /// The time of the server clock, for ref subscribers that stamp what a ref move changes.
+    #[must_use]
+    pub fn now(&self) -> Timestamp {
+        self.inner.clock.now()
+    }
+
     /// The number of registered ref subscribers.
     #[must_use]
     pub fn subscriber_count(&self) -> usize {
