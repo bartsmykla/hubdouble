@@ -1,15 +1,21 @@
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::{Method, Request, StatusCode};
+use http::{Method, Request};
 use http_body_util::Full;
 use hubdouble_git::{Git, GitBuilder};
 use hubdouble_model::{ApiError, Clock, Config};
 use hubdouble_rest::Params;
-use hubdouble_store::{Store, StoreBuilder, TxMut};
+use hubdouble_store::{Snapshot, Store, StoreBuilder, TxMut};
 use hyper::body::Incoming;
+use parking_lot::Mutex;
+
+use crate::faults::Faults;
+use crate::log::Log;
+use crate::{kinds, reads, seed};
 
 /// What a seed kind applies with: the transaction, git, the clock and the environment lookup.
 pub struct SeedCtx<'a> {
@@ -72,8 +78,11 @@ pub struct Fault {
 /// The admin API: seed kinds in registration order, extra admin routes, faults and the request log.
 #[derive(Default)]
 pub struct Admin {
-    kinds: Vec<(&'static str, KindApply)>,
-    routes: Vec<(Method, String, AdminHandler)>,
+    pub(crate) kinds: Vec<(&'static str, KindApply)>,
+    pub(crate) routes: Vec<(Method, String, AdminHandler)>,
+    pub(crate) snapshot: Mutex<Option<Arc<Snapshot>>>,
+    pub(crate) log: Log,
+    pub(crate) faults: Faults,
 }
 
 impl Admin {
@@ -97,25 +106,18 @@ impl Admin {
         self.kinds.iter().map(|(n, _)| *n)
     }
 
-    /// Answers a request under `/_hubdouble/`.
-    #[expect(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "the contract is async and the P0-F body awaits"
-    )]
+    /// Answers a request under `/_hubdouble/`. Every route needs `Authorization: Bearer <admin
+    /// token>`; without it the answer is `401`.
     pub async fn serve(
         &self,
         request: Request<Incoming>,
         services: Arc<Services>,
     ) -> AdminResponse {
-        let _ = (request, services, &self.routes);
-        let body = r#"{"message":"hubdouble does not implement the admin API yet","documentation_url":"https://docs.github.com/rest","status":"501"}"#;
-        let mut response = hyper::Response::new(Full::new(Bytes::from_static(body.as_bytes())));
-        *response.status_mut() = StatusCode::NOT_IMPLEMENTED;
-        response
+        self.dispatch(request, services).await
     }
 
-    /// Applies `HUBDOUBLE_SEED` with [`Store::update_quiet`] and takes the reset snapshot.
+    /// Applies `HUBDOUBLE_SEED` with [`Store::update_quiet`] and takes the reset snapshot. A seed
+    /// that fails changes nothing.
     ///
     /// # Errors
     ///
@@ -125,27 +127,55 @@ impl Admin {
         services: &Services,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<(), ApiError> {
-        let _ = (services, env);
-        Err(ApiError::not_implemented("admin/seed"))
+        let values = match &services.config.seed {
+            Some(path) => {
+                let text = std::fs::read_to_string(path).map_err(|e| {
+                    ApiError::unprocessable(format!("seed {}: {e}", path.display()))
+                })?;
+                seed::parse(path, &text)?
+            }
+            None => Vec::new(),
+        };
+        let base = services.config.seed.as_deref().and_then(Path::parent);
+        let entries = seed::prepare(values, &self.kinds, env, base)?;
+        let ctx = seed::Env {
+            git: &services.git,
+            clock: &services.clock,
+            lookup: env,
+        };
+        services
+            .store
+            .update_quiet(|tx| seed::apply(tx, entries, &ctx))?;
+        *self.snapshot.lock() = Some(Arc::new(services.store.snapshot()));
+        Ok(())
     }
 
     /// The request log hook: the server calls it once per API request.
     pub fn record(&self, entry: &LogEntry<'_>) {
-        let _ = entry;
+        self.log.record(entry);
     }
 
-    /// The faults hook: the server calls it before it runs a request.
+    /// The faults hook: the server calls it before it runs a request. A fault with a `count`
+    /// answers that many requests.
     #[must_use]
     pub fn fault(&self, query: &FaultQuery<'_>) -> Option<Fault> {
-        let _ = query;
-        None
+        self.faults.take(query)
     }
 }
 
 /// Registers P0-F's own kinds (users, orgs, repositories, Apps, installations, tokens) and admin
 /// routes; `hubdouble-api::register_all` calls it before every track.
 pub fn register(r: &mut Registrar<'_>) {
-    let _ = r;
+    r.admin.kind("user", kinds::user_kind);
+    r.admin.kind("org", kinds::org_kind);
+    r.admin.kind("repository", kinds::repository_kind);
+    r.admin.kind("app", kinds::app_kind);
+    r.admin.kind("installation", kinds::installation_kind);
+    r.admin.kind("token", kinds::token_kind);
+    r.admin
+        .route(Method::GET, "/user/{login}", reads::user_route());
+    r.admin
+        .route(Method::GET, "/app/{slug}", reads::app_route());
 }
 
 /// Handed to each track crate's `pub fn register(r: &mut Registrar)`.
