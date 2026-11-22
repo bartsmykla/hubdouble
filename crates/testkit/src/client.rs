@@ -11,7 +11,7 @@ use hubdouble_store::{Accounts, Repos};
 
 use crate::TestServer;
 use crate::answer::{self, Checked, Exchange};
-use crate::coverage::{Case, Recorder};
+use crate::coverage::{self, Case, Recorder};
 
 /// go-github v93's `User-Agent` (`github/github.go:47`, `Version` at `:33`).
 pub const USER_AGENT: &str = "go-github/v93.0.0";
@@ -89,7 +89,7 @@ fn checked(
     services: Option<&Services>,
 ) {
     match answer::check(x, registered) {
-        Ok(c) => recorder.record(&c, case(x, &c, services)),
+        Ok(c) => recorder.record(&c, case(x, &c, services), &coverage::facts(x)),
         Err(errors) => panic!(
             "{} {} answered {}, which differs from GitHub's docs:\n  {}\nbody: {}",
             x.method,
@@ -230,13 +230,20 @@ impl GoGithub {
         let request = request.unwrap_or_else(|e| panic!("build the request: {e}"));
         let method = request.method().as_str().to_owned();
         let path = request.url().path().to_owned();
+        let query = request.url().query().unwrap_or("").to_owned();
         let request_headers = request.headers().clone();
+        let request_body = request
+            .body()
+            .and_then(reqwest::Body::as_bytes)
+            .map_or_else(Bytes::new, Bytes::copy_from_slice);
         let answer = send(reqwest::RequestBuilder::from_parts(http, request)).await;
         checked(
             &Exchange {
                 method: &method,
                 path: &path,
+                query: &query,
                 request_headers: &request_headers,
+                request_body: &request_body,
                 status: answer.status.as_u16(),
                 headers: &answer.headers,
                 body: &answer.body,

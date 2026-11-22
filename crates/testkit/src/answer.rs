@@ -143,7 +143,10 @@ pub struct Exchange<'a> {
     pub method: &'a str,
     /// The URL path as sent, escaped, with the `/api/v3` prefix when the client has it.
     pub path: &'a str,
+    /// The URL query as sent, without the `?`.
+    pub query: &'a str,
     pub request_headers: &'a HeaderMap,
+    pub request_body: &'a [u8],
     pub status: u16,
     pub headers: &'a HeaderMap,
     pub body: &'a [u8],
@@ -156,18 +159,18 @@ pub struct Checked {
     pub status: u16,
 }
 
-fn header<'h>(headers: &'h HeaderMap, name: &str) -> &'h str {
+pub(crate) fn header<'h>(headers: &'h HeaderMap, name: &str) -> &'h str {
     headers
         .get(name)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
 }
 
-fn media_type(value: &str) -> &str {
+pub(crate) fn media_type(value: &str) -> &str {
     value.split(';').next().unwrap_or("").trim()
 }
 
-fn is_json(media: &str) -> bool {
+pub(crate) fn is_json(media: &str) -> bool {
     media == "application/json" || media.ends_with("+json")
 }
 
@@ -729,7 +732,9 @@ mod tests {
         Exchange {
             method,
             path,
+            query: "",
             request_headers: &EMPTY,
+            request_body: b"",
             status,
             headers,
             body,

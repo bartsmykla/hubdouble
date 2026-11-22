@@ -113,6 +113,7 @@ async fn raw(
     body: &str,
 ) -> Raw {
     let headers = headers_sent;
+    let body_sent = body;
     let mut stream = TcpStream::connect(addr)
         .await
         .unwrap_or_else(|e| panic!("connect: {e}"));
@@ -161,7 +162,9 @@ async fn raw(
         &hubdouble_testkit::answer::Exchange {
             method,
             path: target.split('?').next().unwrap_or(target),
+            query: target.split_once('?').map_or("", |(_, q)| q),
             request_headers: &header_map(&mut headers_sent.iter().copied()),
+            request_body: body_sent.as_bytes(),
             status,
             headers: &header_map(&mut headers.iter().map(|(n, v)| (n.as_str(), v.as_str()))),
             body: body.as_bytes(),

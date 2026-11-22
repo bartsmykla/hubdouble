@@ -213,7 +213,8 @@ async fn check_writes_follow_client_batches_and_keep_output() {
         200,
         "checks/update",
     );
-    let done = json!({"name": "AGENT review", "status": "completed", "conclusion": "success", "actions": [],
+    let fix = json!([{"label": "Fix", "description": "Apply the fix", "identifier": "autofix"}]);
+    let done = json!({"name": "AGENT review", "status": "completed", "conclusion": "success", "actions": fix,
         "output": {"title": "Reviewed", "summary": "done", "text": "kept"}});
     checked(
         &client.call_json(Method::PATCH, &run, &done).await,
@@ -241,6 +242,15 @@ async fn check_writes_follow_client_batches_and_keep_output() {
     assert_eq!(read["output"]["title"], "Reviewed");
     assert_eq!(read["output"]["text"], "kept");
     assert_eq!(read["output"]["annotations_count"], 51);
+    let pressed = format!("check-runs/{}/requested-action", created["id"]);
+    for (identifier, status) in [
+        ("autofix", StatusCode::NO_CONTENT),
+        ("rerun", StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        let press = json!({"identifier": identifier, "sender": fixture::ALICE});
+        let answer = server.admin(Method::POST, &pressed, Some(&press)).await;
+        assert_eq!(answer.status, status, "{identifier}");
+    }
     assert!(read["completed_at"].is_string());
     assert_eq!(read["check_suite"]["id"], created["check_suite"]["id"]);
     assert_eq!(notes.as_array().map(Vec::len), Some(51));

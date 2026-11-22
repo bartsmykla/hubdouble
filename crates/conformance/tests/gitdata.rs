@@ -230,7 +230,10 @@ async fn a_blob_reads_back_as_json_and_as_raw_bytes() {
     let sha = made.json()["sha"].as_str().unwrap().to_owned();
     let path = format!("repos/acme/public/git/blobs/{sha}");
     let json_form = client.get(&path).await;
-    let raw = get_with(&client, &path, &[("accept", RAW_ACCEPT)]).await;
+    let mut raw = Vec::new();
+    for accept in ["application/vnd.github.raw", RAW_ACCEPT] {
+        raw.push(get_with(&client, &path, &[("accept", accept)]).await);
+    }
     // Then
     assert_eq!(made.status, StatusCode::CREATED);
     valid("git/create-blob", &made);
@@ -240,8 +243,10 @@ async fn a_blob_reads_back_as_json_and_as_raw_bytes() {
     assert_eq!(body["encoding"], "base64");
     assert_eq!(body["content"], "aGVsbG8K\n");
     assert_eq!(body["size"], 6);
-    assert_eq!(raw.status, StatusCode::OK);
-    assert_eq!(&raw.body[..], b"hello\n");
+    for raw in raw {
+        assert_eq!(raw.status, StatusCode::OK);
+        assert_eq!(&raw.body[..], b"hello\n");
+    }
 }
 
 #[tokio::test]

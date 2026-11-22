@@ -3,12 +3,13 @@ use std::path::Path;
 use std::process::Command;
 
 use http::{Method, StatusCode};
+use hubdouble_conformance::{ANSWER_FIELDS, VARIANTS, Variant};
 use hubdouble_model::{Access, Clock, Scope, Token, TokenKind};
 use hubdouble_rest::Registry;
 use hubdouble_server::Registries;
 use hubdouble_store::Tokens;
 use hubdouble_testkit::answer::resolve_operation;
-use hubdouble_testkit::coverage::{self, Case};
+use hubdouble_testkit::coverage::{self, Case, Record};
 use hubdouble_testkit::{Answer, GoGithub, TestServer, fixture};
 use serde_json::json;
 
@@ -285,10 +286,9 @@ fn every_inventory_route_gets_a_checked_answer_for_every_case_that_applies() {
         "the conformance suite failed:\n{}",
         tail.into_iter().rev().collect::<Vec<_>>().join("\n")
     );
-    let proved: BTreeSet<(String, Case)> = coverage::read(dir.path())
-        .into_iter()
-        .map(|r| (r.route, r.case))
-        .collect();
+    let records = coverage::read(dir.path());
+    let proved: BTreeSet<(String, Case)> =
+        records.iter().map(|r| (r.route.clone(), r.case)).collect();
     let registry = Registries::new(hubdouble_api::register_all).rest;
     let mut missing = Vec::new();
     for route in inventory() {
@@ -307,9 +307,152 @@ fn every_inventory_route_gets_a_checked_answer_for_every_case_that_applies() {
             }
         }
     }
+    for variant in VARIANTS {
+        if !records.iter().any(|r| proves(r, variant)) {
+            missing.push(format!(
+                "{}: no checked {} answer with [{}] (plan 4.8 {})",
+                variant.route,
+                variant.status,
+                variant.facts.join(" "),
+                variant.plan
+            ));
+        }
+    }
     assert!(
         missing.is_empty(),
         "inventory cases without a matching checked answer:\n  {}",
         missing.join("\n  ")
     );
+}
+
+fn proves(record: &Record, variant: &Variant) -> bool {
+    record.route == variant.route
+        && record.status == variant.status
+        && record.case != Case::UnseenRepository
+        && variant.facts.iter().all(|f| match f.strip_prefix('!') {
+            Some(absent) => !record.facts.iter().any(|g| g == absent),
+            None => record.facts.iter().any(|g| g == f),
+        })
+}
+
+fn plan_table(plan: &str, heading: &str) -> Vec<Vec<String>> {
+    let (_, section) = plan
+        .split_once(heading)
+        .unwrap_or_else(|| panic!("the plan has no {heading}"));
+    section
+        .lines()
+        .skip_while(|l| !l.starts_with('|'))
+        .take_while(|l| l.starts_with('|'))
+        .skip(2)
+        .map(|l| {
+            l.trim()
+                .trim_matches('|')
+                .split('|')
+                .map(|c| c.trim().to_owned())
+                .collect()
+        })
+        .collect()
+}
+
+fn plan_variant_rows() -> Vec<(String, String)> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/PLAN.md");
+    let plan =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let requirements = plan_table(&plan, "### 1.1 ");
+    plan_table(&plan, "### 4.8 ")
+        .into_iter()
+        .map(|row| {
+            let cell = match requirements.iter().find(|r| r[0] == row[1]) {
+                Some(requirement) => requirement[1].clone(),
+                None => row[1].clone(),
+            };
+            (row[0].clone(), cell)
+        })
+        .collect()
+}
+
+fn backticked(cell: &str) -> Vec<String> {
+    let mut text = String::new();
+    let mut rest = cell;
+    while let Some(open) = rest.find('(') {
+        let close = rest[open..].find(')').map_or(rest.len(), |c| open + c + 1);
+        text.push_str(&rest[..open]);
+        if !rest[open..close].contains(".go") {
+            text.push_str(&rest[open..close]);
+        }
+        rest = &rest[close..];
+    }
+    text.push_str(rest);
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn names(variant: &Variant, token: &str) -> bool {
+    let t = token.strip_prefix("Accept: ").unwrap_or(token);
+    let t = t.split(": ").next().unwrap_or(t).trim_end_matches("[]");
+    variant.route.split(' ').any(|p| p == t)
+        || variant.status.to_string() == t
+        || variant.facts.iter().any(|f| {
+            let f = f.trim_start_matches('!');
+            let subject = match f.strip_prefix("body.").or_else(|| f.strip_prefix("query.")) {
+                Some(member) => member.split('=').next().unwrap_or(member),
+                None => f.split_once('=').map_or(f, |(_, value)| value),
+            };
+            subject.eq_ignore_ascii_case(t)
+        })
+}
+
+fn answer_fields(call: &str) -> impl Iterator<Item = &'static str> + '_ {
+    ANSWER_FIELDS
+        .iter()
+        .filter(move |(p, _)| *p == call)
+        .flat_map(|(_, f)| f.iter().copied())
+}
+
+#[test]
+fn the_variant_table_holds_every_variant_plan_section_4_8_names() {
+    // Given plan section 4.8's rows, with a requirement such as E9 read from section 1.1
+    let rows = plan_variant_rows();
+
+    // When each word a row puts in backticks, outside its source citations, is looked up
+    let mut by_call: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for (call, cell) in &rows {
+        let call_words = backticked(call);
+        by_call.entry(call.as_str()).or_default().extend(
+            backticked(cell)
+                .into_iter()
+                .filter(|w| !call_words.contains(w)),
+        );
+    }
+    let mut unknown = Vec::new();
+    for (call, words) in &by_call {
+        for word in words {
+            let variant = VARIANTS.iter().any(|v| v.plan == *call && names(v, word));
+            if !variant && !answer_fields(call).any(|f| f == word) {
+                unknown.push(format!("{call}: {word}"));
+            }
+        }
+        unknown.extend(
+            answer_fields(call)
+                .filter(|f| !words.iter().any(|w| w == f))
+                .map(|f| format!("{call}: the answer field {f} is not in the plan row")),
+        );
+    }
+
+    // Then each is a variant of the table or an answer field, and the table cites only plan rows
+    assert!(
+        unknown.is_empty(),
+        "plan 4.8 names what the variant table lacks:\n  {}",
+        unknown.join("\n  ")
+    );
+    for plan in VARIANTS
+        .iter()
+        .map(|v| v.plan)
+        .chain(ANSWER_FIELDS.iter().map(|(p, _)| *p))
+    {
+        assert!(by_call.contains_key(plan), "{plan} is not a plan 4.8 row");
+    }
 }
