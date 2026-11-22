@@ -1,7 +1,39 @@
 use hubdouble_admin::Registrar;
+use hubdouble_model::{ApiError, FieldError, Grant, Requirement, Scope};
 
-/// Registers what T6 owns: tables, REST operations, GraphQL fields, ref subscribers, seed kinds
-/// and admin routes.
+mod anchors;
+mod comments;
+mod events;
+mod graphql;
+mod reviewers;
+mod reviews;
+mod seed;
+mod view;
+
+const READ: Requirement = Requirement {
+    any_of: &[Grant::read("pull_requests")],
+    scope: Scope::Repo,
+    scopes: &["repo", "public_repo"],
+};
+const WRITE: Requirement = Requirement {
+    any_of: &[Grant::write("pull_requests")],
+    ..READ
+};
+
 pub fn register(r: &mut Registrar<'_>) {
-    let _ = r;
+    reviews::register(r.rest);
+    comments::register(r.rest);
+    reviewers::register(r.rest);
+    graphql::register(r.gql);
+    r.git.on_ref_update(anchors::ref_changed);
+    seed::register(r.admin);
+}
+
+fn invalid(resource: &str, field: &str, message: &str) -> ApiError {
+    ApiError::unprocessable(message).with_error(FieldError {
+        resource: resource.to_owned(),
+        field: field.to_owned(),
+        code: "invalid".to_owned(),
+        message: None,
+    })
 }
