@@ -173,8 +173,19 @@ impl<'a> View<'a> {
     }
 
     pub fn run(&self, run: &CheckRun) -> render::CheckRun {
-        let mut view = render::CheckRun::new(self.urls, run, &self.name, self.app(run.app_id));
-        view.pull_requests = self.pulls(&run.head_sha);
+        self.run_with(run, self.app(run.app_id), self.pulls(&run.head_sha))
+    }
+
+    /// Renders runs of one head with the App and pull requests already rendered, so a list
+    /// renders each once.
+    pub fn run_with(
+        &self,
+        run: &CheckRun,
+        app: Option<Integration>,
+        pulls: Vec<PullRequestMinimal>,
+    ) -> render::CheckRun {
+        let mut view = render::CheckRun::new(self.urls, run, &self.name, app);
+        view.pull_requests = pulls;
         view
     }
 

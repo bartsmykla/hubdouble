@@ -326,7 +326,15 @@ pub fn list_for_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     runs.retain(|run| status.is_none_or(|s| run.status == s));
     runs.sort_unstable_by_key(|run| std::cmp::Reverse(run.id));
     let view = rest_view(ctx)?;
-    page_object(ctx, "check_runs", &runs, |run| view.run(run))
+    let pulls = view.pulls(&sha);
+    let mut apps = std::collections::BTreeMap::new();
+    page_object(ctx, "check_runs", &runs, |run| {
+        let app = apps
+            .entry(run.app_id)
+            .or_insert_with(|| view.app(run.app_id))
+            .clone();
+        view.run_with(run, app, pulls.clone())
+    })
 }
 
 pub fn list_annotations(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
