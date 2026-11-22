@@ -4,7 +4,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hubdouble_model::ApiError;
+use hubdouble_model::{ApiError, Config};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 
@@ -39,12 +39,19 @@ impl<T: Table> AnyTable for T {
 
 type Undo = Box<dyn FnOnce(&mut Tx) + Send>;
 
-/// The state inside the lock: every registered table.
+/// The state inside the lock: every registered table, and the configuration the store was
+/// built with, so code inside a transaction renders absolute URLs without a request.
 pub struct Tx {
     tables: HashMap<TypeId, Box<dyn AnyTable>>,
+    config: Arc<Config>,
 }
 
 impl Tx {
+    #[must_use]
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
     /// # Panics
     ///
     /// Panics when `T` was never registered on the [`StoreBuilder`].
@@ -346,13 +353,20 @@ impl StoreBuilder {
         self
     }
 
+    /// As [`StoreBuilder::build_with`] with [`Config::default`], for tests.
     #[must_use]
     pub fn build(self) -> Store {
+        self.build_with(Arc::new(Config::default()))
+    }
+
+    #[must_use]
+    pub fn build_with(self, config: Arc<Config>) -> Store {
         Store {
             inner: Arc::new(Inner {
                 state: RwLock::new(State {
                     tx: Tx {
                         tables: self.tables,
+                        config,
                     },
                     next_seq: 0,
                 }),

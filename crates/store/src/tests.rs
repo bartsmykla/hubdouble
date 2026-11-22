@@ -107,6 +107,7 @@ fn entry(event: &'static str) -> OutboxEntry {
         event,
         action: None,
         payload: serde_json::json!({}),
+        redelivery_of: None,
     }
 }
 

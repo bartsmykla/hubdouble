@@ -96,8 +96,8 @@ impl Server {
             git,
             admin,
         } = registries;
-        let store = store.build();
         let config = Arc::new(config);
+        let store = store.build_with(config.clone());
         let hooks = hubdouble_hooks::Handle::start(store.clone(), clock.clone(), config.clone())?;
         let services = Arc::new(Services {
             store,

@@ -8,6 +8,8 @@ pub struct OutboxEntry {
     pub action: Option<&'static str>,
     /// The complete payload, `installation`, `repository`, `organization` and `sender` included.
     pub payload: serde_json::Value,
+    /// The `X-GitHub-Delivery` GUID of the delivery a redelivery repeats; `None` for a new one.
+    pub redelivery_of: Option<String>,
 }
 
 /// An outbox entry of a committed transaction.
