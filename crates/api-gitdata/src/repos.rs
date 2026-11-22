@@ -12,14 +12,15 @@ use hubdouble_store::{Rulesets, Tx};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    GitPerson, Links, ObjectLink, ParentLink, Verification, accepts, commit_at, object_node_id,
-    sender, unprocessable, user_of,
+    GitPerson, Links, ObjectLink, ParentLink, Verification, accepted_media, commit_at,
+    object_node_id, sender, unprocessable, user_of,
 };
 
 pub(crate) use compare::compare;
 
 const COMMIT_FILES: usize = 300;
 const SHA_MEDIA: &str = "application/vnd.github.sha; charset=utf-8";
+const V3_SHA_MEDIA: &str = "application/vnd.github.v3.sha; charset=utf-8";
 
 #[derive(Serialize)]
 struct CommitDetail {
@@ -274,8 +275,13 @@ pub(crate) fn get_commit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let view = View::of(ctx)?;
     let (id, commit) = commit_at(view.git, view.tx, view.repo.id, &reference)
         .ok_or_else(|| no_commit(&reference))?;
-    if accepts(ctx, "sha") {
-        return Reply::raw(SHA_MEDIA, id.to_string()).header(ETAG, &format!("\"{id}\""));
+    if let Some(media) = accepted_media(ctx, "sha") {
+        let content_type = if media == "application/vnd.github.v3.sha" {
+            V3_SHA_MEDIA
+        } else {
+            SHA_MEDIA
+        };
+        return Reply::raw(content_type, id.to_string()).header(ETAG, &format!("\"{id}\""));
     }
     let files = view.files(id, &commit)?;
     if let Some(page) = explicit_page(ctx) {

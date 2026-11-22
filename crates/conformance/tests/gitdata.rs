@@ -654,6 +654,10 @@ async fn a_commit_reads_with_its_files_and_as_a_sha_with_a_conditional_answer() 
     let paged = valid("repos/get-commit", &paged);
     assert_eq!(paged["files"].as_array().unwrap().len(), 1);
     assert_eq!(sha.status, StatusCode::OK);
+    assert_eq!(
+        sha.header("content-type"),
+        "application/vnd.github.v3.sha; charset=utf-8"
+    );
     assert_eq!(std::str::from_utf8(&sha.body).unwrap(), feature);
     assert_eq!(unchanged.status, StatusCode::NOT_MODIFIED);
     assert_eq!(missing.status, StatusCode::UNPROCESSABLE_ENTITY);
