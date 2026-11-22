@@ -1,0 +1,734 @@
+- kind: user
+  login: local-user
+  name: AGENT Local User
+  email: local-user@example.com
+  tokens:
+    - token: '{{env "HUBDOUBLE_USER_TOKEN"}}'
+
+- kind: org
+  id: 962416
+  login: octo-org
+
+- kind: repository
+  owner: octo-org
+  name: agent
+  visibility: private
+  files:
+    .github/releases.json: |
+      {"releases": []}
+
+- kind: repository
+  owner: octo-org
+  name: runner
+  visibility: private
+  files:
+    .github/workflows/agent.yml: |
+      name: AGENT control plane
+      on:
+        workflow_call:
+          secrets:
+            npm_token:
+              description: A read token for the npm registries the repository's own .npmrc signs in to, handed only to fenced dependency steps the control plane names.
+              required: false
+      permissions: {}
+      jobs:
+        stage:
+          if: github.event_name == 'workflow_dispatch'
+          runs-on: ubuntu-latest
+          timeout-minutes: 180
+          environment: ${{ vars.AGENT_JOB_ENVIRONMENT }}
+          permissions:
+            contents: read
+            id-token: write
+          outputs:
+            claimed: ${{ steps.claim.outputs.claimed }}
+          steps:
+            - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+              with:
+                egress-policy: block
+                allowed-endpoints: >-
+                  api.github.com:443
+                  github.com:443
+                  *.githubusercontent.com:443
+                  *.actions.githubusercontent.com:443
+                  *.blob.core.windows.net:443
+                  ingress.us-west-2.aws.dash0.com:443
+                  archive.ubuntu.com:80
+                  azure.archive.ubuntu.com:80
+                  security.ubuntu.com:80
+                  registry.npmjs.org:443
+                  registry.yarnpkg.com:443
+                  nodejs.org:443
+                  proxy.golang.org:443
+                  sum.golang.org:443
+                  storage.googleapis.com:443
+                  pypi.org:443
+                  files.pythonhosted.org:443
+                  crates.io:443
+                  index.crates.io:443
+                  static.crates.io:443
+                  tuf-repo-cdn.sigstore.dev:443
+                  tuf-repo.github.com:443
+                  client.example.com:443
+                  us.gateway.example.com:443
+                disable-telemetry: true
+            - name: Ask which runner this repository's work is carried out on
+              id: settings
+              continue-on-error: true
+              uses: octo-org/runner/.github/actions/run-settings@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              with:
+                endpoint: https://client.example.com
+            - name: Read this run's credentials
+              id: credentials
+              continue-on-error: true
+              uses: octo-org/runner/.github/actions/run-credentials@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              with:
+                endpoint: https://client.example.com
+            - name: Read the dispatch record
+              id: record
+              continue-on-error: true
+              uses: octo-org/runner/.github/actions/dispatch-record@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              with:
+                endpoint: https://client.example.com
+            - name: Decide whether this job carries the stage
+              id: claim
+              if: ${{ steps.record.outputs.read == 'true' && steps.record.outputs.workflow_job != '' }}
+              continue-on-error: true
+              uses: octo-org/runner/.github/actions/stage-claim@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              with:
+                runner: ubuntu-latest
+                runs_on: ${{ steps.settings.outputs.runs_on }}
+                egress_endpoints: ${{ steps.settings.outputs.egress_endpoints }}
+                job_minutes: ${{ steps.record.outputs.stage_job_minutes || steps.settings.outputs.job_timeout_minutes }}
+                most_minutes: "180"
+                endpoint: https://client.example.com
+                gateway_url: ${{ steps.credentials.outputs.model_origin || steps.credentials.outputs.model_gateway_url }}
+            - name: Mint agent read token
+              id: agent-token
+              if: ${{ steps.claim.outputs.claimed == 'true' }}
+              continue-on-error: true
+              uses: octo-org/runner/.github/actions/run-token@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              with:
+                grant: source
+                endpoint: https://client.example.com
+            - name: Mint this repository's read token
+              id: authz-token
+              if: ${{ steps.claim.outputs.claimed == 'true' }}
+              uses: octo-org/runner/.github/actions/run-token@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              with:
+                grant: read
+                endpoint: https://client.example.com
+            - name: Check out the revision the package stage reads
+              if: ${{ steps.claim.outputs.claimed == 'true' }}
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                ref: ${{ steps.record.outputs.source_revision }}
+                token: ${{ steps.authz-token.outputs.token }}
+                persist-credentials: false
+            - if: ${{ steps.claim.outputs.claimed == 'true' }}
+              uses: octo-org/runner/.github/actions/agent@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              env:
+                AGENT_PROVIDER_OBSERVATIONS: "true"
+                AGENT_MODEL_AUTH_MODE: ${{ steps.credentials.outputs.model_auth_mode }}
+                AGENT_REVIEW_ADMISSION: ${{ steps.record.outputs.review_admission }}
+              with:
+                source_org_github_token: ${{ steps.authz-token.outputs.token }}
+                org_github_token: ${{ steps.agent-token.outputs.token }}
+                artifact_retention_days: 14
+                job_timeout_minutes: ${{ steps.record.outputs.stage_minutes || steps.settings.outputs.job_timeout_minutes }}
+                max_consecutive_tool_failures: ${{ steps.settings.outputs.max_consecutive_tool_failures }}
+                max_repeated_tool_calls: ${{ steps.settings.outputs.max_repeated_tool_calls }}
+                otel_endpoint: https://ingress.us-west-2.aws.dash0.com
+                otel_headers: ${{ steps.credentials.outputs.otel_headers }}
+                denied_paths: ${{ steps.settings.outputs.denied_paths }}
+                control_plane_endpoint: https://client.example.com
+                record_id: ${{ steps.record.outputs.record_id }}
+                opencode_version: 2.0.29
+                anthropic_base_url: ${{ steps.credentials.outputs.model_origin || steps.credentials.outputs.model_gateway_url }}
+                npm_token: ${{ secrets.npm_token }}
+          name: Package stage
+        gate:
+          if: github.event_name == 'workflow_dispatch'
+          runs-on: ubuntu-latest
+          timeout-minutes: 8
+          environment: ${{ vars.AGENT_JOB_ENVIRONMENT }}
+          permissions:
+            contents: read
+            id-token: write
+          outputs:
+            runs_on: ${{ steps.settings.outputs.runs_on }}
+            stage_job_minutes: ${{ steps.record.outputs.stage_job_minutes }}
+            review_admission: ${{ steps.record.outputs.review_admission }}
+            job_timeout_minutes: ${{ steps.settings.outputs.job_timeout_minutes }}
+            model_auth_mode: ${{ steps.credentials.outputs.model_auth_mode }}
+            egress_endpoints: ${{ steps.settings.outputs.egress_endpoints }}
+            gateway: ${{ steps.endpoints.outputs.gateway }}
+            endpoint: ${{ steps.endpoints.outputs.endpoint }}
+            source_revision: ${{ steps.record.outputs.source_revision }}
+            stage_minutes: ${{ steps.record.outputs.stage_minutes }}
+            max_consecutive_tool_failures: ${{ steps.settings.outputs.max_consecutive_tool_failures }}
+            max_repeated_tool_calls: ${{ steps.settings.outputs.max_repeated_tool_calls }}
+            denied_paths: ${{ steps.settings.outputs.denied_paths }}
+            record_id: ${{ steps.record.outputs.record_id }}
+            opencode_version: 2.0.29
+            model_gateway_url: ${{ steps.credentials.outputs.model_origin || steps.credentials.outputs.model_gateway_url }}
+          steps:
+            - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+              with:
+                egress-policy: audit
+            - name: Ask which runner this repository's work is carried out on
+              id: settings
+              uses: octo-org/runner/.github/actions/run-settings@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              with:
+                endpoint: https://client.example.com
+            - name: Refuse an OpenCode build v5 does not run
+              env:
+                OPENCODE_VERSION: 2.0.29
+              run: >
+                set -euo pipefail
+
+                case "${OPENCODE_VERSION}" in
+                  2.*) ;;
+                  *)
+                    echo "::error::opencode_version: ${OPENCODE_VERSION} is not an OpenCode 2 build, and v5 runs only OpenCode 2"
+                    exit 1 ;;
+                esac
+            - name: Read this run's credentials
+              id: credentials
+              uses: octo-org/runner/.github/actions/run-credentials@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              with:
+                endpoint: https://client.example.com
+            - name: Say the hosts a job that blocks its egress has to reach
+              id: endpoints
+              env:
+                ENDPOINT: https://client.example.com
+                BASE_URL: ${{ steps.credentials.outputs.model_origin || steps.credentials.outputs.model_gateway_url }}
+              run: |
+                set -euo pipefail
+
+                host() {
+                  local origin="${1#*://}"
+                  origin="${origin%%/*}"
+                  origin="${origin//[[:space:]]/}"
+                  case "${origin}" in ''|*:[0-9]*) ;; *) origin="${origin}:443" ;; esac
+                  printf '%s' "${origin}"
+                }
+
+                {
+                  echo "endpoint=$(host "${ENDPOINT}")"
+                  echo "gateway=$(host "${BASE_URL}")"
+                } >>"${GITHUB_OUTPUT}"
+            - name: Read the dispatch record
+              id: record
+              uses: octo-org/runner/.github/actions/dispatch-record@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              with:
+                endpoint: https://client.example.com
+            - name: Require a control-plane package stage
+              shell: bash
+              env:
+                RECORD_READ: ${{ steps.record.outputs.read }}
+                WORKFLOW_JOB: ${{ steps.record.outputs.workflow_job }}
+              run: |-
+                set -euo pipefail
+                if [[ "${RECORD_READ}" != "true" || -z "${WORKFLOW_JOB}" ]]; then
+                  echo "::error::The control plane did not admit a package stage"
+                  exit 1
+                fi
+        run:
+          needs:
+            - gate
+            - stage
+          if: ${{ !cancelled() && needs.gate.result == 'success' && needs.stage.outputs.claimed != 'true' }}
+          runs-on: ${{ startsWith(needs.gate.outputs.runs_on, '[') && fromJSON(needs.gate.outputs.runs_on) ||
+            needs.gate.outputs.runs_on }}
+          timeout-minutes: ${{ fromJSON(needs.gate.outputs.stage_job_minutes || needs.gate.outputs.job_timeout_minutes) }}
+          environment: ${{ vars.AGENT_JOB_ENVIRONMENT }}
+          env:
+            AGENT_MODEL_AUTH_MODE: ${{ needs.gate.outputs.model_auth_mode }}
+            AGENT_REVIEW_ADMISSION: ${{ needs.gate.outputs.review_admission }}
+          permissions:
+            contents: read
+            id-token: write
+          steps:
+            - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+              with:
+                egress-policy: block
+                allowed-endpoints: api.github.com:443 github.com:443 *.githubusercontent.com:443 *.actions.githubusercontent.com:443
+                  *.blob.core.windows.net:443 ingress.us-west-2.aws.dash0.com:443 archive.ubuntu.com:80 azure.archive.ubuntu.com:80
+                  security.ubuntu.com:80 registry.npmjs.org:443 registry.yarnpkg.com:443 nodejs.org:443 proxy.golang.org:443 sum.golang.org:443
+                  storage.googleapis.com:443 pypi.org:443 files.pythonhosted.org:443 crates.io:443 index.crates.io:443
+                  static.crates.io:443 tuf-repo-cdn.sigstore.dev:443 tuf-repo.github.com:443 ${{ needs.gate.outputs.egress_endpoints }} ${{ needs.gate.outputs.gateway }} ${{
+                  needs.gate.outputs.endpoint }}
+                disable-telemetry: true
+            - name: Mint agent read token
+              id: agent-token
+              continue-on-error: true
+              uses: octo-org/runner/.github/actions/run-token@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              with:
+                grant: source
+                endpoint: https://client.example.com
+            - name: Mint this repository's read token
+              id: authz-token
+              uses: octo-org/runner/.github/actions/run-token@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              with:
+                grant: read
+                endpoint: https://client.example.com
+            - name: Read this run's credentials
+              id: credentials
+              uses: octo-org/runner/.github/actions/run-credentials@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              with:
+                endpoint: https://client.example.com
+            - name: Check out the revision the package stage reads
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                ref: ${{ needs.gate.outputs.source_revision }}
+                token: ${{ steps.authz-token.outputs.token }}
+                persist-credentials: false
+            - uses: octo-org/runner/.github/actions/agent@3a584f66d3cfecd236af3cebdf27ba81810ea29c  # v5.0.6
+              env:
+                AGENT_PROVIDER_OBSERVATIONS: "true"
+              with:
+                source_org_github_token: ${{ steps.authz-token.outputs.token }}
+                org_github_token: ${{ steps.agent-token.outputs.token }}
+                artifact_retention_days: 14
+                job_timeout_minutes: ${{ needs.gate.outputs.stage_minutes || needs.gate.outputs.job_timeout_minutes }}
+                max_consecutive_tool_failures: ${{ needs.gate.outputs.max_consecutive_tool_failures }}
+                max_repeated_tool_calls: ${{ needs.gate.outputs.max_repeated_tool_calls }}
+                otel_endpoint: https://ingress.us-west-2.aws.dash0.com
+                otel_headers: ${{ steps.credentials.outputs.otel_headers }}
+                denied_paths: ${{ needs.gate.outputs.denied_paths }}
+                control_plane_endpoint: https://client.example.com
+                record_id: ${{ needs.gate.outputs.record_id }}
+                opencode_version: ${{ needs.gate.outputs.opencode_version }}
+                anthropic_base_url: ${{ needs.gate.outputs.model_gateway_url }}
+                npm_token: ${{ secrets.npm_token }}
+          name: Package stage
+    .github/runtime-capabilities.json: |
+      {
+        "version": 1,
+        "capabilities": {
+          "core_review": {
+            "stage": "client.example.com/stage-request/v1alpha1",
+            "source": "core-review-context/v1",
+            "candidate": "client.example.com/core-review-candidate/v1alpha1",
+            "result": "client.example.com/core-review-audit/v1alpha1",
+            "answers": "client.example.com/stage-candidate/v1alpha1"
+          },
+          "implement": {
+            "stage": "client.example.com/stage-request/v1alpha1",
+            "changeset": "client.example.com/stage-changeset/v1alpha1"
+          }
+        }
+      }
+  tags:
+    - name: v5.0.6
+      message: AGENT Runtime v5.0.6
+  commits:
+    - message: AGENT Runtime v5.1.0
+      files:
+        .github/workflows/agent.yml: |
+          name: AGENT control plane
+          on:
+            workflow_call:
+              secrets:
+                npm_token:
+                  description: A read token for the npm registries the repository's own .npmrc signs in to, handed only to fenced dependency steps the control plane names.
+                  required: false
+          permissions: {}
+          jobs:
+            stage:
+              if: github.event_name == 'workflow_dispatch'
+              runs-on: ubuntu-latest
+              timeout-minutes: 180
+              environment: ${{ vars.AGENT_JOB_ENVIRONMENT }}
+              permissions:
+                contents: read
+                id-token: write
+              outputs:
+                claimed: ${{ steps.claim.outputs.claimed }}
+              steps:
+                - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+                  with:
+                    egress-policy: block
+                    allowed-endpoints: >-
+                      api.github.com:443
+                      github.com:443
+                      *.githubusercontent.com:443
+                      *.actions.githubusercontent.com:443
+                      *.blob.core.windows.net:443
+                      ingress.us-west-2.aws.dash0.com:443
+                      archive.ubuntu.com:80
+                      azure.archive.ubuntu.com:80
+                      security.ubuntu.com:80
+                      registry.npmjs.org:443
+                      registry.yarnpkg.com:443
+                      nodejs.org:443
+                      proxy.golang.org:443
+                      sum.golang.org:443
+                      storage.googleapis.com:443
+                      pypi.org:443
+                      files.pythonhosted.org:443
+                      crates.io:443
+                      index.crates.io:443
+                      static.crates.io:443
+                      tuf-repo-cdn.sigstore.dev:443
+                      tuf-repo.github.com:443
+                      client.example.com:443
+                      us.gateway.example.com:443
+                    disable-telemetry: true
+                - name: Ask which runner this repository's work is carried out on
+                  id: settings
+                  continue-on-error: true
+                  uses: octo-org/runner/.github/actions/run-settings@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  with:
+                    endpoint: https://client.example.com
+                - name: Read this run's credentials
+                  id: credentials
+                  continue-on-error: true
+                  uses: octo-org/runner/.github/actions/run-credentials@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  with:
+                    endpoint: https://client.example.com
+                - name: Read the dispatch record
+                  id: record
+                  continue-on-error: true
+                  uses: octo-org/runner/.github/actions/dispatch-record@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  with:
+                    endpoint: https://client.example.com
+                - name: Decide whether this job carries the stage
+                  id: claim
+                  if: ${{ steps.record.outputs.read == 'true' && steps.record.outputs.workflow_job != '' }}
+                  continue-on-error: true
+                  uses: octo-org/runner/.github/actions/stage-claim@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  with:
+                    runner: ubuntu-latest
+                    runs_on: ${{ steps.settings.outputs.runs_on }}
+                    egress_endpoints: ${{ steps.settings.outputs.egress_endpoints }}
+                    job_minutes: ${{ steps.record.outputs.stage_job_minutes || steps.settings.outputs.job_timeout_minutes }}
+                    most_minutes: "180"
+                    endpoint: https://client.example.com
+                    gateway_url: ${{ steps.credentials.outputs.model_origin || steps.credentials.outputs.model_gateway_url }}
+                - name: Mint agent read token
+                  id: agent-token
+                  if: ${{ steps.claim.outputs.claimed == 'true' }}
+                  continue-on-error: true
+                  uses: octo-org/runner/.github/actions/run-token@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  with:
+                    grant: source
+                    endpoint: https://client.example.com
+                - name: Mint this repository's read token
+                  id: authz-token
+                  if: ${{ steps.claim.outputs.claimed == 'true' }}
+                  uses: octo-org/runner/.github/actions/run-token@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  with:
+                    grant: read
+                    endpoint: https://client.example.com
+                - name: Check out the revision the package stage reads
+                  if: ${{ steps.claim.outputs.claimed == 'true' }}
+                  uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                  with:
+                    ref: ${{ steps.record.outputs.source_revision }}
+                    token: ${{ steps.authz-token.outputs.token }}
+                    persist-credentials: false
+                - if: ${{ steps.claim.outputs.claimed == 'true' }}
+                  uses: octo-org/runner/.github/actions/agent@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  env:
+                    AGENT_PROVIDER_OBSERVATIONS: "true"
+                    AGENT_MODEL_AUTH_MODE: ${{ steps.credentials.outputs.model_auth_mode }}
+                    AGENT_REVIEW_ADMISSION: ${{ steps.record.outputs.review_admission }}
+                  with:
+                    source_org_github_token: ${{ steps.authz-token.outputs.token }}
+                    org_github_token: ${{ steps.agent-token.outputs.token }}
+                    artifact_retention_days: 14
+                    job_timeout_minutes: ${{ steps.record.outputs.stage_minutes || steps.settings.outputs.job_timeout_minutes }}
+                    max_consecutive_tool_failures: ${{ steps.settings.outputs.max_consecutive_tool_failures }}
+                    max_repeated_tool_calls: ${{ steps.settings.outputs.max_repeated_tool_calls }}
+                    otel_endpoint: https://ingress.us-west-2.aws.dash0.com
+                    otel_headers: ${{ steps.credentials.outputs.otel_headers }}
+                    denied_paths: ${{ steps.settings.outputs.denied_paths }}
+                    control_plane_endpoint: https://client.example.com
+                    record_id: ${{ steps.record.outputs.record_id }}
+                    opencode_version: 2.0.29
+                    anthropic_base_url: ${{ steps.credentials.outputs.model_origin || steps.credentials.outputs.model_gateway_url }}
+                    npm_token: ${{ secrets.npm_token }}
+              name: Package stage
+            gate:
+              if: github.event_name == 'workflow_dispatch'
+              runs-on: ubuntu-latest
+              timeout-minutes: 8
+              environment: ${{ vars.AGENT_JOB_ENVIRONMENT }}
+              permissions:
+                contents: read
+                id-token: write
+              outputs:
+                runs_on: ${{ steps.settings.outputs.runs_on }}
+                stage_job_minutes: ${{ steps.record.outputs.stage_job_minutes }}
+                review_admission: ${{ steps.record.outputs.review_admission }}
+                job_timeout_minutes: ${{ steps.settings.outputs.job_timeout_minutes }}
+                model_auth_mode: ${{ steps.credentials.outputs.model_auth_mode }}
+                egress_endpoints: ${{ steps.settings.outputs.egress_endpoints }}
+                gateway: ${{ steps.endpoints.outputs.gateway }}
+                endpoint: ${{ steps.endpoints.outputs.endpoint }}
+                source_revision: ${{ steps.record.outputs.source_revision }}
+                stage_minutes: ${{ steps.record.outputs.stage_minutes }}
+                max_consecutive_tool_failures: ${{ steps.settings.outputs.max_consecutive_tool_failures }}
+                max_repeated_tool_calls: ${{ steps.settings.outputs.max_repeated_tool_calls }}
+                denied_paths: ${{ steps.settings.outputs.denied_paths }}
+                record_id: ${{ steps.record.outputs.record_id }}
+                opencode_version: 2.0.29
+                model_gateway_url: ${{ steps.credentials.outputs.model_origin || steps.credentials.outputs.model_gateway_url }}
+              steps:
+                - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+                  with:
+                    egress-policy: audit
+                - name: Ask which runner this repository's work is carried out on
+                  id: settings
+                  uses: octo-org/runner/.github/actions/run-settings@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  with:
+                    endpoint: https://client.example.com
+                - name: Refuse an OpenCode build v5 does not run
+                  env:
+                    OPENCODE_VERSION: 2.0.29
+                  run: >
+                    set -euo pipefail
+
+                    case "${OPENCODE_VERSION}" in
+                      2.*) ;;
+                      *)
+                        echo "::error::opencode_version ${OPENCODE_VERSION} is not an OpenCode 2 build. v5 runs only OpenCode 2."
+                        exit 1 ;;
+                    esac
+                - name: Read this run's credentials
+                  id: credentials
+                  uses: octo-org/runner/.github/actions/run-credentials@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  with:
+                    endpoint: https://client.example.com
+                - name: Say the hosts a job that blocks its egress has to reach
+                  id: endpoints
+                  env:
+                    ENDPOINT: https://client.example.com
+                    BASE_URL: ${{ steps.credentials.outputs.model_origin || steps.credentials.outputs.model_gateway_url }}
+                  run: |
+                    set -euo pipefail
+
+                    host() {
+                      local origin="${1#*://}"
+                      origin="${origin%%/*}"
+                      origin="${origin//[[:space:]]/}"
+                      case "${origin}" in ''|*:[0-9]*) ;; *) origin="${origin}:443" ;; esac
+                      printf '%s' "${origin}"
+                    }
+
+                    {
+                      echo "endpoint=$(host "${ENDPOINT}")"
+                      echo "gateway=$(host "${BASE_URL}")"
+                    } >>"${GITHUB_OUTPUT}"
+                - name: Read the dispatch record
+                  id: record
+                  uses: octo-org/runner/.github/actions/dispatch-record@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  with:
+                    endpoint: https://client.example.com
+                - name: Require a control-plane package stage
+                  shell: bash
+                  env:
+                    RECORD_READ: ${{ steps.record.outputs.read }}
+                    WORKFLOW_JOB: ${{ steps.record.outputs.workflow_job }}
+                  run: |-
+                    set -euo pipefail
+                    if [[ "${RECORD_READ}" != "true" || -z "${WORKFLOW_JOB}" ]]; then
+                      echo "::error::The control plane did not admit a package stage"
+                      exit 1
+                    fi
+            run:
+              needs:
+                - gate
+                - stage
+              if: ${{ !cancelled() && needs.gate.result == 'success' && needs.stage.outputs.claimed != 'true' }}
+              runs-on: ${{ startsWith(needs.gate.outputs.runs_on, '[') && fromJSON(needs.gate.outputs.runs_on) ||
+                needs.gate.outputs.runs_on }}
+              timeout-minutes: ${{ fromJSON(needs.gate.outputs.stage_job_minutes || needs.gate.outputs.job_timeout_minutes) }}
+              environment: ${{ vars.AGENT_JOB_ENVIRONMENT }}
+              env:
+                AGENT_MODEL_AUTH_MODE: ${{ needs.gate.outputs.model_auth_mode }}
+                AGENT_REVIEW_ADMISSION: ${{ needs.gate.outputs.review_admission }}
+              permissions:
+                contents: read
+                id-token: write
+              steps:
+                - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+                  with:
+                    egress-policy: block
+                    allowed-endpoints: api.github.com:443 github.com:443 *.githubusercontent.com:443 *.actions.githubusercontent.com:443
+                      *.blob.core.windows.net:443 ingress.us-west-2.aws.dash0.com:443 archive.ubuntu.com:80 azure.archive.ubuntu.com:80
+                      security.ubuntu.com:80 registry.npmjs.org:443 registry.yarnpkg.com:443 nodejs.org:443 proxy.golang.org:443 sum.golang.org:443
+                      storage.googleapis.com:443 pypi.org:443 files.pythonhosted.org:443 crates.io:443 index.crates.io:443
+                      static.crates.io:443 tuf-repo-cdn.sigstore.dev:443 tuf-repo.github.com:443 ${{ needs.gate.outputs.egress_endpoints }} ${{ needs.gate.outputs.gateway }} ${{
+                      needs.gate.outputs.endpoint }}
+                    disable-telemetry: true
+                - name: Mint agent read token
+                  id: agent-token
+                  continue-on-error: true
+                  uses: octo-org/runner/.github/actions/run-token@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  with:
+                    grant: source
+                    endpoint: https://client.example.com
+                - name: Mint this repository's read token
+                  id: authz-token
+                  uses: octo-org/runner/.github/actions/run-token@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  with:
+                    grant: read
+                    endpoint: https://client.example.com
+                - name: Read this run's credentials
+                  id: credentials
+                  uses: octo-org/runner/.github/actions/run-credentials@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  with:
+                    endpoint: https://client.example.com
+                - name: Check out the revision the package stage reads
+                  uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                  with:
+                    ref: ${{ needs.gate.outputs.source_revision }}
+                    token: ${{ steps.authz-token.outputs.token }}
+                    persist-credentials: false
+                - uses: octo-org/runner/.github/actions/agent@40288d059d45156f234653fcb8a523ad5fc7eb6d  # v5.1.0
+                  env:
+                    AGENT_PROVIDER_OBSERVATIONS: "true"
+                  with:
+                    source_org_github_token: ${{ steps.authz-token.outputs.token }}
+                    org_github_token: ${{ steps.agent-token.outputs.token }}
+                    artifact_retention_days: 14
+                    job_timeout_minutes: ${{ needs.gate.outputs.stage_minutes || needs.gate.outputs.job_timeout_minutes }}
+                    max_consecutive_tool_failures: ${{ needs.gate.outputs.max_consecutive_tool_failures }}
+                    max_repeated_tool_calls: ${{ needs.gate.outputs.max_repeated_tool_calls }}
+                    otel_endpoint: https://ingress.us-west-2.aws.dash0.com
+                    otel_headers: ${{ steps.credentials.outputs.otel_headers }}
+                    denied_paths: ${{ needs.gate.outputs.denied_paths }}
+                    control_plane_endpoint: https://client.example.com
+                    record_id: ${{ needs.gate.outputs.record_id }}
+                    opencode_version: ${{ needs.gate.outputs.opencode_version }}
+                    anthropic_base_url: ${{ needs.gate.outputs.model_gateway_url }}
+                    npm_token: ${{ secrets.npm_token }}
+              name: Package stage
+        .github/runtime-capabilities.json: |
+          {
+            "version": 1,
+            "capabilities": {
+              "core_review": {
+                "stage": "client.example.com/stage-request/v1alpha1",
+                "source": "core-review-context/v1",
+                "candidate": "client.example.com/core-review-candidate/v1alpha1",
+                "result": "client.example.com/core-review-audit/v1alpha1",
+                "answers": "client.example.com/stage-candidate/v1alpha1"
+              },
+              "implement": {
+                "stage": "client.example.com/stage-request/v1alpha1",
+                "changeset": "client.example.com/stage-changeset/v1alpha1"
+              },
+              "stage_steps": {
+                "contract": "client.example.com/stage-steps/v2"
+              }
+            }
+          }
+      tags:
+        - name: v5.1.0
+          message: AGENT Runtime v5.1.0
+    - message: Add the runtime release catalog
+      files:
+        .github/releases.json: |
+          {
+            "releases": [
+              {"tag": "v5.0.6", "commit": "{{sha "octo-org/runner" "v5.0.6"}}"},
+              {"tag": "v5.1.0", "commit": "{{sha "octo-org/runner" "v5.1.0"}}"}
+            ]
+          }
+
+- kind: repository
+  owner: octo-org
+  name: e2e
+  visibility: private
+  default_branch: main
+  collaborators:
+    - login: local-user
+      permission: write
+  files:
+    .github/workflows/agent.yml: |
+      ---
+      name: AGENT
+
+      permissions: {}
+
+      on:  # yamllint disable-line rule:truthy
+        workflow_dispatch: {}
+
+      jobs:
+        agent:
+          name: run
+          uses: octo-org/runner/.github/workflows/agent.yml@{{sha "octo-org/runner" "v5.1.0"}}  # v5.1.0
+          permissions:
+            contents: read   # checked out by every command; a push uses the token CP mints
+            id-token: write  # mint the GitHub OIDC token for the octo-org gateway
+    README.md: |
+      # AGENT local end-to-end test
+  commits:
+    - branch: add-review-guide
+      message: Add the review guide
+      author:
+        name: AGENT Local User
+        email: local-user@example.com
+      files:
+        guide.md: |
+          # Review guide
+
+          Add a `/agent review` comment to an open pull request.
+
+- kind: app
+  id: 1000001
+  slug: agent-local
+  owner: octo-org
+  public_key: '{{env "HUBDOUBLE_APP_PUBLIC_KEY"}}'
+  webhook:
+    url: '{{env "HUBDOUBLE_APP_WEBHOOK_URL"}}'
+    secret: '{{env "HUBDOUBLE_APP_WEBHOOK_SECRET"}}'
+  events: [issue_comment]
+  permissions:
+      actions: write
+      actions_variables: read
+      checks: write
+      contents: write
+      issues: write
+      members: read
+      metadata: read
+      pull_requests: write
+      statuses: write
+      workflows: write
+
+- kind: installation
+  id: 962416
+  app: agent-local
+  account: octo-org
+  repository_selection: selected
+  repositories: [agent, runner, e2e]
+  permissions:
+      actions: write
+      actions_variables: read
+      checks: write
+      contents: write
+      issues: write
+      members: read
+      metadata: read
+      pull_requests: write
+      statuses: write
+      workflows: write
+
+- kind: pull_request
+  repository: octo-org/e2e
+  user: local-user
+  title: Add the review guide
+  head: add-review-guide
+  base: main
+
+- kind: actions
+  auto_complete: none
+
+- kind: actions_variable
+  repository: octo-org/e2e
+  name: AGENT_TRIGGER_PHRASE
+  value: ""

@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hubdouble
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: hubdouble
+  template:
+    metadata:
+      labels:
+        app: hubdouble
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hubdouble
+          image: ghcr.io/bartsmykla/hubdouble:latest
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: HUBDOUBLE_ADDR
+              value: ":8000"
+            - name: HUBDOUBLE_BASE_URL
+              value: http://hubdouble:8000
+            - name: HUBDOUBLE_WEB_URL
+              value: https://github.com
+            - name: HUBDOUBLE_SEED
+              value: /seed/client-v5.yaml
+          envFrom:
+            - secretRef:
+                name: hubdouble-secrets
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: seed
+              mountPath: /seed
+              readOnly: true
+      volumes:
+        - name: seed
+          configMap:
+            name: hubdouble-seed
