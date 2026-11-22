@@ -387,6 +387,9 @@ async fn delivery_pages_filter_resume_after_reset_and_redeliver_only_for_the_app
     let continuation = app.get(next).await.json();
     assert_eq!(continuation[0]["event"], "ping");
     assert_eq!(continuation[0]["id"], id - 1);
+    let ping = app.get(&format!("{DELIVERY_PATH}/{}", id - 1)).await.json();
+    validate::webhook_payload("ping", None, &ping["request"]["payload"])
+        .unwrap_or_else(|errors| panic!("ping: {errors:?}"));
     let rel = app.call(Method::POST, &redelivery).await;
     assert_eq!(rel.status, StatusCode::ACCEPTED);
     assert!(rel.body.is_empty());

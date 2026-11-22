@@ -149,6 +149,7 @@ pub(crate) fn ping(tx: &mut TxMut<'_>, app_id: i64) {
     if hook.secret.is_some() {
         config["secret"] = json!("********");
     }
+    let api = payload_urls(tx).api;
     let payload = json!({
         "zen": ZEN,
         "hook_id": app.id,
@@ -162,7 +163,9 @@ pub(crate) fn ping(tx: &mut TxMut<'_>, app_id: i64) {
             "updated_at": app.updated_at,
             "created_at": app.created_at,
             "app_id": app.id,
-            "deliveries_url": format!("{}/app/hook/deliveries", payload_urls(tx).api),
+            "url": format!("{api}/app/hook/config"),
+            "ping_url": format!("{api}/app/hook/pings"),
+            "deliveries_url": format!("{api}/app/hook/deliveries"),
         },
     });
     tx.push_outbox(OutboxEntry {

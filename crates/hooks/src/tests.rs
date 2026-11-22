@@ -647,6 +647,14 @@ async fn ping_describes_the_apps_hook() {
         json!("http://beta.test/hook")
     );
     assert_eq!(
+        body["hook"]["url"],
+        json!("http://hubdouble.test/app/hook/config")
+    );
+    assert_eq!(
+        body["hook"]["ping_url"],
+        json!("http://hubdouble.test/app/hook/pings")
+    );
+    assert_eq!(
         body["hook"]["deliveries_url"],
         json!("http://hubdouble.test/app/hook/deliveries")
     );
