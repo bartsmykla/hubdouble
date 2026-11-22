@@ -3,16 +3,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use bytes::Bytes;
-use hubdouble_model::{App, Clock, Delivery, DeliveryRequest, DeliveryResponse};
-use hubdouble_store::{Apps, Committed, Counters, Deliveries, Sequence, Snapshot, Store};
+use hubdouble_model::{App, Clock, Delivery, DeliveryRequest, DeliveryResponse, Timestamp};
+use hubdouble_store::{
+    Apps, Committed, Counters, Deliveries, OutboxUse, Sequence, Snapshot, Store,
+};
 use parking_lot::Mutex;
-use serde_json::Value;
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::delivery::{Outcome, send, signature_1, signature_256};
-use crate::{HooksError, Options, Stats};
+use crate::{HooksError, Options, QUEUE_BYTES, Stats};
+
+const OVER_BUDGET: &str = "Queue full";
 
 pub(crate) struct Job {
     id: i64,
@@ -27,7 +30,36 @@ pub(crate) struct Job {
     url: String,
     headers: BTreeMap<String, String>,
     body: Bytes,
-    payload: Value,
+    over_budget: bool,
+}
+
+impl Job {
+    fn logged(self, delivered_at: Timestamp, duration: f64, outcome: Outcome) -> Delivery {
+        Delivery {
+            id: self.id,
+            guid: self.guid,
+            app_id: self.app_id,
+            hook_id: self.app_id,
+            installation_id: self.installation_id,
+            repo_id: self.repo_id,
+            event: self.event,
+            action: self.action,
+            url: self.url,
+            delivered_at,
+            redelivery: self.redelivery,
+            duration,
+            status: outcome.status,
+            status_code: outcome.status_code,
+            request: DeliveryRequest {
+                headers: self.headers,
+                payload: self.body,
+            },
+            response: DeliveryResponse {
+                headers: outcome.headers,
+                payload: outcome.body,
+            },
+        }
+    }
 }
 
 struct Assigned {
@@ -73,6 +105,13 @@ impl Shared {
         options: Options,
     ) -> Result<Arc<Shared>, HooksError> {
         let rt = tokio::runtime::Handle::try_current().map_err(|_| HooksError::NoRuntime)?;
+        store.limit_outbox(OutboxUse {
+            events: options.queue_capacity,
+            bytes: match options.queue_bytes {
+                0 => QUEUE_BYTES,
+                n => n,
+            },
+        });
         let (drains, drain_rx) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
             store,
@@ -125,6 +164,7 @@ impl Shared {
             let dropped: Vec<Job> = st.queue.drain(..).collect();
             self.space.add_permits(dropped.len());
             for job in dropped {
+                self.release_job(&job);
                 self.finish(&mut st, job.app_id, job.id, None);
             }
             let stale: Vec<(i64, i64)> = st
@@ -151,19 +191,20 @@ impl Shared {
 
     #[cfg(test)]
     pub(crate) async fn wait_stats(&self, f: impl Fn(&Stats) -> bool) {
-        let _ = self.wait_until(|st| f(&Self::stats_of(st))).await;
+        let _ = self.wait_until(|st| f(&self.stats_of(st))).await;
     }
 
     pub(crate) fn stats(&self) -> Stats {
-        Self::stats_of(&self.state.lock())
+        self.stats_of(&self.state.lock())
     }
 
-    fn stats_of(st: &State) -> Stats {
+    fn stats_of(&self, st: &State) -> Stats {
         Stats {
             queued: st.queue.len(),
             max_queued: st.max_queued,
             in_flight: st.in_flight.values().sum(),
             unlogged: st.unlogged.len(),
+            waiting_bytes: self.store.outbox_use().bytes,
         }
     }
 
@@ -188,28 +229,24 @@ impl Shared {
                 let epoch = self.store.epoch();
                 let mut out = Vec::with_capacity(batch.len());
                 for c in batch {
-                    if c.epoch != epoch {
+                    let app = tx
+                        .table::<Apps>()
+                        .get(c.entry.app_id)
+                        .filter(|app| app.webhook.as_ref().is_some_and(|w| w.active))
+                        .filter(|_| c.epoch == epoch)
+                        .cloned();
+                    let name = app.as_ref().and_then(|app| match &c.entry.redelivery_of {
+                        None => Some((c.entry.event.to_owned(), c.entry.action.map(str::to_owned))),
+                        Some(guid) => tx
+                            .table::<Deliveries>()
+                            .children(app.id)
+                            .rev()
+                            .find(|d| d.guid == *guid)
+                            .map(|original| (original.event.clone(), original.action.clone())),
+                    });
+                    let (Some(app), Some(name)) = (app, name) else {
+                        self.release(&c);
                         continue;
-                    }
-                    let Some(app) = tx.table::<Apps>().get(c.entry.app_id).cloned() else {
-                        continue;
-                    };
-                    if !app.webhook.as_ref().is_some_and(|w| w.active) {
-                        continue;
-                    }
-                    let name = match &c.entry.redelivery_of {
-                        None => (c.entry.event.to_owned(), c.entry.action.map(str::to_owned)),
-                        Some(guid) => {
-                            let Some(original) = tx
-                                .table::<Deliveries>()
-                                .children(app.id)
-                                .rev()
-                                .find(|d| d.guid == *guid)
-                            else {
-                                continue;
-                            };
-                            (original.event.clone(), original.action.clone())
-                        }
                     };
                     let id = tx.table_mut::<Counters>().next(Sequence::Delivery);
                     out.push(Assigned {
@@ -224,6 +261,18 @@ impl Shared {
             .unwrap_or_default()
     }
 
+    fn release(&self, c: &Committed) {
+        if !c.over_budget {
+            self.store.release_outbox(c.entry.payload.len());
+        }
+    }
+
+    fn release_job(&self, job: &Job) {
+        if !job.over_budget {
+            self.store.release_outbox(job.body.len());
+        }
+    }
+
     fn job(a: Assigned) -> Option<Job> {
         let Assigned {
             id,
@@ -232,14 +281,14 @@ impl Shared {
             name: (event, action),
         } = a;
         let epoch = committed.epoch;
+        let over_budget = committed.over_budget;
         let entry = committed.entry;
         let hook = app.webhook.as_ref()?;
-        let payload = entry.payload;
         let (guid, redelivery) = match entry.redelivery_of {
             Some(guid) => (guid, true),
             None => (uuid::Uuid::new_v4().to_string(), false),
         };
-        let body = Bytes::from(serde_json::to_vec(&payload).ok()?);
+        let body = entry.payload;
         let app_id = app.id.to_string();
         let mut headers = BTreeMap::from([
             ("Accept".to_owned(), "*/*".to_owned()),
@@ -280,7 +329,7 @@ impl Shared {
             url: hook.url.clone(),
             headers,
             body,
-            payload,
+            over_budget,
         })
     }
 
@@ -294,7 +343,13 @@ impl Shared {
             .into_iter()
             .map(|a| {
                 let pair = (a.app.id, a.id);
-                Shared::job(a).ok_or(pair)
+                let held = (!a.committed.over_budget).then_some(a.committed.entry.payload.len());
+                Shared::job(a).ok_or_else(|| {
+                    if let Some(bytes) = held {
+                        self.store.release_outbox(bytes);
+                    }
+                    pair
+                })
             })
             .collect();
         {
@@ -316,6 +371,10 @@ impl Shared {
                     continue;
                 }
             };
+            if job.over_budget {
+                self.refuse(job);
+                continue;
+            }
             self.space
                 .acquire()
                 .await
@@ -329,6 +388,7 @@ impl Shared {
                 self.items.add_permits(1);
             } else {
                 self.space.add_permits(1);
+                self.release_job(&job);
                 self.finish(&mut st, job.app_id, job.id, None);
             }
         }
@@ -336,10 +396,19 @@ impl Shared {
         Ok(())
     }
 
+    fn refuse(&self, job: Job) {
+        let (app, id, epoch) = (job.app_id, job.id, job.epoch);
+        let delivery = job.logged(self.clock.now(), 0.0, Outcome::failed(OVER_BUDGET));
+        let mut st = self.state.lock();
+        let logged = (epoch == self.store.epoch()).then_some((epoch, delivery));
+        self.finish(&mut st, app, id, logged);
+    }
+
     fn take_job(&self) -> Option<Job> {
         let mut st = self.state.lock();
         let job = st.queue.pop_front()?;
         self.space.add_permits(1);
+        self.release_job(&job);
         if job.epoch != self.store.epoch() {
             self.finish(&mut st, job.app_id, job.id, None);
             return None;
@@ -354,34 +423,16 @@ impl Shared {
         let started = Instant::now();
         let outcome = tokio::time::timeout(
             self.options.timeout,
-            send(&*self.options.connector, &job.url, &job.headers, job.body),
+            send(
+                &*self.options.connector,
+                &job.url,
+                &job.headers,
+                job.body.clone(),
+            ),
         )
         .await
         .unwrap_or_else(|_| Outcome::failed("Timed out"));
-        let delivery = Delivery {
-            id: job.id,
-            guid: job.guid,
-            app_id: job.app_id,
-            hook_id: job.app_id,
-            installation_id: job.installation_id,
-            repo_id: job.repo_id,
-            event: job.event,
-            action: job.action,
-            url: job.url,
-            delivered_at,
-            redelivery: job.redelivery,
-            duration: started.elapsed().as_secs_f64(),
-            status: outcome.status,
-            status_code: outcome.status_code,
-            request: DeliveryRequest {
-                headers: job.headers,
-                payload: job.payload,
-            },
-            response: DeliveryResponse {
-                headers: outcome.headers,
-                payload: outcome.body,
-            },
-        };
+        let delivery = job.logged(delivered_at, started.elapsed().as_secs_f64(), outcome);
         let mut st = self.state.lock();
         self.finish(&mut st, app, id, Some((epoch, delivery)));
         if let Some(n) = st.in_flight.get_mut(&epoch) {

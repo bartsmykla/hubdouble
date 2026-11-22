@@ -205,7 +205,7 @@ fn enqueue(c: &mut Criterion) {
     let bytes: usize = store
         .take_outbox()
         .iter()
-        .map(|c| serde_json::to_vec(&c.entry.payload).map_or(0, |v| v.len()))
+        .map(|c| c.entry.payload.len())
         .sum();
     eprintln!("outbox: one issue_comment entry holds a {bytes} byte payload");
 }

@@ -159,7 +159,9 @@ async fn admin_app_create_sends_ping() {
             let delivery = tx.table::<Deliveries>().children(APP_ID).next().unwrap();
             assert_eq!(delivery.event, "ping");
             assert_eq!(delivery.status_code, 200);
-            assert_eq!(delivery.request.payload["hook"]["app_id"], APP_ID);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&delivery.request.payload).unwrap();
+            assert_eq!(payload["hook"]["app_id"], APP_ID);
             Ok(())
         })
         .unwrap();
@@ -187,7 +189,8 @@ async fn admin_installation_create_sends_its_repositories() {
             assert_eq!(delivery.event, "installation");
             assert_eq!(delivery.installation_id, Some(100));
             assert_eq!(delivery.status_code, 200);
-            let payload = &delivery.request.payload;
+            let payload: serde_json::Value =
+                serde_json::from_slice(&delivery.request.payload).unwrap();
             assert_eq!(payload["action"], "created");
             assert_eq!(payload["installation"]["id"], 100);
             assert_eq!(payload["repositories"][0]["full_name"], "acme/web");

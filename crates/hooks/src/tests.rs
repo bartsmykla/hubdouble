@@ -43,6 +43,10 @@ impl Hit {
     }
 }
 
+fn json_of(body: &[u8]) -> Value {
+    serde_json::from_slice(body).unwrap()
+}
+
 struct InProcess {
     hits: mpsc::UnboundedSender<Hit>,
 }
@@ -329,12 +333,13 @@ fn installation_event_reaches_only_its_app_with_the_data_before_the_change() {
     let entry = &outbox[0].entry;
     assert_eq!(entry.app_id, APP_A);
     assert_eq!(entry.installation_id, Some(INSTALL_A));
-    assert_eq!(entry.payload["installation"]["id"], json!(INSTALL_A));
+    let payload = json_of(&entry.payload);
+    assert_eq!(payload["installation"]["id"], json!(INSTALL_A));
     assert_eq!(
-        entry.payload["installation"]["node_id"],
+        payload["installation"]["node_id"],
         json!(node_id::entity(node_id::INSTALLATION, INSTALL_A))
     );
-    assert_eq!(entry.payload["organization"]["login"], json!("acme"));
+    assert_eq!(payload["organization"]["login"], json!("acme"));
 }
 
 #[test]
@@ -407,7 +412,7 @@ async fn delivers_signed_with_githubs_headers_and_logs_the_attempt() {
     assert_eq!(d.status_code, 202);
     assert!(!d.redelivery);
     assert_eq!(d.delivered_at, Timestamp::SEED);
-    assert_eq!(d.request.payload, body);
+    assert_eq!(json_of(&d.request.payload), body);
     assert_eq!(d.request.headers["X-GitHub-Delivery"], *guid);
     assert_eq!(d.response.payload.as_deref(), Some("received"));
 }
@@ -553,7 +558,12 @@ async fn the_log_shows_an_attempt_only_after_every_lower_id_finished() {
     assert_eq!(logged_ids(&store, APP_A), vec![1, 2]);
     let n_of = |id: i64| {
         store
-            .view(|tx| Ok(tx.table::<Deliveries>().get(id).unwrap().request.payload["n"].clone()))
+            .view(|tx| {
+                Ok(
+                    json_of(&tx.table::<Deliveries>().get(id).unwrap().request.payload)["n"]
+                        .clone(),
+                )
+            })
             .unwrap()
     };
     assert_eq!((n_of(1), n_of(2)), (json!(1), json!(2)));
@@ -575,6 +585,46 @@ async fn an_attempt_times_out_after_ten_seconds() {
         .unwrap();
     assert_eq!(d.status_code, 0);
     assert!((d.duration - 10.0).abs() < 1e-3, "{}", d.duration);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_event_past_the_byte_budget_is_logged_failed_without_an_attempt() {
+    let store = world();
+    let sizing = world();
+    emit_one(&sizing, event("push", WIDGET));
+    let one = sizing.take_outbox()[0].entry.payload.len();
+    // Given a budget of one payload and a receiver that holds the first attempt
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 1;
+        o.queue_bytes = one;
+    });
+    emit_one(&store, event("push", WIDGET));
+    // When a second event commits while the first still waits for its attempt
+    emit_one(&store, event("push", WIDGET));
+    let first = hits.recv().await.unwrap();
+    first.reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+    // Then the receiver saw one request, and the second is a failed delivery that kept its body
+    assert!(hits.try_recv().is_err());
+    assert_eq!(logged_ids(&store, APP_A), vec![1, 2]);
+    let d = store
+        .view(|tx| Ok(tx.table::<Deliveries>().get(2).cloned()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.status_code, 0);
+    assert_eq!(d.event, "push");
+    assert!(d.response.payload.is_none());
+    assert_eq!(
+        json_of(&d.request.payload)["repository"]["id"],
+        json!(WIDGET)
+    );
+    assert!(d.request.headers.contains_key("X-Hub-Signature-256"));
+    // And once the budget is free again, a new event is delivered
+    let mut bodies = answer_all(hits);
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    assert!(bodies.recv().await.is_some());
+    assert_eq!(hooks.stats().waiting_bytes, 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -604,6 +654,7 @@ async fn reset_stops_queued_and_in_flight_attempts_of_the_old_epoch() {
     hooks.drain().await.unwrap();
     assert!(hits.try_recv().is_err());
     assert_eq!(logged_ids(&store, APP_A), Vec::<i64>::new());
+    assert_eq!(hooks.stats().waiting_bytes, 0);
     // And a new event is delivered with the next delivery ID
     let mut bodies = answer_all(hits);
     emit_one(&store, event("push", WIDGET));

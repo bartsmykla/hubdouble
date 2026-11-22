@@ -110,7 +110,9 @@ fn delivery(id: i64) -> Delivery {
         status_code,
         request: DeliveryRequest {
             headers: BTreeMap::new(),
-            payload: json!({"action": "created", "comment": {"id": 20, "body": "/agent review"}}),
+            payload: json!({"action": "created", "comment": {"id": 20, "body": "/agent review"}})
+                .to_string()
+                .into(),
         },
         response: DeliveryResponse {
             headers: BTreeMap::new(),

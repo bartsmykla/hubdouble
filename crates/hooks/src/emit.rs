@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
 use hubdouble_model::{AccountKind, App, Event, Installation, RepositorySelection};
 use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
 use hubdouble_store::{Accounts, Apps, Deliveries, Installations, OutboxEntry, Repos, Tx, TxMut};
@@ -159,7 +160,7 @@ pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
             repo_id: e.repo_id,
             event: e.name,
             action: e.action,
-            payload: Value::Object(p),
+            payload: body(&Value::Object(p)),
             redelivery_of: None,
         });
     }
@@ -201,9 +202,15 @@ pub(crate) fn ping(tx: &mut TxMut<'_>, app_id: i64) {
         repo_id: None,
         event: "ping",
         action: None,
-        payload,
+        payload: body(&payload),
         redelivery_of: None,
     });
+}
+
+fn body(payload: &Value) -> Bytes {
+    let mut out = serde_json::to_vec(payload).unwrap_or_default();
+    out.shrink_to_fit();
+    Bytes::from(out)
 }
 
 pub(crate) fn redeliver(

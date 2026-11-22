@@ -192,7 +192,8 @@ impl HookDelivery {
             url: d.url.clone(),
             request: HookDeliveryRequest {
                 headers: d.request.headers.clone(),
-                payload: d.request.payload.clone(),
+                payload: serde_json::from_slice(&d.request.payload)
+                    .unwrap_or(serde_json::Value::Null),
             },
             response: HookDeliveryResponse {
                 headers: d.response.headers.clone(),

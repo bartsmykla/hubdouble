@@ -55,12 +55,19 @@ pub fn redeliver(tx: &mut TxMut<'_>, app_id: i64, delivery_id: i64) -> Result<()
     crate::emit::redeliver(tx, app_id, delivery_id)
 }
 
+/// The default of [`Options::queue_bytes`].
+pub const QUEUE_BYTES: usize = 32 * 1024 * 1024;
+
 /// The tuning of the delivery runtime.
 #[derive(Clone)]
 pub struct Options {
     pub workers: usize,
-    /// The worker queue bound; a full queue makes only the publisher wait.
+    /// The most committed events that wait for an attempt.
     pub queue_capacity: usize,
+    /// The most payload bytes that committed events waiting for an attempt hold; `0` means
+    /// [`QUEUE_BYTES`]. An event committed past either bound is logged at once as a failed
+    /// delivery with `status_code` 0 and no attempt, so a writer never waits.
+    pub queue_bytes: usize,
     /// The timeout of one attempt.
     pub timeout: Duration,
     /// The delivery log ring size per App.
@@ -73,6 +80,7 @@ impl Default for Options {
         Options {
             workers: 4,
             queue_capacity: 10_000,
+            queue_bytes: QUEUE_BYTES,
             timeout: Duration::from_secs(10),
             log_capacity: 50_000,
             connector: Arc::new(TcpConnector),
@@ -89,6 +97,8 @@ pub struct Stats {
     pub in_flight: usize,
     /// Deliveries with an ID that are not in the delivery log yet.
     pub unlogged: usize,
+    /// The payload bytes that committed events waiting for an attempt hold.
+    pub waiting_bytes: usize,
 }
 
 /// The running publisher, delivery queue and workers.

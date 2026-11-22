@@ -699,7 +699,15 @@ pub struct Ruleset {
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryRequest {
     pub headers: BTreeMap<String, String>,
-    pub payload: serde_json::Value,
+    /// The JSON body as it was sent; it serializes as that JSON value.
+    #[serde(serialize_with = "json_body")]
+    pub payload: bytes::Bytes,
+}
+
+fn json_body<S: serde::Serializer>(body: &bytes::Bytes, s: S) -> Result<S::Ok, S::Error> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .map_err(serde::ser::Error::custom)?
+        .serialize(s)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

@@ -279,7 +279,10 @@ async fn a_branch_push_reaches_the_subscriber_and_a_signed_logged_delivery_befor
     assert_eq!(entry.repo_id, Some(PUBLIC_REPO_ID));
     assert!(!entry.redelivery);
     assert_eq!(entry.status_code, 200);
-    assert_eq!(entry.request.payload, payload);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&entry.request.payload).unwrap(),
+        payload
+    );
 }
 
 #[tokio::test]

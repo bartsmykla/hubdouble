@@ -8,8 +8,8 @@ use hubdouble_model::{
 };
 
 use crate::{
-    Accounts, Blob, Blobs, Counters, Deliveries, OutboxEntry, Repos, Sequence, Store, StoreBuilder,
-    Table, TxMut,
+    Accounts, Blob, Blobs, Counters, Deliveries, OutboxEntry, OutboxUse, Repos, Sequence, Store,
+    StoreBuilder, Table, TxMut,
 };
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -90,7 +90,7 @@ fn delivery(id: i64) -> Delivery {
         status_code: 200,
         request: DeliveryRequest {
             headers: BTreeMap::new(),
-            payload: serde_json::Value::Null,
+            payload: Bytes::from_static(b"null"),
         },
         response: DeliveryResponse {
             headers: BTreeMap::new(),
@@ -106,7 +106,7 @@ fn entry(event: &'static str) -> OutboxEntry {
         repo_id: None,
         event,
         action: None,
-        payload: serde_json::json!({}),
+        payload: Bytes::from_static(b"{}"),
         redelivery_of: None,
     }
 }
@@ -249,6 +249,73 @@ fn committed_outbox_entries_keep_commit_order_and_quiet_updates_deliver_nothing(
     assert_eq!(events, ["create", "push", "issues"]);
     assert!(taken.windows(2).all(|w| w[0].seq < w[1].seq));
     assert_eq!(s.take_outbox(), Vec::new());
+}
+
+#[test]
+fn an_entry_past_the_outbox_limits_commits_over_budget_until_space_is_released() {
+    // Given an outbox bounded to two entries and five payload bytes
+    let s = store();
+    s.limit_outbox(OutboxUse {
+        events: 2,
+        bytes: 5,
+    });
+    let sized = |n: usize| OutboxEntry {
+        payload: Bytes::from(vec![b'1'; n]),
+        ..entry("push")
+    };
+    let commit = |n: usize| {
+        s.update(|tx| {
+            tx.push_outbox(sized(n));
+            Ok(())
+        })
+        .unwrap();
+    };
+
+    // When entries of 2, 4, 3, 1 and 1 bytes commit, the third after one release
+    commit(2);
+    commit(4);
+    commit(3);
+    s.release_outbox(2);
+    commit(1);
+    commit(1);
+    let _ = s.update(|tx| -> Result<(), ApiError> {
+        tx.push_outbox(sized(1));
+        Err(ApiError::not_found())
+    });
+
+    // Then each entry fits only while both limits hold, and a rolled-back one holds nothing
+    let over: Vec<_> = s.take_outbox().iter().map(|c| c.over_budget).collect();
+    assert_eq!(over, [false, true, false, false, true]);
+    assert_eq!(
+        s.outbox_use(),
+        OutboxUse {
+            events: 2,
+            bytes: 4
+        }
+    );
+}
+
+#[test]
+fn restore_releases_what_the_dropped_outbox_entries_held() {
+    // Given committed entries that hold a share of the outbox limits
+    let s = store();
+    s.limit_outbox(OutboxUse {
+        events: 10,
+        bytes: 100,
+    });
+    let snapshot = s.snapshot();
+    s.update(|tx| {
+        tx.push_outbox(entry("push"));
+        tx.push_outbox(entry("issues"));
+        Ok(())
+    })
+    .unwrap();
+
+    // When the store is restored before the publisher takes them
+    s.restore(&snapshot);
+
+    // Then nothing holds the limits
+    assert_eq!(s.outbox_use(), OutboxUse::default());
 }
 
 #[test]

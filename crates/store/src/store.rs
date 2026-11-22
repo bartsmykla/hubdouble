@@ -9,7 +9,7 @@ use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 
 use crate::counters::Counters;
-use crate::outbox::{Committed, OutboxEntry};
+use crate::outbox::{Committed, OutboxEntry, OutboxUse};
 
 /// A table the store holds. Each registered type is one table; the store keeps them in a
 /// `TypeId` map with typed accessors, so the trait need not be object safe.
@@ -182,6 +182,31 @@ struct Inner {
     outbox: Mutex<Vec<Committed>>,
     outbox_ready: Notify,
     epoch: AtomicU64,
+    limit: Mutex<OutboxUse>,
+    used: Mutex<OutboxUse>,
+}
+
+impl Inner {
+    fn admit(&self, bytes: usize) -> bool {
+        let limit = *self.limit.lock();
+        let mut used = self.used.lock();
+        let fits = used.events < limit.events
+            && used
+                .bytes
+                .checked_add(bytes)
+                .is_some_and(|b| b <= limit.bytes);
+        if fits {
+            used.events += 1;
+            used.bytes += bytes;
+        }
+        fits
+    }
+
+    fn release(&self, bytes: usize) {
+        let mut used = self.used.lock();
+        used.events = used.events.saturating_sub(1);
+        used.bytes = used.bytes.saturating_sub(bytes);
+    }
 }
 
 /// The whole state behind one lock. Cloning is cheap and shares the state.
@@ -259,6 +284,7 @@ impl Store {
                 outbox.push(Committed {
                     seq: *next_seq,
                     epoch,
+                    over_budget: !self.inner.admit(entry.payload.len()),
                     entry,
                 });
             }
@@ -286,7 +312,8 @@ impl Store {
 
     /// Resets to `s` under the exclusive lock: each table's [`Table::restore`] decides what comes
     /// back. It also drops every committed outbox entry the publisher has not taken and moves to
-    /// a new epoch, so hooks can refuse to start an attempt committed before the reset.
+    /// a new epoch, so hooks can refuse to start an attempt committed before the reset. The
+    /// dropped entries release their share of the outbox limits.
     pub fn restore(&self, s: &Snapshot) {
         let mut state = self.inner.state.write();
         for (id, table) in &mut state.tx.tables {
@@ -294,8 +321,31 @@ impl Store {
                 table.restore_dyn(&**seeded);
             }
         }
-        self.inner.outbox.lock().clear();
+        for c in self.inner.outbox.lock().drain(..) {
+            if !c.over_budget {
+                self.inner.release(c.entry.payload.len());
+            }
+        }
         self.inner.epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Bounds the committed entries that wait for delivery: an entry that would make them more
+    /// than `limit.events` entries or `limit.bytes` payload bytes is committed with
+    /// [`Committed::over_budget`] set. Without a call there is no bound.
+    pub fn limit_outbox(&self, limit: OutboxUse) {
+        *self.inner.limit.lock() = limit;
+    }
+
+    /// Gives back the share of the outbox limits that one committed entry of `bytes` payload
+    /// bytes held, once its delivery starts or is dropped.
+    pub fn release_outbox(&self, bytes: usize) {
+        self.inner.release(bytes);
+    }
+
+    /// What the committed entries that fit the limits hold now.
+    #[must_use]
+    pub fn outbox_use(&self) -> OutboxUse {
+        *self.inner.used.lock()
     }
 
     /// Takes every committed outbox entry, in commit sequence order.
@@ -373,6 +423,11 @@ impl StoreBuilder {
                 outbox: Mutex::new(Vec::new()),
                 outbox_ready: Notify::new(),
                 epoch: AtomicU64::new(0),
+                limit: Mutex::new(OutboxUse {
+                    events: usize::MAX,
+                    bytes: usize::MAX,
+                }),
+                used: Mutex::new(OutboxUse::default()),
             }),
         }
     }
