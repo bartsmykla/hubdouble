@@ -13,7 +13,7 @@ use hubdouble_model::{
 };
 use hubdouble_store::{Installations, Repos, Rulesets, Tokens};
 use hubdouble_testkit::fixture::{
-    ALICE_ID, ALICE_TOKEN, APP_ID, BOB, BOB_ID, BOB_TOKEN, CAROL_TOKEN, INSTALLATION_ID,
+    ALICE_ID, ALICE_TOKEN, APP_ID, BOB, BOB_ID, BOB_TOKEN, CAROL_TOKEN, INSTALLATION_ID, ORG_ID,
     PUBLIC_REPO_ID,
 };
 use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer, contents_path, path_escape};
@@ -753,6 +753,61 @@ async fn a_branch_reads_with_its_protection_and_a_missing_one_is_branch_not_foun
     assert_eq!(release["protected"], true);
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
     assert_eq!(missing.json()["message"], "Branch not found");
+}
+
+#[tokio::test]
+async fn an_org_ruleset_protects_only_the_repositories_and_branches_its_conditions_name() {
+    // Given
+    let s = server().await;
+    commit_on(&s, PUBLIC_REPO_ID, ALICE_ID, "release/v1", "r.txt");
+    commit_on(&s, PUBLIC_REPO_ID, ALICE_ID, "release/v10", "r.txt");
+    let org_ruleset = |id: i64, conditions: Value| Ruleset {
+        id,
+        node_id: node_id::entity(node_id::RULESET, id),
+        source_type: RulesetSource::Organization,
+        source_id: ORG_ID,
+        repo_id: None,
+        name: format!("org-{id}"),
+        target: RulesetTarget::Branch,
+        enforcement: Enforcement::Active,
+        bypass_actors: Vec::new(),
+        conditions: Some(conditions),
+        rules: Vec::new(),
+        created_at: Timestamp::SEED,
+        updated_at: Timestamp::SEED,
+    };
+    s.server
+        .services()
+        .store
+        .update_quiet(|tx| {
+            let mut rulesets = tx.table_mut::<Rulesets>();
+            rulesets
+                .insert(org_ruleset(
+                    9001,
+                    json!({"ref_name": {"include": ["~ALL"]},
+                           "repository_name": {"include": ["other"]}}),
+                ))
+                .unwrap();
+            rulesets
+                .insert(org_ruleset(
+                    9002,
+                    json!({"ref_name": {"include": ["refs/heads/release/v?"]},
+                           "repository_name": {"include": ["public"]}}),
+                ))
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let client = alice(&s);
+    // When
+    let branch = |name: &str| format!("repos/acme/public/branches/{}", path_escape(name));
+    let main = client.get(&branch("main")).await.json();
+    let v1 = client.get(&branch("release/v1")).await.json();
+    let v10 = client.get(&branch("release/v10")).await.json();
+    // Then
+    assert_eq!(main["protected"], false);
+    assert_eq!(v1["protected"], true);
+    assert_eq!(v10["protected"], false);
 }
 
 fn document(name: &str) -> String {

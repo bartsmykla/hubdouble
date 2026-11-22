@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::METADATA;
-use crate::glob::glob;
 
 pub(crate) fn register(r: &mut Registrar<'_>) {
     r.rest
@@ -21,68 +20,6 @@ pub(crate) fn register(r: &mut Registrar<'_>) {
     r.rest
         .handle("repos/get-branch-rules", METADATA, branch_rules);
     r.admin.kind("ruleset", ruleset_kind);
-}
-
-/// Whether one `include`/`exclude` condition object (`ref_name` or `repository_name`) admits
-/// `name`; `aliases` gives what `~DEFAULT_BRANCH` and the like stand for.
-fn admits(condition: &Value, name: &str, alias: impl Fn(&str) -> Option<bool>) -> bool {
-    let list = |key: &str| {
-        condition
-            .get(key)
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-    };
-    let hit = |p: &&str| alias(p).unwrap_or_else(|| glob(p, name));
-    list("include").iter().any(hit) && !list("exclude").iter().any(hit)
-}
-
-/// Whether a ruleset's `ref_name` condition admits `refs/heads/<branch>` on a repository whose
-/// default branch is `default_branch`. A ruleset without the condition targets no branch.
-#[must_use]
-pub fn ref_matches(conditions: Option<&Value>, branch: &str, default_branch: &str) -> bool {
-    let Some(ref_name) = conditions.and_then(|c| c.get("ref_name")) else {
-        return false;
-    };
-    let full = format!("refs/heads/{branch}");
-    admits(ref_name, &full, |p| match p {
-        "~ALL" => Some(true),
-        "~DEFAULT_BRANCH" => Some(branch == default_branch),
-        _ => None,
-    })
-}
-
-fn repo_matches(conditions: Option<&Value>, repo: &Repo) -> bool {
-    let Some(c) = conditions else {
-        return false;
-    };
-    if let Some(names) = c.get("repository_name") {
-        return admits(names, &repo.name, |p| (p == "~ALL").then_some(true));
-    }
-    c.pointer("/repository_id/repository_ids")
-        .and_then(Value::as_array)
-        .is_some_and(|ids| ids.iter().any(|id| id.as_i64() == Some(repo.id)))
-}
-
-/// Whether a ruleset governs the repository: its own ruleset, or one of its owner's.
-fn governs(r: &Ruleset, repo: &Repo) -> bool {
-    match r.source_type {
-        RulesetSource::Repository => r.repo_id == Some(repo.id),
-        RulesetSource::Organization => {
-            r.source_id == repo.owner_id && repo_matches(r.conditions.as_ref(), repo)
-        }
-    }
-}
-
-/// Whether an active branch ruleset applies to `branch` of the repository.
-#[must_use]
-pub fn applies_to_branch(r: &Ruleset, repo: &Repo, branch: &str) -> bool {
-    r.enforcement == Enforcement::Active
-        && r.target == RulesetTarget::Branch
-        && governs(r, repo)
-        && ref_matches(r.conditions.as_ref(), branch, &repo.default_branch)
 }
 
 fn source_name(tx: &Tx, r: &Ruleset) -> Result<String, ApiError> {
@@ -160,7 +97,7 @@ fn get_ruleset(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .get(id)
         .filter(|r| match r.source_type {
             RulesetSource::Repository => r.repo_id == Some(repo.id),
-            RulesetSource::Organization => parents && governs(r, repo),
+            RulesetSource::Organization => parents && r.governs(repo),
         })
         .ok_or_else(ApiError::not_found)?;
     let mut out = render::Ruleset::new(ctx.urls(), r, &source_name(tx, r)?);
@@ -188,7 +125,7 @@ fn branch_rules(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     for r in tx
         .table::<Rulesets>()
         .iter()
-        .filter(|r| applies_to_branch(r, repo, branch))
+        .filter(|r| r.applies_to_branch(repo, branch))
     {
         let source: Arc<str> = source_name(tx, r)?.into();
         rules.extend(
@@ -339,48 +276,4 @@ fn ruleset_kind(ctx: &mut SeedCtx<'_>, v: Value) -> Result<(), ApiError> {
         updated_at: now,
     })?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[test]
-    fn ref_name_conditions_follow_include_exclude_and_aliases() {
-        let c = |v: Value| Some(json!({ "ref_name": v }));
-        for (conditions, branch, want) in [
-            (c(json!({"include": ["~DEFAULT_BRANCH"]})), "main", true),
-            (c(json!({"include": ["~DEFAULT_BRANCH"]})), "dev", false),
-            (
-                c(json!({"include": ["~ALL"], "exclude": ["refs/heads/dev"]})),
-                "dev",
-                false,
-            ),
-            (
-                c(json!({"include": ["~ALL"], "exclude": ["refs/heads/dev"]})),
-                "x/y",
-                true,
-            ),
-            (
-                c(json!({"include": ["refs/heads/release/*"]})),
-                "release/v1",
-                true,
-            ),
-            (
-                c(json!({"include": ["refs/heads/release/*"]})),
-                "main",
-                false,
-            ),
-            (c(json!({"include": []})), "main", false),
-            (None, "main", false),
-        ] {
-            assert_eq!(
-                ref_matches(conditions.as_ref(), branch, "main"),
-                want,
-                "{conditions:?} on {branch}"
-            );
-        }
-    }
 }

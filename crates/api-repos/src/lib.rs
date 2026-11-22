@@ -1,7 +1,6 @@
 mod activity;
 mod admin;
 mod codeowners;
-mod glob;
 mod graphql;
 mod releases;
 mod repos;
@@ -12,9 +11,6 @@ use std::sync::Arc;
 use hubdouble_admin::Registrar;
 use hubdouble_model::{Account, ApiError, Event, Grant, Repo, Requirement, Scope};
 use hubdouble_store::{Accounts, Tx, TxMut};
-
-pub use glob::glob;
-pub use rules::{applies_to_branch, ref_matches};
 
 /// Registers what T10 owns: tables, REST operations, GraphQL fields, ref subscribers, seed kinds
 /// and admin routes.

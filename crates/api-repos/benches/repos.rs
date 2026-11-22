@@ -1,7 +1,7 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use hubdouble_api_repos::{glob, ref_matches};
+use hubdouble_model::{glob, ref_matches};
 use serde_json::json;
 
 fn branch_rule_matching(c: &mut Criterion) {

@@ -209,7 +209,7 @@ fn decision(cx: &Ctx<'_>, issue: &Issue, pull: &Pull) -> Option<&'static str> {
         .tx
         .table::<Rulesets>()
         .iter()
-        .filter(|r| hubdouble_api_repos::applies_to_branch(r, repo, &pull.base.ref_name))
+        .filter(|r| r.applies_to_branch(repo, &pull.base.ref_name))
         .flat_map(|r| &r.rules)
         .filter(|r| r.rule_type == "pull_request")
         .filter_map(|r| {

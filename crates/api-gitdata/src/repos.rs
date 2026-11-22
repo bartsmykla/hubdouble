@@ -6,7 +6,7 @@ use hubdouble_git::{
     Commit, EntryMode, FileDiff, FileStatus, Git, GitError, ObjectData, ObjectId, ObjectKind,
     TreeEntry,
 };
-use hubdouble_model::{ApiError, Enforcement, Repo, RulesetSource, RulesetTarget};
+use hubdouble_model::{ApiError, Repo};
 use hubdouble_render::{SimpleUser, Urls};
 use hubdouble_rest::{Ctx, Page, Reply};
 use hubdouble_store::{Rulesets, Tx};
@@ -637,45 +637,10 @@ struct Branch {
     protection_url: String,
 }
 
-fn glob(pattern: &[u8], name: &[u8]) -> bool {
-    match pattern {
-        [] => name.is_empty(),
-        [b'*', b'*', rest @ ..] => (0..=name.len()).any(|i| glob(rest, &name[i..])),
-        [b'*', rest @ ..] => (0..=name.len())
-            .take_while(|i| !name[..*i].contains(&b'/'))
-            .any(|i| glob(rest, &name[i..])),
-        [p, rest @ ..] => name.first() == Some(p) && glob(rest, &name[1..]),
-    }
-}
-
-fn ref_matches(patterns: Option<&serde_json::Value>, full: &str, default: &str) -> bool {
-    patterns
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .any(|p| match p {
-            "~ALL" => true,
-            "~DEFAULT_BRANCH" => full == default,
-            p => glob(p.as_bytes(), full.as_bytes()),
-        })
-}
-
 fn protected(tx: &Tx, repo: &Repo, branch: &str) -> bool {
-    let full = format!("refs/heads/{branch}");
-    let default = format!("refs/heads/{}", repo.default_branch);
-    tx.table::<Rulesets>().iter().any(|r| {
-        let applies = match r.source_type {
-            RulesetSource::Repository => r.repo_id == Some(repo.id) || r.source_id == repo.id,
-            RulesetSource::Organization => r.source_id == repo.owner_id,
-        };
-        let names = r.conditions.as_ref().and_then(|c| c.get("ref_name"));
-        applies
-            && r.target == RulesetTarget::Branch
-            && r.enforcement == Enforcement::Active
-            && ref_matches(names.and_then(|n| n.get("include")), &full, &default)
-            && !ref_matches(names.and_then(|n| n.get("exclude")), &full, &default)
-    })
+    tx.table::<Rulesets>()
+        .iter()
+        .any(|r| r.applies_to_branch(repo, branch))
 }
 
 pub(crate) fn get_branch(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
@@ -713,18 +678,6 @@ pub(crate) fn get_branch(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ruleset_globs_follow_fnmatch() {
-        assert!(glob(b"refs/heads/release/*", b"refs/heads/release/v1"));
-        assert!(!glob(
-            b"refs/heads/release/*",
-            b"refs/heads/release/v1/hotfix"
-        ));
-        assert!(glob(b"refs/heads/**", b"refs/heads/a/b"));
-        assert!(glob(b"refs/heads/main", b"refs/heads/main"));
-        assert!(!glob(b"refs/heads/main", b"refs/heads/mainline"));
-    }
 
     #[test]
     fn an_added_file_patch_counts_every_line() {
