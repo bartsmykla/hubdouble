@@ -1,4 +1,4 @@
-use std::sync::Arc;
+mod compare;
 
 use http::StatusCode;
 use http::header::{ETAG, LINK};
@@ -12,12 +12,13 @@ use hubdouble_store::{Rulesets, Tx};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    GitPerson, Links, ObjectLink, ParentLink, Verification, accepts, commit_at, network_repo,
-    object_node_id, sender, unprocessable, user_of,
+    GitPerson, Links, ObjectLink, ParentLink, Verification, accepts, commit_at, object_node_id,
+    sender, unprocessable, user_of,
 };
 
+pub(crate) use compare::compare;
+
 const COMMIT_FILES: usize = 300;
-const COMPARE_COMMITS: usize = 250;
 const SHA_MEDIA: &str = "application/vnd.github.sha; charset=utf-8";
 
 #[derive(Serialize)]
@@ -323,95 +324,6 @@ pub(crate) fn list_commits(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         log.retain(|(id, c)| touches(view.git, view.tx, view.repo.id, *id, c, path));
     }
     ctx.page(&log, |(id, c)| view.commit(*id, c))
-}
-
-#[derive(Serialize)]
-struct Comparison {
-    url: String,
-    html_url: String,
-    permalink_url: String,
-    diff_url: String,
-    patch_url: String,
-    base_commit: RepoCommit,
-    merge_base_commit: RepoCommit,
-    status: &'static str,
-    ahead_by: u64,
-    behind_by: u64,
-    total_commits: u64,
-    commits: Vec<RepoCommit>,
-    files: Vec<DiffEntry>,
-}
-
-fn side(view: &View<'_>, text: &str) -> Option<ObjectId> {
-    let (repo, rev) = match text.split_once(':') {
-        Some((owner, rest)) => {
-            let rest = rest.split_once(':').map_or(rest, |(_, r)| r);
-            (network_repo(view.tx, view.repo, owner)?.id, rest)
-        }
-        None => (view.repo.id, text),
-    };
-    commit_at(view.git, view.tx, repo, rev).map(|(id, _)| id)
-}
-
-pub(crate) fn compare(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
-    let basehead = ctx.param("basehead")?.to_owned();
-    let (base, head) = basehead
-        .split_once("...")
-        .or_else(|| basehead.split_once(".."))
-        .ok_or_else(ApiError::not_found)?;
-    let view = View::of(ctx)?;
-    let base_id = side(&view, base).ok_or_else(ApiError::not_found)?;
-    let head_id = side(&view, head).ok_or_else(ApiError::not_found)?;
-    let cmp = view.git.compare(view.tx, view.repo.id, base_id, head_id)?;
-    let load = |id: ObjectId| -> Result<Arc<Commit>, ApiError> {
-        match view.git.object(view.tx, view.repo.id, id)?.data {
-            ObjectData::Commit(c) => Ok(c),
-            _ => Err(ApiError::not_found()),
-        }
-    };
-    let base_commit = load(base_id)?;
-    let merge_base = cmp.merge_base.unwrap_or(base_id);
-    let status = match (cmp.ahead_by, cmp.behind_by) {
-        (0, 0) => "identical",
-        (_, 0) => "ahead",
-        (0, _) => "behind",
-        _ => "diverged",
-    };
-    let page = explicit_page(ctx);
-    let commits = match page {
-        Some(p) => slice(&cmp.commits, p),
-        None => &cmp.commits[..cmp.commits.len().min(COMPARE_COMMITS)],
-    };
-    let files = if page.is_none_or(|p| p.page == 1) {
-        let shown = &cmp.files[..cmp.files.len().min(COMMIT_FILES)];
-        shown
-            .iter()
-            .map(|f| DiffEntry::new(&view.links, head_id, f))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let links = &view.links;
-    let body = Comparison {
-        url: format!("{}/compare/{basehead}", links.api),
-        html_url: format!("{}/compare/{basehead}", links.web),
-        permalink_url: format!("{}/compare/{base_id}...{head_id}", links.web),
-        diff_url: format!("{}/compare/{basehead}.diff", links.web),
-        patch_url: format!("{}/compare/{basehead}.patch", links.web),
-        base_commit: view.commit(base_id, &base_commit),
-        merge_base_commit: view.commit(merge_base, &*load(merge_base)?),
-        status,
-        ahead_by: cmp.ahead_by,
-        behind_by: cmp.behind_by,
-        total_commits: cmp.ahead_by,
-        commits: commits.iter().map(|(id, c)| view.commit(*id, c)).collect(),
-        files,
-    };
-    let reply = Reply::json(&body)?;
-    match page {
-        Some(p) => with_link(ctx, reply, p, cmp.commits.len()),
-        None => Ok(reply),
-    }
 }
 
 #[derive(Deserialize)]

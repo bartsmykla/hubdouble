@@ -704,11 +704,43 @@ async fn compare_counts_commits_both_ways_and_pages_its_commits() {
     let two = valid("repos/compare-commits", &page_two);
     assert_eq!(two["commits"].as_array().unwrap().len(), 1);
     assert_ne!(two["commits"][0]["sha"], feature);
+    assert!(two.get("files").is_none());
     assert_eq!(valid("repos/compare-commits", &by_sha)["behind_by"], 1);
     assert_eq!(valid("repos/compare-commits", &two_dots)["ahead_by"], 2);
     assert_eq!(valid("repos/compare-commits", &same)["status"], "identical");
     assert_eq!(valid("repos/compare-commits", &behind)["status"], "behind");
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn unpaged_compare_keeps_the_tail_in_chronological_order() {
+    let commits: Vec<_> = (1..=251)
+        .map(|n| json!({"branch":"feature", "message": n.to_string(), "files":{"file": n.to_string()}}))
+        .collect();
+    let s = TestServer::builder()
+        .fixture()
+        .register(hubdouble_api_gitdata::register)
+        .entry(json!({
+            "kind":"repository", "owner":"acme", "name":"long-history",
+            "files":{"file":"base"}, "commits":commits,
+        }))
+        .start()
+        .await;
+    let client = alice(&s);
+    let path = "repos/acme/long-history/compare/main...feature";
+    let answer = client.get(path).await;
+    assert_eq!(answer.status, StatusCode::OK);
+    let body = valid("repos/compare-commits", &answer);
+    assert_eq!(body["total_commits"], 251);
+    let shown = body["commits"].as_array().unwrap();
+    assert_eq!(shown.len(), 250);
+    for (commit, n) in shown.iter().zip(2..=251) {
+        assert_eq!(commit["commit"]["message"], n.to_string());
+    }
+    let head = client.get("repos/acme/long-history/commits/feature").await;
+    assert_eq!(shown[249]["sha"], head.json()["sha"]);
+    let first = client.get(&format!("{path}?per_page=1")).await.json();
+    assert_eq!(first["commits"][0]["commit"]["message"], "1");
 }
 
 #[tokio::test]
