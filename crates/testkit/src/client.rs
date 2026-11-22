@@ -288,9 +288,15 @@ impl Graphql {
     }
 
     /// Runs `query` with `variables`.
+    ///
+    /// # Panics
+    ///
+    /// When the response does not match GitHub's GraphQL API.
     pub async fn query(&self, query: &str, variables: &Value) -> Answer {
         let body = serde_json::json!({ "query": query, "variables": variables });
-        self.client.post("graphql", &body).await
+        let answer = self.client.post("graphql", &body).await;
+        crate::graphql_answer::check(query, variables, &answer);
+        answer
     }
 }
 

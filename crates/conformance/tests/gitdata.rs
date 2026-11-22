@@ -6,30 +6,23 @@
 use std::collections::BTreeMap;
 
 use http::{Method, StatusCode};
-use hubdouble_admin::Registrar;
 use hubdouble_git::{EntryMode, FileChange, ObjectData, ObjectId, ObjectKind, Signature, Tag};
 use hubdouble_model::{
-    Access, Clock, Enforcement, Repo, Ruleset, RulesetSource, RulesetTarget, Timestamp, Token,
-    TokenKind, node_id,
+    Access, Clock, Enforcement, Ruleset, RulesetSource, RulesetTarget, Timestamp, Token, TokenKind,
+    node_id,
 };
 use hubdouble_store::{Installations, Repos, Rulesets, Tokens};
 use hubdouble_testkit::fixture::{
     ALICE_ID, ALICE_TOKEN, APP_ID, BOB, BOB_ID, BOB_TOKEN, CAROL_TOKEN, INSTALLATION_ID,
     PUBLIC_REPO_ID,
 };
-use hubdouble_testkit::{
-    Answer, GoGithub, Graphql, TestServer, contents_path, path_escape, standins,
-};
+use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer, contents_path, path_escape};
 use serde_json::{Value, json};
 
 const SHA_ACCEPT: &str = "application/vnd.github.v3.sha";
 const RAW_ACCEPT: &str = "application/vnd.github.v3.raw";
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 const APP_TOKEN: &str = "ghs_fixture_gitdata_contents_write";
-
-fn repository_type(r: &mut Registrar<'_>) {
-    r.gql.object::<Repo>("Repository");
-}
 
 async fn server() -> TestServer {
     TestServer::builder()
@@ -43,8 +36,7 @@ async fn graphql_server() -> TestServer {
     TestServer::builder()
         .fixture()
         .register(hubdouble_api_gitdata::register)
-        .register(standins::query_repository)
-        .register(repository_type)
+        .register(hubdouble_api_repos::register)
         .start()
         .await
 }

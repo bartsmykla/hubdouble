@@ -7,6 +7,7 @@ pub mod answer;
 mod client;
 pub mod coverage;
 pub mod fixture;
+mod graphql_answer;
 mod receiver;
 mod server;
 pub mod standins;
