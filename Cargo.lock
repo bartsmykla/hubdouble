@@ -1922,7 +1922,24 @@ dependencies = [
 name = "hubdouble-api-apps"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "criterion",
+ "hmac 0.13.0",
+ "http",
  "hubdouble-admin",
+ "hubdouble-auth",
+ "hubdouble-git",
+ "hubdouble-gql",
+ "hubdouble-hooks",
+ "hubdouble-model",
+ "hubdouble-render",
+ "hubdouble-rest",
+ "hubdouble-store",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
 ]
 
 [[package]]
