@@ -323,7 +323,7 @@ fn documented_answer(x: &Exchange<'_>, id: &str, response: &Value) -> Vec<String
             Some(media) => match serde_json::from_slice::<Value>(x.body) {
                 Ok(body) => {
                     if let Some(schema) = media.get("schema")
-                        && let Err(e) = openapi_schema(schema, &body)
+                        && let Err(e) = openapi_schema(id, x.status, schema, &body)
                     {
                         errors.extend(e.into_iter().map(|e| format!("{id} {}: {e}", x.status)));
                     }

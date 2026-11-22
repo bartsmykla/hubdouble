@@ -214,6 +214,12 @@ async fn a_blob_reads_back_as_json_and_as_raw_bytes() {
             &json!({"content": "aGVsbG8K", "encoding": "base64"}),
         )
         .await;
+    let bad = client
+        .post(
+            "repos/acme/public/git/blobs",
+            &json!({"content": "x", "encoding": "rot13"}),
+        )
+        .await;
     let sha = made.json()["sha"].as_str().unwrap().to_owned();
     let path = format!("repos/acme/public/git/blobs/{sha}");
     let json_form = client.get(&path).await;
@@ -222,6 +228,7 @@ async fn a_blob_reads_back_as_json_and_as_raw_bytes() {
     assert_eq!(made.status, StatusCode::CREATED);
     valid("git/create-blob", &made);
     assert_eq!(sha, "ce013625030ba8dba906f756967f9e9ca394464a");
+    assert_eq!(bad.status, StatusCode::UNPROCESSABLE_ENTITY);
     let body = valid("git/get-blob", &json_form);
     assert_eq!(body["encoding"], "base64");
     assert_eq!(body["content"], "aGVsbG8K\n");

@@ -103,6 +103,23 @@ fn convert(v: Value) -> Value {
     }
 }
 
+const ONE_OF_READ_AS_ANY_OF: [(&str, u16); 1] = [("git/create-blob", 422)];
+
+pub(crate) fn read_around_description_defects(
+    operation_id: &str,
+    status: u16,
+    schema: &Value,
+) -> Value {
+    let mut schema = schema.clone();
+    if ONE_OF_READ_AS_ANY_OF.contains(&(operation_id, status))
+        && let Some(object) = schema.as_object_mut()
+        && let Some(one_of) = object.remove("oneOf")
+    {
+        object.insert("anyOf".to_owned(), one_of);
+    }
+    schema
+}
+
 pub(crate) fn resolve<'a>(doc: &'a Value, v: &'a Value) -> &'a Value {
     match v
         .get("$ref")
@@ -163,12 +180,25 @@ pub fn response_schema(operation_id: &str, status: u16) -> Result<Value, String>
     let schema = resolve(&api.doc, response)
         .pointer("/content/application~1json/schema")
         .ok_or_else(|| format!("{operation_id} {status} has no JSON schema"))?;
-    Ok(convert(schema.clone()))
+    Ok(convert(read_around_description_defects(
+        operation_id,
+        status,
+        schema,
+    )))
 }
 
-pub(crate) fn openapi_schema(schema: &Value, body: &Value) -> Result<(), Vec<String>> {
+pub(crate) fn openapi_schema(
+    operation_id: &str,
+    status: u16,
+    schema: &Value,
+    body: &Value,
+) -> Result<(), Vec<String>> {
     check(
-        &convert(schema.clone()),
+        &convert(read_around_description_defects(
+            operation_id,
+            status,
+            schema,
+        )),
         &OPENAPI.registry,
         Draft::Draft4,
         body,
@@ -334,6 +364,39 @@ mod tests {
         assert_eq!(ok, Ok(()));
         let errors = bad.unwrap_err();
         assert!(errors.iter().any(|e| e.starts_with("/0/id")), "{errors:?}");
+    }
+
+    #[test]
+    fn only_the_listed_description_defect_reads_one_of_as_any_of() {
+        // Given a blob validation error as GitHub sends it, and the description's own 422 schema
+        let error = json!({
+            "message": "Validation Failed",
+            "documentation_url": "https://docs.github.com/rest/git/blobs#create-a-blob",
+            "status": "422",
+            "errors": [{"resource": "Blob", "field": "encoding", "code": "invalid"}]
+        });
+        let described = OPENAPI
+            .doc
+            .pointer("/paths/~1repos~1{owner}~1{repo}~1git~1blobs/post/responses/422/content/application~1json/schema")
+            .unwrap()
+            .clone();
+        // When
+        let as_described = check(
+            &convert(described.clone()),
+            &OPENAPI.registry,
+            Draft::Draft4,
+            &error,
+        );
+        let read_around = openapi_response("git/create-blob", 422, &error);
+        let elsewhere = openapi_schema("orgs/update", 422, &described, &error);
+        let mut broken = error;
+        broken["message"] = json!(7);
+        let still_checked = openapi_response("git/create-blob", 422, &broken);
+        // Then
+        assert!(as_described.is_err());
+        assert_eq!(read_around, Ok(()));
+        assert!(elsewhere.is_err());
+        assert!(still_checked.is_err());
     }
 
     #[test]
