@@ -7,6 +7,7 @@ hubdouble implements the GitHub operations in the [client inventory](inventory/r
 | Area | hubdouble behavior |
 | --- | --- |
 | Webhook transport | The server accepts an `https://` webhook URL, but the delivery attempt fails. The receiver gets no request. The attempt log has `status_code: 0`. Use an `http://` receiver for local tests. |
+| Webhook queue limit | When 10 000 events or 32 MiB of payload wait for a delivery attempt, a new event gets no attempt. Its delivery record has `status_code: 0` and the status `Queue full`, and it lists with `status=failure`. Redeliver it when the receiver is back. |
 | Webhook ID | A webhook payload or delivery record with a `hook_id` uses the App ID as that value. The `X-GitHub-Hook-ID` header also uses the App ID. |
 | Admin writes | Most seed kinds have no direct update or delete route. An unsupported admin method and path return `404`. See the [admin route list](admin-api.md). |
 | Repository renames | The old owner and name return `404` through REST, with no `301` redirect. GraphQL accepts the schema's `followRenames` argument but has no rename lookup. An old name returns a null repository with `NOT_FOUND`, regardless of that argument. |
