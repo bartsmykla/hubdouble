@@ -71,7 +71,10 @@ pub fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let now = ctx.now();
     let (tx, git) = ctx.tx_mut_and_git()?;
     let status = insert(tx, git, (&repo, creator), &sha, input, (None, now))?;
-    Ok(Reply::json(&rest_view(ctx)?.status(&status))?.status(StatusCode::CREATED))
+    let rendered = rest_view(ctx)?.status(&status);
+    Reply::json(&rendered)?
+        .status(StatusCode::CREATED)
+        .header(http::header::LOCATION, &rendered.url)
 }
 
 fn resolved(ctx: &Ctx<'_>) -> Result<String, ApiError> {
