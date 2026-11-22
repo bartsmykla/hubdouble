@@ -319,12 +319,12 @@ fn recipients_follow_installation_coverage_and_subscription() {
 
 #[test]
 fn an_event_reaches_only_installations_granted_its_permission() {
-    // Given two Apps that subscribe to issue_comment and check_run on one repository, and
+    // Given two Apps that subscribe to the same events on one repository, and
     // installation B with contents and checks read but no issues permission
     let store = world();
     store
         .update_quiet(|tx| {
-            let events = ["push", "issue_comment", "check_run"];
+            let events = ["push", "issue_comment", "check_run", "label", "deployment"];
             tx.table_mut::<Apps>()
                 .replace(app(APP_A, "alpha", &events))?;
             tx.table_mut::<Apps>()
@@ -346,6 +346,8 @@ fn an_event_reaches_only_installations_granted_its_permission() {
         ("push", None, vec![APP_A, APP_B]),
         ("check_run", Some("created"), vec![APP_A, APP_B]),
         ("check_run", Some("requested_action"), vec![APP_A]),
+        ("label", Some("created"), vec![APP_A, APP_B]),
+        ("deployment", Some("created"), vec![]),
     ];
     for (name, action, want) in cases {
         // When the event on the repository commits

@@ -30,7 +30,17 @@ fn subscribes(app: &App, event: &str) -> bool {
     ALWAYS_DELIVERED.contains(&event) || app.events.iter().any(|e| e == event)
 }
 
-fn needs(event: &str, action: Option<&str>) -> Option<(&'static str, Access)> {
+/// What an installation must hold to receive an event.
+enum Need {
+    /// Every installation holds it: the `metadata` permission, or an event about the
+    /// installation itself.
+    Nothing,
+    Permission(&'static str, Access),
+}
+
+/// The permission each emitted event needs, from GitHub's webhook events reference. An event
+/// that is not listed reaches no installation.
+fn needs(event: &str, action: Option<&str>) -> Option<Need> {
     let level = |write: &[&str]| {
         if action.is_some_and(|a| write.contains(&a)) {
             Access::Write
@@ -39,24 +49,33 @@ fn needs(event: &str, action: Option<&str>) -> Option<(&'static str, Access)> {
         }
     };
     Some(match event {
-        "push" | "create" | "delete" | "release" => ("contents", Access::Read),
-        "issues" | "issue_comment" => ("issues", Access::Read),
+        _ if ALWAYS_DELIVERED.contains(&event) => Need::Nothing,
+        "repository" | "label" => Need::Nothing,
+        "push" | "create" | "delete" | "release" => Need::Permission("contents", Access::Read),
+        "issues" | "issue_comment" => Need::Permission("issues", Access::Read),
         "pull_request"
         | "pull_request_review"
         | "pull_request_review_comment"
-        | "pull_request_review_thread" => ("pull_requests", Access::Read),
-        "check_run" => ("checks", level(&["rerequested", "requested_action"])),
-        "check_suite" => ("checks", level(&["requested", "rerequested"])),
-        "status" => ("statuses", Access::Read),
-        "workflow_run" | "workflow_job" => ("actions", Access::Read),
-        "organization" | "membership" | "member" | "team" => ("members", Access::Read),
+        | "pull_request_review_thread" => Need::Permission("pull_requests", Access::Read),
+        "check_run" => Need::Permission("checks", level(&["rerequested", "requested_action"])),
+        "check_suite" => Need::Permission("checks", level(&["requested", "rerequested"])),
+        "status" => Need::Permission("statuses", Access::Read),
+        "workflow_run" | "workflow_job" => Need::Permission("actions", Access::Read),
+        "organization" | "membership" | "member" | "team" => {
+            Need::Permission("members", Access::Read)
+        }
         _ => return None,
     })
 }
 
 fn granted(i: &Installation, e: &Event) -> bool {
-    needs(e.name, e.action)
-        .is_none_or(|(permission, at_least)| i.permissions.get(permission) >= Some(&at_least))
+    match needs(e.name, e.action) {
+        Some(Need::Nothing) => true,
+        Some(Need::Permission(permission, at_least)) => {
+            i.permissions.get(permission) >= Some(&at_least)
+        }
+        None => false,
+    }
 }
 
 fn covers(i: &Installation, repo_id: i64) -> bool {
