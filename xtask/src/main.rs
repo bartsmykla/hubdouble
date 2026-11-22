@@ -4,6 +4,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod inventory;
+
 const BUNDLE: &str = "spec/openapi/api.github.com.json";
 const OUTPUT: &str = "crates/spec/src/ops_gen.rs";
 const SLASH_PARAMS: [&str; 5] = ["ref", "path", "branch", "basehead", "tag"];
@@ -17,9 +19,10 @@ const METHODS: [(&str, &str); 5] = [
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.first().map(String::as_str) {
-        Some("gen") => generate(&root()),
-        _ => Err("usage: cargo xtask gen".into()),
+    let result = match args.as_slice() {
+        [task] if task == "gen" => generate(&root()),
+        [task, rest @ ..] if task == "inventory" => inventory::run(&root(), rest),
+        _ => Err("usage: xtask gen | xtask inventory --client <path> [--check]".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

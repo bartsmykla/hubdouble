@@ -1,3 +1,6 @@
-query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
     t0: object(expression: "0123456789abcdef0123456789abcdef01234567:.github/pull_request_template.md") { ... on Blob { text isTruncated } }
-    t1: object(expression: "0123456789abcdef0123456789abcdef01234567:docs/PULL_REQUEST_TEMPLATE.md") { ... on Blob { text isTruncated } } } }
+    t1: object(expression: "0123456789abcdef0123456789abcdef01234567:docs/PULL_REQUEST_TEMPLATE.md") { ... on Blob { text isTruncated } }
+  }
+}
