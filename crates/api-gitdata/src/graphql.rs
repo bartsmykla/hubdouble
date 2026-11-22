@@ -177,6 +177,18 @@ struct RefOrder {
 pub(crate) fn repository_refs(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
     let repo = obj.get::<Repo>()?;
     let prefix: String = required(args, "refPrefix")?;
+    if !prefix.starts_with("refs/") {
+        return Err(GqlError::new(
+            ErrorType::InvalidFieldInput,
+            "`refPrefix` must start with `refs/`.",
+        ));
+    }
+    if !prefix.ends_with('/') {
+        return Err(GqlError::new(
+            ErrorType::InvalidFieldInput,
+            "`refPrefix` must end with a `/`.",
+        ));
+    }
     let query = args.get::<String>("query")?.unwrap_or_default();
     let mut refs: Vec<_> = ctx
         .git
@@ -547,8 +559,12 @@ fn optional_oid(text: &str) -> Result<Option<ObjectId>, GqlError> {
 
 pub(crate) fn update_refs(m: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, GqlError> {
     let input: UpdateRefsInput = required(args, "input")?;
-    let repo_id =
-        node_id::entity_id(node_id::REPOSITORY, &input.repository_id).ok_or_else(|| {
+    let repo_id = node_id::entity_id(node_id::REPOSITORY, &input.repository_id)
+        .or_else(|| match node_id::decode_legacy(&input.repository_id) {
+            Some((kind, id)) if kind == "Repository" => Some(id),
+            _ => None,
+        })
+        .ok_or_else(|| {
             GqlError::new(
                 ErrorType::NotFound,
                 format!(
