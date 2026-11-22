@@ -77,7 +77,7 @@ Every crate is pinned to its latest stable version when P0-A adds it, and kept c
 
 ### 4.1 Process and URLs
 
-One listener, `HUBDOUBLE_ADDR` (default `:8000`). `HUBDOUBLE_BASE_URL` (default `http://localhost:8000`) is the origin written into every URL in a response or payload, except the resource links below. `HUBDOUBLE_WEB_URL` (default the base URL) is the origin of `html_url` and other links to resources only. Pages hubdouble serves itself always use `HUBDOUBLE_BASE_URL`: `/login/oauth/*`, `/login/device` and the device flow's `verification_uri`, `/orgs/{org}/sso` and the `url=` in `X-GitHub-SSO`, so a person signing in locally never lands on real GitHub (client shows `verification_uri` to people, `internal/dispatch/accounts.go:91-109`). Set `HUBDOUBLE_WEB_URL` to `https://github.com` when a client checks that links are GitHub's, as client's draft notice does (`internal/report/surfaces.go:152`). API URLs in answers and payloads (`url`, `issue_url`, `pull_request.url`, `repository.url` and the like) always use `HUBDOUBLE_BASE_URL` with the API prefix the request came in on, because clients compare them with their API base (client `internal/dispatch/request_original.go:199`). `HUBDOUBLE_OIDC_ISSUER` overrides the issuer, which is `HUBDOUBLE_BASE_URL + "/_actions"` by default.
+One listener, `HUBDOUBLE_ADDR` (default `:8000`). `HUBDOUBLE_BASE_URL` (default `http://localhost:8000`) is the origin written into every URL in a response or payload, except the resource links below. `HUBDOUBLE_WEB_URL` (default the base URL) is the origin of `html_url` and other links to resources only. Pages hubdouble serves itself always use `HUBDOUBLE_BASE_URL`: `/login/oauth/*`, `/login/device` and the device flow's `verification_uri`, `/orgs/{org}/sso` and the `url=` in `X-GitHub-SSO`, so a person signing in locally never lands on real GitHub (client shows `verification_uri` to people, `internal/dispatch/accounts.go:91-109`). Set `HUBDOUBLE_WEB_URL` to `https://github.com` when a client checks that links are GitHub's, as client's draft notice does (`internal/report/surfaces.go:152`). API URLs in answers and payloads (`url`, `issue_url`, `pull_request.url`, `repository.url` and the like) always use `HUBDOUBLE_BASE_URL` with the API prefix the request came in on, because clients compare them with their API base (client `internal/dispatch/request_original.go:199`). `HUBDOUBLE_OIDC_ISSUER` overrides the issuer, which is `HUBDOUBLE_BASE_URL + "/_actions"` by default. An override may change the origin only: its path must end in `/_actions`, where hubdouble serves discovery and JWKS, and any other path fails at start.
 
 | Path | Serves |
 | --- | --- |
@@ -310,6 +310,7 @@ pub type Handler = fn(&mut Ctx<'_>) -> Result<Reply, ApiError>;
 impl Registry {
     pub fn handle(&mut self, operation_id: &str, req: Requirement, h: Handler); // panics on an unknown or already registered operation
     pub fn extra(&mut self, method: Method, path: &str, operation_id: &'static str, req: Requirement, h: Handler); // routes outside the OpenAPI bundle
+    pub fn extra_authenticating(/* as extra */); // the handler checks its own bearer (the Actions runtime token); it runs as Actor::Anonymous
 }
 ```
 

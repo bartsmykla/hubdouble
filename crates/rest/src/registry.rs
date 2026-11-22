@@ -13,6 +13,9 @@ pub struct Entry {
     pub operation_id: &'static str,
     pub requirement: Requirement,
     pub handler: Handler,
+    /// The handler reads its own credential, so the server skips GitHub token
+    /// authentication and runs it as `Actor::Anonymous`. See [`Registry::extra_authenticating`].
+    pub authenticates: bool,
 }
 
 enum Segment {
@@ -93,7 +96,28 @@ impl Registry {
             operation_id: OPERATIONS[i].id,
             requirement: req,
             handler: h,
+            authenticates: false,
         });
+    }
+
+    /// [`Registry::extra`] for a route whose bearer is not a GitHub token, such as the Actions
+    /// runtime token of `/_actions/token`. The handler checks the `Authorization` header itself.
+    ///
+    /// # Panics
+    ///
+    /// As [`Registry::extra`].
+    pub fn extra_authenticating(
+        &mut self,
+        method: http::Method,
+        path: &str,
+        operation_id: &'static str,
+        req: Requirement,
+        h: Handler,
+    ) {
+        self.extra(method, path, operation_id, req, h);
+        if let Some(last) = self.extras.last_mut() {
+            last.entry.authenticates = true;
+        }
     }
 
     /// Adds a route GitHub serves outside its REST description, under hubdouble's own operation
@@ -142,6 +166,7 @@ impl Registry {
             operation_id,
             requirement: req,
             handler: h,
+            authenticates: false,
         };
         self.extras.push(Extra {
             method: m,

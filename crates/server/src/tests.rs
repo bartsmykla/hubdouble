@@ -34,7 +34,29 @@ fn boom(_: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     panic!("the handler fails")
 }
 
+#[expect(clippy::unnecessary_wraps, reason = "a handler returns a Result")]
+fn bearer(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    Ok(Reply::raw(
+        "text/plain",
+        ctx.header("authorization").unwrap_or_default().to_owned(),
+    ))
+}
+
 fn register(r: &mut Registrar<'_>) {
+    r.rest.extra_authenticating(
+        Method::GET,
+        "/_test/own-bearer",
+        "test/own-bearer",
+        Requirement::public(),
+        bearer,
+    );
+    r.rest.extra(
+        Method::GET,
+        "/_test/github-bearer",
+        "test/github-bearer",
+        Requirement::public(),
+        bearer,
+    );
     r.rest.handle("meta/root", Requirement::public(), root);
     r.rest.handle("meta/get-zen", Requirement::public(), zen);
     r.rest
@@ -139,6 +161,17 @@ async fn health_and_readiness_answer_ok() {
             "{path}"
         );
     }
+}
+
+#[tokio::test]
+async fn only_a_self_authenticating_route_takes_a_bearer_github_does_not_know() {
+    let s = start().await;
+    let runtime = [("authorization", "Bearer actions-runtime-token")];
+    let own = get(s.addr, "/_test/own-bearer", &runtime).await;
+    assert_eq!(own.status, StatusCode::OK);
+    assert_eq!(own.body, "Bearer actions-runtime-token");
+    let github = get(s.addr, "/_test/github-bearer", &runtime).await;
+    assert_eq!(github.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

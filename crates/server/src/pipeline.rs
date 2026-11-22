@@ -179,7 +179,11 @@ impl Inner {
             Access::Write(tx) => tx,
         };
         let services = &self.services;
-        let actor = hubdouble_auth::authenticate(tx, services.clock.as_ref(), r.headers)?;
+        let actor = if r.entry.authenticates {
+            hubdouble_auth::Actor::Anonymous
+        } else {
+            hubdouble_auth::authenticate(tx, services.clock.as_ref(), r.headers)?
+        };
         who.login = actor.login().map(str::to_owned);
         who.scopes = actor.oauth_scopes().map(|s| s.join(", "));
         let resolved = resolve_target(tx, r.params)?;

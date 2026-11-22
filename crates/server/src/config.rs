@@ -48,8 +48,17 @@ pub fn config_from_env(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config
     };
     let base_url = origin("HUBDOUBLE_BASE_URL")?.unwrap_or(defaults.base_url);
     let web_url = origin("HUBDOUBLE_WEB_URL")?.unwrap_or_else(|| base_url.clone());
-    let oidc_issuer =
-        origin("HUBDOUBLE_OIDC_ISSUER")?.unwrap_or_else(|| format!("{base_url}/_actions"));
+    let oidc_issuer = match origin("HUBDOUBLE_OIDC_ISSUER")? {
+        Some(issuer) if issuer.ends_with("/_actions") => issuer,
+        Some(issuer) => {
+            return Err(invalid(
+                "HUBDOUBLE_OIDC_ISSUER",
+                &issuer,
+                "expected a URL whose path ends in /_actions, where hubdouble serves the issuer",
+            ));
+        }
+        None => format!("{base_url}/_actions"),
+    };
     let workers = get("HUBDOUBLE_WORKERS")
         .map(|v| {
             v.trim()
@@ -106,6 +115,19 @@ mod tests {
         assert_eq!(c.admin_token, "hubdouble-admin");
         assert_eq!(c.seed, None);
         assert_eq!(c.workers, None);
+    }
+
+    #[test]
+    fn an_issuer_override_keeps_the_actions_path() {
+        let moved = parse(&[("HUBDOUBLE_OIDC_ISSUER", "http://issuer.test/_actions")]).unwrap();
+        assert_eq!(moved.oidc_issuer, "http://issuer.test/_actions");
+        assert!(matches!(
+            parse(&[("HUBDOUBLE_OIDC_ISSUER", "http://issuer.test/oidc")]),
+            Err(ConfigError::Invalid {
+                name: "HUBDOUBLE_OIDC_ISSUER",
+                ..
+            })
+        ));
     }
 
     #[test]
