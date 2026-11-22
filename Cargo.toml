@@ -35,6 +35,7 @@ hubdouble-rest = { path = "crates/rest" }
 hubdouble-server = { path = "crates/server" }
 hubdouble-spec = { path = "crates/spec" }
 hubdouble-store = { path = "crates/store" }
+hubdouble-testkit = { path = "crates/testkit" }
 
 apollo-compiler = "=1.33.1"
 base64 = "=0.23.1"

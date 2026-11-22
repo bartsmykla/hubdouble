@@ -1,0 +1,39 @@
+[package]
+name = "hubdouble-testkit"
+description = "Test kit: in-process server, go-github request builders, GraphQL client, webhook receiver, validators, fixture seed and GraphQL stand-ins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+hmac.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hubdouble-admin.workspace = true
+hubdouble-auth.workspace = true
+hubdouble-git.workspace = true
+hubdouble-gql.workspace = true
+hubdouble-model.workspace = true
+hubdouble-rest.workspace = true
+hubdouble-server.workspace = true
+hubdouble-store.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+jsonschema.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+hubdouble-render.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
