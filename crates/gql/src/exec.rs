@@ -1,13 +1,10 @@
-use std::any::{Any, TypeId};
-use std::sync::Arc;
+mod complete;
+mod request;
 
-use apollo_compiler::ast::{DirectiveList, OperationType, Type, Value as Ast};
+use apollo_compiler::ast::{Type, Value as Ast};
 use apollo_compiler::collections::IndexMap;
-use apollo_compiler::executable::{Field, Operation, Selection, SelectionSet};
-use apollo_compiler::parser::SourceSpan;
-use apollo_compiler::request::RequestError;
-use apollo_compiler::response::JsonMap;
-use apollo_compiler::schema::{ExtendedType, FieldDefinition};
+use apollo_compiler::executable::{Field, Selection, SelectionSet};
+use apollo_compiler::schema::FieldDefinition;
 use apollo_compiler::{ExecutableDocument, Node};
 use hubdouble_auth::Actor;
 use hubdouble_git::Git;
@@ -17,117 +14,18 @@ use serde_json::{Map, Value, json};
 
 use crate::contract::{
     Args, Conn, Ctx, Edge, ErrorType, GqlError, MutCtx, Obj, PageInfo, Registry, Request, Resolved,
-    Response, ResponseError,
+    ResponseError,
 };
+use crate::request_errors::locations;
+use crate::selection::included;
 
-pub(crate) fn execute(
-    registry: &Registry,
-    store: &Store,
-    git: &Git,
-    actor: &Actor,
-    request: &Request<'_>,
-) -> Result<Response, ApiError> {
-    let doc = match crate::validate::validate(&registry.schema, request.query) {
-        Ok(doc) => doc,
-        Err(errors) => return Ok(failed(errors)),
-    };
-    let op = match doc.operations.get(request.operation_name) {
-        Ok(op) => op,
-        Err(e) => return Ok(failed(vec![request_error(&e, &doc)])),
-    };
-    let vars = match variables(registry, op, request.variables) {
-        Ok(vars) => vars,
-        Err(e) => return Ok(failed(vec![request_error(&e, &doc)])),
-    };
-    let mut ex = Exec {
-        registry,
-        doc: &doc,
-        vars: &vars,
-        errors: Vec::new(),
-        warnings: Vec::new(),
-    };
-    let data = match op.operation_type {
-        OperationType::Query => store.view(|tx| {
-            let cx = Ctx {
-                tx,
-                git,
-                actor,
-                clock: request.clock,
-                urls: request.urls,
-                registry,
-            };
-            let root = Obj {
-                type_name: QUERY,
-                value: registry.root.clone(),
-            };
-            Ok(ex.root(&cx, &root, &op.selection_set))
-        })?,
-        OperationType::Mutation => ex.mutations(store, git, actor, request, &op.selection_set),
-        OperationType::Subscription => {
-            return Ok(failed(vec![ResponseError {
-                kind: ErrorType::Validation,
-                message: "Subscriptions are not supported.".to_owned(),
-                path: Vec::new(),
-                locations: Vec::new(),
-            }]));
-        }
-    };
-    let extensions = (!ex.warnings.is_empty()).then(|| {
-        let mut m = Map::new();
-        m.insert("warnings".to_owned(), Value::Array(ex.warnings));
-        m
-    });
-    Ok(Response {
-        data: Some(data.map_or(Value::Null, Value::Object)),
-        errors: ex.errors,
-        extensions,
-    })
-}
+pub(crate) use request::{execute, variables};
 
 const QUERY: &str = "Query";
 const MUTATION: &str = "Mutation";
 const DEPRECATION: &str =
     "The id {} is deprecated. Update your cache to use the next_global_id from the data payload.";
 
-fn failed(errors: Vec<ResponseError>) -> Response {
-    Response {
-        data: None,
-        errors,
-        extensions: None,
-    }
-}
-
-fn request_error(e: &RequestError, doc: &ExecutableDocument) -> ResponseError {
-    ResponseError {
-        kind: ErrorType::Validation,
-        message: e.message().to_string(),
-        path: Vec::new(),
-        locations: locations(e.location(), doc),
-    }
-}
-
-fn locations(at: Option<SourceSpan>, doc: &ExecutableDocument) -> Vec<Value> {
-    at.and_then(|l| l.line_column_range(&doc.sources))
-        .map_or_else(Vec::new, |r| {
-            vec![json!({"line": r.start.line, "column": r.start.column})]
-        })
-}
-
-fn variables(
-    registry: &Registry,
-    op: &Operation,
-    given: &Map<String, Value>,
-) -> Result<Map<String, Value>, RequestError> {
-    let raw: JsonMap = serde_json::from_value(Value::Object(given.clone())).unwrap_or_default();
-    let coerced =
-        apollo_compiler::request::coerce_variable_values(&registry.schema.inner, op, &raw)?;
-    Ok(match serde_json::to_value(&*coerced) {
-        Ok(Value::Object(m)) => m,
-        _ => Map::new(),
-    })
-}
-
-/// A position whose value became `null` because of an error already recorded.
 struct Null;
 
 #[derive(Clone, Copy)]
@@ -299,12 +197,12 @@ impl<'r> Exec<'r> {
         for selection in &set.selections {
             match selection {
                 Selection::Field(f) => {
-                    if self.included(&f.directives) {
+                    if included(&f.directives, self.vars) {
                         groups.entry(f.response_key().as_str()).or_default().push(f);
                     }
                 }
                 Selection::InlineFragment(inline) => {
-                    if self.included(&inline.directives)
+                    if included(&inline.directives, self.vars)
                         && inline
                             .type_condition
                             .as_ref()
@@ -315,7 +213,7 @@ impl<'r> Exec<'r> {
                 }
                 Selection::FragmentSpread(spread) => {
                     let name = spread.fragment_name.as_str();
-                    if self.included(&spread.directives) && !visited.contains(&name) {
+                    if included(&spread.directives, self.vars) && !visited.contains(&name) {
                         visited.push(name);
                         if let Some(fragment) = self.doc.fragments.get(name)
                             && self.applies(type_name, &fragment.selection_set.ty)
@@ -328,27 +226,8 @@ impl<'r> Exec<'r> {
         }
     }
 
-    fn included(&self, directives: &DirectiveList) -> bool {
-        let flag = |name: &str| {
-            directives
-                .get(name)
-                .and_then(|d| d.specified_argument_by_name("if"))
-                .and_then(|v| self.json(v))
-                .and_then(|v| v.as_bool())
-        };
-        flag("skip") != Some(true) && flag("include") != Some(false)
-    }
-
     fn applies(&self, object: &str, condition: &str) -> bool {
-        object == condition
-            || match self.schema().types.get(condition) {
-                Some(ExtendedType::Interface(_)) => self
-                    .schema()
-                    .get_object(object)
-                    .is_some_and(|o| o.implements_interfaces.contains(condition)),
-                Some(ExtendedType::Union(u)) => u.members.contains(object),
-                _ => false,
-            }
+        object == condition || self.schema().is_subtype(condition, object)
     }
 
     fn set(
@@ -534,175 +413,28 @@ impl<'r> Exec<'r> {
         Resolved::List(out)
     }
 
-    fn is_leaf(&self, name: &str) -> bool {
-        matches!(
-            self.schema().types.get(name),
-            Some(ExtendedType::Scalar(_) | ExtendedType::Enum(_))
-        )
-    }
-
-    fn complete(
-        &mut self,
-        cx: &Ctx<'_>,
-        parent_type: &str,
-        ty: &Type,
-        out: Out<'_>,
-        fields: &Fields<'r>,
-        path: &Path<'_>,
-    ) -> Result<Value, Null> {
-        let v = self.complete_nullable(cx, parent_type, ty, out, fields, path);
-        if !ty.is_non_null() {
-            return Ok(v.unwrap_or(Value::Null));
-        }
-        match v {
-            Ok(Value::Null) => {
-                let message = format!(
-                    "Cannot return null for non-nullable field {parent_type}.{}",
-                    fields[0].name
-                );
-                self.error(ErrorType::Validation, message, fields[0], path);
-                Err(Null)
-            }
-            other => other,
-        }
-    }
-
-    fn complete_nullable(
-        &mut self,
-        cx: &Ctx<'_>,
-        parent_type: &str,
-        ty: &Type,
-        out: Out<'_>,
-        fields: &Fields<'r>,
-        path: &Path<'_>,
-    ) -> Result<Value, Null> {
-        if matches!(out, Out::R(Resolved::Null | Resolved::Leaf(Value::Null))) {
-            return Ok(Value::Null);
-        }
-        if let Type::List(item) | Type::NonNullList(item) = ty {
-            let items: Vec<Out<'_>> = match out {
-                Out::R(Resolved::List(v)) => v.into_iter().map(Out::R).collect(),
-                Out::R(Resolved::Leaf(Value::Array(v))) => {
-                    v.into_iter().map(|x| Out::R(Resolved::Leaf(x))).collect()
-                }
-                Out::Edges(edges) => edges.iter().map(Out::Edge).collect(),
-                Out::Nodes(edges) => edges.iter().map(|e| Out::R(e.node.clone())).collect(),
-                _ => return self.internal("a list field resolved to a single value", fields, path),
-            };
-            let mut list = Vec::with_capacity(items.len());
-            let mut nulled = false;
-            for (i, out) in items.into_iter().enumerate() {
-                let at = Path {
-                    parent: Some(path),
-                    seg: Seg::Index(i),
-                };
-                match self.complete(cx, parent_type, item, out, fields, &at) {
-                    Ok(v) => list.push(v),
-                    Err(Null) => nulled = true,
-                }
-            }
-            return if nulled {
-                Err(Null)
-            } else {
-                Ok(Value::Array(list))
-            };
-        }
-        let named = ty.inner_named_type().as_str();
-        if self.is_leaf(named) {
-            return match out {
-                Out::R(Resolved::Leaf(v)) => Ok(v),
-                _ => self.internal("a scalar field resolved to an object", fields, path),
-            };
-        }
-        match out {
-            Out::Edge(e) => self.object(cx, Parent::Edge(e), named, fields, path),
-            Out::PageInfo(p) => self.object(cx, Parent::PageInfo(p), named, fields, path),
-            Out::R(Resolved::Object { type_name, value }) => {
-                if let Err(message) = self.check(type_name, &value, named) {
-                    return self.internal(&message, fields, path);
-                }
-                let obj = Obj { type_name, value };
-                self.object(cx, Parent::Obj(&obj), type_name, fields, path)
-            }
-            _ => self.internal("an object field resolved to a scalar", fields, path),
-        }
-    }
-
-    fn object(
-        &mut self,
-        cx: &Ctx<'_>,
-        parent: Parent<'_>,
-        type_name: &str,
-        fields: &Fields<'r>,
-        path: &Path<'_>,
-    ) -> Result<Value, Null> {
-        let mut groups = Groups::default();
-        let mut visited = Vec::new();
-        for f in fields {
-            self.collect(type_name, &f.selection_set, &mut groups, &mut visited);
-        }
-        self.set(cx, parent, type_name, &groups, Some(path))
-            .map(Value::Object)
-    }
-
-    fn check(
-        &self,
-        type_name: &str,
-        value: &Arc<dyn Any + Send + Sync>,
-        expected: &str,
-    ) -> Result<(), String> {
-        if self.schema().get_object(type_name).is_none() || !self.applies(type_name, expected) {
-            return Err(format!("{type_name} is not a possible type of {expected}"));
-        }
-        let actual = (**value).type_id();
-        if actual == TypeId::of::<Conn>() {
-            return Ok(());
-        }
-        let Some(o) = self.registry.objects.get(type_name) else {
-            return Err(format!("{type_name} has no registered Rust value"));
-        };
-        debug_assert!(
-            o.type_id == actual,
-            "{type_name} resolved to a value that is not a {}",
-            o.rust_name
-        );
-        if o.type_id == actual {
-            Ok(())
-        } else {
-            Err(format!(
-                "{type_name} resolved to a value that is not a {}",
-                o.rust_name
-            ))
-        }
-    }
-
-    fn internal(
-        &mut self,
-        message: &str,
-        fields: &Fields<'r>,
-        path: &Path<'_>,
-    ) -> Result<Value, Null> {
-        self.error(ErrorType::Internal, message.to_owned(), fields[0], path);
-        Err(Null)
-    }
-
     fn field_error(&mut self, e: GqlError, f: &Node<Field>, path: &Path<'_>) {
         let message = match e.kind {
-            ErrorType::MissingPaginationBoundaries | ErrorType::ExcessivePagination => e
-                .message
-                .replacen("the connection", &format!("the `{}` connection", f.name), 1),
+            ErrorType::MissingPaginationBoundaries
+            | ErrorType::ExcessivePagination
+            | ErrorType::InvalidPagination
+            | ErrorType::Validation => {
+                e.message
+                    .replacen("the connection", &format!("the `{}` connection", f.name), 1)
+            }
             _ => e.message,
         };
         self.error(e.kind, message, f, path);
     }
 
     fn error(&mut self, kind: ErrorType, message: String, f: &Node<Field>, path: &Path<'_>) {
-        let locations = locations(f.location(), self.doc);
+        let locations = locations(f.location(), &self.doc.sources);
         self.errors.push(ResponseError {
             kind,
             message,
             path: path.segments(),
             locations,
+            extensions: None,
         });
     }
 

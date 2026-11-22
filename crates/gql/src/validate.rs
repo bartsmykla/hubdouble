@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use apollo_compiler::ast::Type;
+use apollo_compiler::ast::{Document, Type};
 use apollo_compiler::diagnostic::{Diagnostic, ToCliReport};
 use apollo_compiler::executable::{Field, Selection, SelectionSet};
 use apollo_compiler::parser::SourceSpan;
@@ -18,8 +18,13 @@ pub(crate) fn validate(
     schema: &Schema,
     query: &str,
 ) -> Result<Valid<ExecutableDocument>, Vec<ResponseError>> {
-    let doc = ExecutableDocument::parse(&schema.inner, query, "query.graphql")
-        .map_err(|e| errors(&e.errors))?;
+    let ast = Document::parse(query, "query.graphql").map_err(|e| errors(&e.errors))?;
+    let doc = ast.to_executable(&schema.inner).map_err(|e| {
+        e.errors
+            .iter()
+            .map(|d| crate::request_errors::validation(schema, &ast, &d, error(&d)))
+            .collect::<Vec<_>>()
+    })?;
     match doc.validate(&schema.inner) {
         Ok(valid) => Ok(valid),
         Err(e) => {
@@ -27,7 +32,7 @@ pub(crate) fn validate(
                 .errors
                 .iter()
                 .filter(|d| !tolerated(schema, &e.partial, d))
-                .map(|d| error(&d))
+                .map(|d| crate::request_errors::validation(schema, &ast, &d, error(&d)))
                 .collect();
             if kept.is_empty() {
                 Ok(Valid::assume_valid(e.partial))
@@ -50,6 +55,7 @@ pub(crate) fn error(d: &Diagnostic<'_, DiagnosticData>) -> ResponseError {
         locations: d.line_column_range().map_or_else(Vec::new, |r| {
             vec![serde_json::json!({"line": r.start.line, "column": r.start.column})]
         }),
+        extensions: None,
     }
 }
 

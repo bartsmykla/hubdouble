@@ -2301,6 +2301,7 @@ name = "hubdouble-gql"
 version = "0.1.0"
 dependencies = [
  "apollo-compiler",
+ "base64 0.23.1",
  "criterion",
  "hubdouble-auth",
  "hubdouble-git",
