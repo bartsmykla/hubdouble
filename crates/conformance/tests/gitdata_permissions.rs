@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 const DOC: &str = include_str!("../../../docs/inventory/graphql/createCommit.graphql");
 const UPDATE_REFS: &str = include_str!("../../../docs/inventory/graphql/updateRefs.graphql");
+const ISSUES_ONLY: &str = "ghs_issues_read_only";
 const READ_ONLY: &str = "ghs_contents_read";
 const CONTENTS: &str = "ghs_contents_only";
 const WORKFLOWS: &str = "ghs_contents_and_workflows";
@@ -34,7 +35,24 @@ async fn server_with_tokens() -> TestServer {
             installation
                 .permissions
                 .insert("workflows".into(), Access::Write);
+            installation.repo_ids.push(fixture::PRIVATE_REPO_ID);
             tx.table_mut::<Installations>().replace(installation)?;
+            let id = tx.next_id();
+            tx.table_mut::<Tokens>().insert(Token {
+                id,
+                token: ISSUES_ONLY.into(),
+                kind: TokenKind::Installation,
+                app_id: Some(fixture::APP_ID),
+                installation_id: Some(fixture::INSTALLATION_ID),
+                user_id: None,
+                repo_ids: None,
+                permissions: BTreeMap::from([("issues".into(), Access::Read)]),
+                scopes: vec![],
+                expires_at: None,
+                revoked: false,
+                owner_seeded: false,
+                created_at: server.clock.now(),
+            })?;
             for (token, contents, workflow) in [
                 (READ_ONLY, Access::Read, false),
                 (CONTENTS, Access::Write, false),
@@ -208,6 +226,35 @@ async fn update_refs_rejects_a_workflow_change_without_the_grant() {
     assert_eq!(main_after_denial, main);
     assert!(allowed.get("errors").is_none(), "{allowed}");
     assert_eq!(branch_sha(&client, "main").await, sha);
+}
+
+#[tokio::test]
+async fn graphql_git_fields_need_the_contents_grant_on_a_private_repository() {
+    // Given
+    let server = server_with_tokens().await;
+    let document = "query($name: String!) { repository(owner: \"acme\", name: $name) { name \
+        object(expression: \"HEAD:\") { oid } ref(qualifiedName: \"refs/heads/main\") { name } \
+        defaultBranchRef { name } refs(refPrefix: \"refs/heads/\", first: 10) { totalCount } } }";
+    let variables = json!({"name": fixture::PRIVATE_REPO});
+    // When
+    let without = Graphql::new(GoGithub::new(&server).with_token(ISSUES_ONLY))
+        .query(document, &variables)
+        .await
+        .json();
+    // Then
+    assert_eq!(without["data"]["repository"]["name"], fixture::PRIVATE_REPO);
+    let mut denied: Vec<&str> = without["errors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no errors: {without}"))
+        .iter()
+        .inspect(|e| assert_eq!(e["type"], "FORBIDDEN", "{e}"))
+        .filter_map(|e| e["path"][1].as_str())
+        .collect();
+    denied.sort_unstable();
+    assert_eq!(denied, ["defaultBranchRef", "object", "ref", "refs"]);
+    for field in ["object", "ref", "defaultBranchRef", "refs"] {
+        assert_eq!(without["data"]["repository"][field], Value::Null, "{field}");
+    }
 }
 
 async fn branch_sha(client: &GoGithub, branch: &str) -> String {

@@ -10,9 +10,11 @@ use hubdouble_model::{Repo, node_id};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::WRITE_CONTENTS;
+use hubdouble_auth::{Target as AuthTarget, authorize};
+
 use crate::common::{decode_base64, signature_of};
 use crate::refs::{denied_workflow, workflow_refusal};
+use crate::{READ_CONTENTS, WRITE_CONTENTS};
 
 const REF_CONNECTION: &str = "RefConnection";
 
@@ -100,12 +102,20 @@ fn qualified_ref(repo_id: i64, name: String, target: ObjectId) -> Resolved {
     ref_resolved(repo_id, name, prefix, target)
 }
 
+fn readable_repo<'o>(ctx: &Ctx<'_>, obj: &'o Obj) -> Result<&'o Repo, GqlError> {
+    let repo = Arc::clone(&obj.value)
+        .downcast::<Repo>()
+        .map_err(|_| GqlError::new(ErrorType::Internal, "the parent is not a Repository"))?;
+    authorize(ctx.tx, ctx.actor, &READ_CONTENTS, AuthTarget::Repo(&repo))?;
+    obj.get::<Repo>()
+}
+
 pub(crate) fn repository_object(
     ctx: &Ctx<'_>,
     obj: &Obj,
     args: &Args,
 ) -> Result<Resolved, GqlError> {
-    let repo = obj.get::<Repo>()?;
+    let repo = readable_repo(ctx, obj)?;
     let found = if let Some(text) = args.get::<String>("oid")? {
         let id: ObjectId = text
             .parse()
@@ -123,7 +133,7 @@ pub(crate) fn repository_object(
 }
 
 pub(crate) fn repository_ref(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
-    let repo = obj.get::<Repo>()?;
+    let repo = readable_repo(ctx, obj)?;
     let name: String = required(args, "qualifiedName")?;
     let candidates = if name.starts_with("refs/") {
         vec![name]
@@ -147,7 +157,7 @@ pub(crate) fn repository_default_branch_ref(
     obj: &Obj,
     _: &Args,
 ) -> Result<Resolved, GqlError> {
-    let repo = obj.get::<Repo>()?;
+    let repo = readable_repo(ctx, obj)?;
     let full = format!("refs/heads/{}", repo.default_branch);
     Ok(match ctx.git.resolve_ref(ctx.tx, repo.id, &full) {
         Ok(target) => qualified_ref(repo.id, full, target),
@@ -176,7 +186,7 @@ struct RefOrder {
 }
 
 pub(crate) fn repository_refs(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
-    let repo = obj.get::<Repo>()?;
+    let repo = readable_repo(ctx, obj)?;
     let prefix: String = required(args, "refPrefix")?;
     if !prefix.starts_with("refs/") {
         return Err(GqlError::new(
