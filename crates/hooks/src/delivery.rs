@@ -13,6 +13,12 @@ use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::time::{Duration, Instant};
+
+/// How long an idle pooled connection is reused. It is below the idle timeouts servers commonly
+/// set (client closes idle connections after 60 s), so an attempt does not race the server's
+/// close of the connection it picks.
+pub(crate) const IDLE_REUSE: Duration = Duration::from_secs(30);
 
 /// A byte stream a webhook request is written to.
 pub trait Io: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
@@ -131,10 +137,10 @@ async fn read_capped(mut body: hyper::body::Incoming, cap: usize) -> Option<(Vec
 
 type Sender = SendRequest<Full<Bytes>>;
 
-/// Idle keep-alive connections per webhook origin, at most `per_origin` each, so attempts reuse
-/// them as an HTTP client with a connection pool does.
+/// Idle keep-alive connections per webhook origin, at most `per_origin` each and each for at most
+/// [`IDLE_REUSE`], so attempts reuse them as an HTTP client with a connection pool does.
 pub(crate) struct Pool {
-    idle: Mutex<HashMap<String, Vec<Sender>>>,
+    idle: Mutex<HashMap<String, Vec<(Sender, Instant)>>>,
     per_origin: usize,
 }
 
@@ -149,8 +155,8 @@ impl Pool {
     fn take(&self, origin: &str) -> Option<Sender> {
         let mut idle = self.idle.lock();
         let senders = idle.get_mut(origin)?;
-        while let Some(sender) = senders.pop() {
-            if sender.is_ready() {
+        while let Some((sender, since)) = senders.pop() {
+            if sender.is_ready() && since.elapsed() < IDLE_REUSE {
                 return Some(sender);
             }
         }
@@ -160,8 +166,9 @@ impl Pool {
     fn give(&self, origin: String, sender: Sender) {
         let mut idle = self.idle.lock();
         let senders = idle.entry(origin).or_default();
+        senders.retain(|(pooled, since)| pooled.is_ready() && since.elapsed() < IDLE_REUSE);
         if senders.len() < self.per_origin && sender.is_ready() {
-            senders.push(sender);
+            senders.push((sender, Instant::now()));
         }
     }
 }

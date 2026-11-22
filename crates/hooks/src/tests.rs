@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::Uri;
@@ -909,6 +910,40 @@ async fn attempts_reuse_keep_alive_connections_up_to_the_worker_count() {
     }
     assert!(connects.load(Ordering::SeqCst) <= 2);
     assert_eq!(logged_ids(&store, APP_A).len(), 20);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_attempt_after_the_idle_limit_opens_a_new_connection() {
+    let store = world();
+    let connects = Arc::new(AtomicUsize::new(0));
+    let (hits, rx) = mpsc::unbounded_channel();
+    let options = Options {
+        workers: 1,
+        connector: Arc::new(InProcess {
+            hits,
+            connects: connects.clone(),
+        }),
+        ..Options::default()
+    };
+    let clock = Arc::new(ManualClock::new(Timestamp::SEED));
+    let hooks = Handle::start_with(store.clone(), clock, options).unwrap();
+    let mut bodies = answer_all(rx);
+    // Given one delivery whose connection went back to the pool
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    assert!(bodies.recv().await.is_some());
+    // When the next attempt starts just inside and then just past the idle limit
+    tokio::time::advance(crate::delivery::IDLE_REUSE - Duration::from_secs(1)).await;
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    assert!(bodies.recv().await.is_some());
+    assert_eq!(connects.load(Ordering::SeqCst), 1);
+    tokio::time::advance(crate::delivery::IDLE_REUSE).await;
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    assert!(bodies.recv().await.is_some());
+    // Then only the attempt past the limit opened a second connection
+    assert_eq!(connects.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(start_paused = true)]
