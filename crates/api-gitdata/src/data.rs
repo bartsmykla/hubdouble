@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use http::StatusCode;
+use http::header::LOCATION;
 use hubdouble_auth::Actor;
 use hubdouble_git::{
     Commit, EntryMode, Git, GitError, ObjectData, ObjectId, ObjectKind, Ref, Tag, TreeEntry,
@@ -48,11 +49,13 @@ pub(crate) fn create_blob(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let links = Links::of(ctx)?;
     let repo = ctx.repo()?.id;
     let sha = ctx.git().write_blob(ctx.tx(), repo, &data)?;
+    let url = links.object(ObjectKind::Blob, sha);
     Reply::json(&ShortBlob {
-        url: links.object(ObjectKind::Blob, sha),
+        url: url.clone(),
         sha,
-    })
-    .map(|r| r.status(StatusCode::CREATED))
+    })?
+    .status(StatusCode::CREATED)
+    .header(LOCATION, &url)
 }
 
 #[derive(Serialize)]
@@ -393,7 +396,10 @@ pub(crate) fn create_tree(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let ObjectData::Tree(entries) = git.object(tx, repo, id)?.data else {
         return Err(ApiError::internal("a written tree is not a tree"));
     };
-    Reply::json(&render_tree(ctx, id, &entries, false)?).map(|r| r.status(StatusCode::CREATED))
+    let tree = render_tree(ctx, id, &entries, false)?;
+    Reply::json(&tree)?
+        .status(StatusCode::CREATED)
+        .header(LOCATION, &tree.url)
 }
 
 #[derive(Serialize)]
@@ -542,8 +548,10 @@ pub(crate) fn create_git_commit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     }
     let id = git.write_commit(tx, repo, &commit)?;
     let links = Links::of(ctx)?;
-    Reply::json(&GitCommit::new(git, repo, &links, id, &commit))
-        .map(|r| r.status(StatusCode::CREATED))
+    let commit = GitCommit::new(git, repo, &links, id, &commit);
+    Reply::json(&commit)?
+        .status(StatusCode::CREATED)
+        .header(LOCATION, &commit.url)
 }
 
 #[derive(Serialize)]
@@ -643,7 +651,10 @@ pub(crate) fn create_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         name: body.name,
         target: sha,
     };
-    Reply::json(&render_ref(ctx, &links, &r)?).map(|r| r.status(StatusCode::CREATED))
+    let created = render_ref(ctx, &links, &r)?;
+    Reply::json(&created)?
+        .status(StatusCode::CREATED)
+        .header(LOCATION, &created.url)
 }
 
 pub(crate) fn delete_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
