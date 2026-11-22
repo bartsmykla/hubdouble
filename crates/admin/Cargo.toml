@@ -1,0 +1,25 @@
+[package]
+name = "hubdouble-admin"
+description = "Admin API frame, seed loader, faults, request log and per-track registration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hubdouble-git.workspace = true
+hubdouble-gql.workspace = true
+hubdouble-hooks.workspace = true
+hubdouble-model.workspace = true
+hubdouble-rest.workspace = true
+hubdouble-store.workspace = true
+hyper.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

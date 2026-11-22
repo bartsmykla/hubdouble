@@ -1,0 +1,17 @@
+[package]
+name = "hubdouble-auth"
+description = "Token kinds, JWT checks, grants and the authorization choke point"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+http.workspace = true
+hubdouble-model.workspace = true
+hubdouble-store.workspace = true
+
+[lints]
+workspace = true

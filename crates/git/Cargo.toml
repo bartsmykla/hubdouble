@@ -1,0 +1,18 @@
+[package]
+name = "hubdouble-git"
+description = "In-memory git object store, refs, ref subscribers, compare, three-way merge and signing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+hubdouble-model.workspace = true
+hubdouble-store.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
