@@ -4,7 +4,7 @@ use http::header::{ACCEPT, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
 use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
 use hubdouble_model::{Access, Clock, Issue, IssueState, Pull, PullRef, Token, TokenKind, node_id};
-use hubdouble_store::{Issues, Tokens};
+use hubdouble_store::{Issues, Releases, Tokens};
 use hubdouble_testkit::fixture::{
     ALICE_ID, ALICE_TOKEN, APP_ID, APP_PUBLIC_KEY, BOB_TOKEN, CAROL_TOKEN, INSTALLATION_ID,
     PUBLIC_REPO_ID, WEBHOOK_URL_ENV,
@@ -194,6 +194,33 @@ fn release_seed() -> Value {
     let mut seed = release_body();
     seed["kind"] = json!("release");
     seed
+}
+
+#[tokio::test]
+async fn release_list_renders_only_the_requested_page() {
+    let server = start(vec![
+        release_seed(),
+        json!({"kind": "release", "id": 7002, "repository": "acme/public",
+               "tag_name": "v3.0.0"}),
+    ])
+    .await;
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            let mut off_page = tx.table::<Releases>().get(7001).unwrap().as_ref().clone();
+            off_page.author_id = i64::MAX;
+            tx.table_mut::<Releases>().replace(off_page)?;
+            Ok(())
+        })
+        .unwrap();
+    let first = alice(&server)
+        .get("repos/acme/public/releases?per_page=1")
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.json()[0]["id"], 7002);
+    assert!(first.header("link").contains("page=2>; rel=\"next\""));
 }
 
 #[tokio::test]

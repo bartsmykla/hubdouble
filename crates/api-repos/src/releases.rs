@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
 use bytes::Bytes;
+use http::header::LINK;
 use hubdouble_admin::{Registrar, SeedCtx};
 use hubdouble_auth::{Actor, Target};
 use hubdouble_git::{Git, GitError, ObjectId};
@@ -8,7 +9,7 @@ use hubdouble_model::{
     ApiError, AssetState, Grant, Release, ReleaseAsset, Repo, Requirement, Scope, node_id,
 };
 use hubdouble_render::{self as render, SimpleUser, Urls};
-use hubdouble_rest::{Ctx, Reply};
+use hubdouble_rest::{Ctx, Page, Reply};
 use hubdouble_store::{Accounts, Blob, Blobs, ReleaseAssets, Releases, Tx, TxMut};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -82,11 +83,19 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .filter(|r| visible(tx, ctx.actor(), repo, r))
         .collect();
     releases.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
-    let rendered = releases
+    let Page { page, per_page } = ctx.page_params();
+    let start = (page - 1).saturating_mul(per_page).min(releases.len());
+    let end = start.saturating_add(per_page).min(releases.len());
+    let rendered = releases[start..end]
         .iter()
         .map(|r| render(tx, ctx.urls(), r))
         .collect::<Result<Vec<_>, _>>()?;
-    ctx.page(&rendered, Clone::clone)
+    let reply = Reply::json(&rendered)?;
+    let last = releases.len().div_ceil(per_page).max(1);
+    match ctx.link_header(page, last) {
+        Some(link) => reply.header(LINK, &link),
+        None => Ok(reply),
+    }
 }
 
 fn by_tag(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
