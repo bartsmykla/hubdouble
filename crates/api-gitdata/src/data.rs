@@ -5,7 +5,7 @@ use http::StatusCode;
 use http::header::LOCATION;
 use hubdouble_auth::Actor;
 use hubdouble_git::{
-    Commit, EntryMode, Git, GitError, ObjectData, ObjectId, ObjectKind, Ref, Tag, TreeEntry,
+    Commit, EntryMode, Git, GitError, ObjectData, ObjectId, ObjectKind, Tag, TreeEntry,
 };
 use hubdouble_model::ApiError;
 use hubdouble_rest::{Ctx, Reply};
@@ -14,8 +14,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::common::{
     GitPerson, Links, ObjectLink, ParentLink, Verification, accepts, decode_base64, kind_name,
-    object_node_id, parse_oid, ref_node_id, sender, signature_of, unprocessable, wrapped_base64,
+    object_node_id, parse_oid, sender, signature_of, unprocessable, wrapped_base64,
 };
+use crate::refs::RefObject;
 
 pub(crate) const RAW: &str = "application/vnd.github.raw; charset=utf-8";
 
@@ -552,120 +553,6 @@ pub(crate) fn create_git_commit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     Reply::json(&commit)?
         .status(StatusCode::CREATED)
         .header(LOCATION, &commit.url)
-}
-
-#[derive(Serialize)]
-struct RefObject {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    sha: ObjectId,
-    url: String,
-}
-
-#[derive(Serialize)]
-struct GitRef {
-    #[serde(rename = "ref")]
-    name: String,
-    node_id: String,
-    url: String,
-    object: RefObject,
-}
-
-fn render_ref(ctx: &Ctx<'_>, links: &Links, r: &Ref) -> Result<GitRef, ApiError> {
-    let repo = ctx.repo()?.id;
-    let kind = ctx.git().object(ctx.tx(), repo, r.target)?.data.kind();
-    Ok(GitRef {
-        node_id: ref_node_id(repo, &r.name),
-        url: format!(
-            "{}/git/{}",
-            links.api,
-            r.name.strip_prefix("refs/").unwrap_or(&r.name)
-        ),
-        object: RefObject {
-            kind: kind_name(kind),
-            sha: r.target,
-            url: links.object(kind, r.target),
-        },
-        name: r.name.clone(),
-    })
-}
-
-fn full_ref(name: &str) -> String {
-    format!("refs/{name}")
-}
-
-pub(crate) fn get_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
-    let name = full_ref(ctx.param("ref")?);
-    let target = exact_ref(ctx, &name).ok_or_else(ApiError::not_found)?;
-    let links = Links::of(ctx)?;
-    Reply::json(&render_ref(ctx, &links, &Ref { name, target })?)
-}
-
-fn exact_ref(ctx: &Ctx<'_>, name: &str) -> Option<ObjectId> {
-    let repo = ctx.repo().ok()?.id;
-    ctx.git()
-        .refs(ctx.tx(), repo, name)
-        .into_iter()
-        .find(|r| r.name == name)
-        .map(|r| r.target)
-}
-
-pub(crate) fn list_matching_refs(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
-    let prefix = full_ref(ctx.param("ref")?);
-    let links = Links::of(ctx)?;
-    let refs = ctx.git().refs(ctx.tx(), ctx.repo()?.id, &prefix);
-    let rendered = refs
-        .iter()
-        .map(|r| render_ref(ctx, &links, r))
-        .collect::<Result<Vec<_>, _>>()?;
-    Reply::json(&rendered)
-}
-
-#[derive(Deserialize)]
-struct NewRef {
-    #[serde(rename = "ref")]
-    name: String,
-    sha: String,
-}
-
-pub(crate) fn create_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
-    let body: NewRef = ctx.body()?;
-    if !body.name.starts_with("refs/") || body.name.matches('/').count() < 2 {
-        return Err(unprocessable(
-            "Reference",
-            "ref",
-            "Reference name must be fully qualified and contain at least two slashes",
-        ));
-    }
-    let sha = parse_oid(&body.sha)
-        .ok_or_else(|| unprocessable("Reference", "sha", "Object does not exist"))?;
-    let repo = ctx.repo()?.id;
-    let account = sender(ctx.actor())?.id;
-    if ctx.git().object(ctx.tx(), repo, sha).is_err() {
-        return Err(unprocessable("Reference", "sha", "Object does not exist"));
-    }
-    let (tx, git) = ctx.tx_mut_and_git()?;
-    git.update_ref(tx, repo, account, &body.name, None, Some(sha), false)?;
-    let links = Links::of(ctx)?;
-    let r = Ref {
-        name: body.name,
-        target: sha,
-    };
-    let created = render_ref(ctx, &links, &r)?;
-    Reply::json(&created)?
-        .status(StatusCode::CREATED)
-        .header(LOCATION, &created.url)
-}
-
-pub(crate) fn delete_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
-    let name = full_ref(ctx.param("ref")?);
-    let current =
-        exact_ref(ctx, &name).ok_or_else(|| ApiError::unprocessable("Reference does not exist"))?;
-    let repo = ctx.repo()?.id;
-    let account = sender(ctx.actor())?.id;
-    let (tx, git) = ctx.tx_mut_and_git()?;
-    git.update_ref(tx, repo, account, &name, Some(current), None, true)?;
-    Ok(Reply::empty())
 }
 
 #[derive(Serialize)]

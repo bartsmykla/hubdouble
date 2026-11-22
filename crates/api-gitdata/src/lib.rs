@@ -1,6 +1,7 @@
 mod common;
 mod data;
 mod graphql;
+mod refs;
 mod repos;
 
 use hubdouble_admin::Registrar;
@@ -39,14 +40,15 @@ pub fn register(r: &mut Registrar<'_>) {
     rest.handle("git/get-tree", READ_CONTENTS, data::get_tree);
     rest.handle("git/create-commit", WRITE_CONTENTS, data::create_git_commit);
     rest.handle("git/get-commit", READ_CONTENTS, data::get_git_commit);
-    rest.handle("git/get-ref", READ_CONTENTS, data::get_ref);
+    rest.handle("git/get-ref", READ_CONTENTS, refs::get_ref);
     rest.handle(
         "git/list-matching-refs",
         READ_CONTENTS,
-        data::list_matching_refs,
+        refs::list_matching_refs,
     );
-    rest.handle("git/create-ref", WRITE_CONTENTS, data::create_ref);
-    rest.handle("git/delete-ref", WRITE_CONTENTS, data::delete_ref);
+    rest.handle("git/create-ref", WRITE_CONTENTS, refs::create_ref);
+    rest.handle("git/update-ref", WRITE_CONTENTS, refs::update_ref);
+    rest.handle("git/delete-ref", WRITE_CONTENTS, refs::delete_ref);
     rest.handle("git/get-tag", READ_CONTENTS, data::get_tag);
     rest.handle("repos/get-content", READ_CONTENTS, repos::get_content);
     rest.handle("repos/list-commits", READ_CONTENTS, repos::list_commits);
