@@ -579,7 +579,14 @@ async fn statuses_list_and_combine_as_client_reads_them() {
         .filter_map(|b| b["name"].as_str())
         .collect();
     branches.sort_unstable();
-    assert_eq!(branches, ["develop", "main"]);
+    assert_eq!(branches, ["develop", "feature", "main"]);
+    let feature_branch = events[0]["branches"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|b| b["name"] == "feature")
+        .map(|b| b["commit"]["sha"].clone());
+    assert_eq!(feature_branch, Some(json!(feature)));
     for body in [write("bogus", "agent/run"), json!({"context": "agent/run"})] {
         assert_eq!(
             client.post(&path, &body).await.status,

@@ -1,4 +1,4 @@
-use hubdouble_git::{Git, ObjectData, Signature};
+use hubdouble_git::{Git, ObjectData, ObjectId, Signature};
 use hubdouble_hooks::emit;
 use hubdouble_model::{ApiError, CheckRun, CheckSuite, Event, Status, node_id};
 use hubdouble_render::Urls;
@@ -234,17 +234,27 @@ fn commit_object(view: &View<'_>, sha: &str) -> Result<Value, ApiError> {
     }))
 }
 
+/// GitHub's `status` event lists at most 10 branches that contain the SHA, each with its own
+/// head commit.
 fn branches(view: &View<'_>, sha: &str) -> Vec<Value> {
     let (api, full) = (&view.urls.api, &view.name);
+    let Ok(commit) = sha.parse::<ObjectId>() else {
+        return Vec::new();
+    };
     view.git
         .refs(view.tx, view.repo.id, "refs/heads/")
         .into_iter()
-        .filter(|r| r.target.to_string() == sha)
+        .filter(|r| {
+            view.git
+                .is_ancestor(view.tx, view.repo.id, commit, r.target)
+                .unwrap_or(false)
+        })
         .take(10)
         .map(|r| {
+            let head = r.target;
             json!({
                 "name": r.name.trim_start_matches("refs/heads/"),
-                "commit": { "sha": sha, "url": format!("{api}/repos/{full}/commits/{sha}") },
+                "commit": { "sha": head, "url": format!("{api}/repos/{full}/commits/{head}") },
                 "protected": false,
             })
         })

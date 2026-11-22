@@ -608,6 +608,21 @@ impl Git {
         Ok(self.odb(tx, repo).peel_commit(id)?.0)
     }
 
+    /// Whether commit `ancestor` is in the history of commit `of`, itself included.
+    ///
+    /// # Errors
+    ///
+    /// [`GitError::NotFound`] for a missing commit on the walk.
+    pub fn is_ancestor(
+        &self,
+        tx: &Tx,
+        repo: i64,
+        ancestor: ObjectId,
+        of: ObjectId,
+    ) -> Result<bool, GitError> {
+        history::is_ancestor(&self.odb(tx, repo), ancestor, of)
+    }
+
     /// The history from `head`, newest first: by committer time like `git log`, or along first
     /// parents only; at most `limit` commits.
     ///
