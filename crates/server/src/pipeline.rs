@@ -188,13 +188,7 @@ impl Inner {
             Resolved::Org(org) => (Target::Org(org), None),
             Resolved::None => (Target::None, None),
         };
-        hubdouble_auth::authorize_at(
-            tx,
-            &actor,
-            &r.entry.requirement,
-            target,
-            &services.config.base_url,
-        )?;
+        hubdouble_auth::authorize(tx, &actor, &r.entry.requirement, target)?;
         let mut ctx = Ctx::new(Parts {
             operation_id: r.entry.operation_id,
             path: r.api_path,

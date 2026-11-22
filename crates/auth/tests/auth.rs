@@ -3,8 +3,8 @@ mod common;
 use common::*;
 use http::HeaderMap;
 use hubdouble_auth::{
-    Actor, AuthError, NarrowRequest, Target, authenticate, authenticate_admin, authorize,
-    authorize_at, can_see, narrow, record_sso, repo_role, verify_app_jwt,
+    Actor, AuthError, NarrowRequest, Target, authenticate, authenticate_admin, authorize, can_see,
+    narrow, record_sso, repo_role, verify_app_jwt,
 };
 use hubdouble_model::{
     Access, ApiError, Grant, ManualClock, RepoRole, Requirement, Scope, Timestamp,
@@ -84,20 +84,14 @@ fn on_repo(store: &Store, actor: &Actor, req: &Requirement, repo: i64) -> Result
     })
 }
 
-fn on_org(
-    store: &Store,
-    actor: &Actor,
-    req: &Requirement,
-    org: i64,
-    base: &str,
-) -> Result<(), ApiError> {
+fn on_org(store: &Store, actor: &Actor, req: &Requirement, org: i64) -> Result<(), ApiError> {
     store.view(|tx| {
         let org = tx
             .table::<Accounts>()
             .get(org)
             .cloned()
             .ok_or_else(ApiError::not_found)?;
-        authorize_at(tx, actor, req, Target::Org(&org), base)
+        authorize(tx, actor, req, Target::Org(&org))
     })
 }
 
@@ -510,20 +504,13 @@ fn a_user_token_without_sso_gets_403_with_the_sso_link_until_sso_is_recorded() {
     // Given alice's user token and the SSO-enforced org
     let store = store();
     let ghu = actor(&store, "ghu_alice");
-    let base = "http://hubdouble:8000";
 
     // When
-    let org = on_org(&store, &ghu, &ORG_REPOS, SSO_ORG, base).expect_err("sso");
+    let org = on_org(&store, &ghu, &ORG_REPOS, SSO_ORG).expect_err("sso");
     let repo = store
         .view(|tx| {
             let repo = tx.table::<Repos>().get(SSO_PRIVATE).cloned().expect("repo");
-            Ok(authorize_at(
-                tx,
-                &ghu,
-                &READ_CONTENTS,
-                Target::Repo(&repo),
-                base,
-            ))
+            Ok(authorize(tx, &ghu, &READ_CONTENTS, Target::Repo(&repo)))
         })
         .expect("view")
         .expect_err("sso");
@@ -537,10 +524,7 @@ fn a_user_token_without_sso_gets_403_with_the_sso_link_until_sso_is_recorded() {
         );
     }
     let personal = actor(&store, "ghp_alice");
-    assert_eq!(
-        status(on_org(&store, &personal, &ORG_REPOS, SSO_ORG, base)),
-        200
-    );
+    assert_eq!(status(on_org(&store, &personal, &ORG_REPOS, SSO_ORG)), 200);
 
     // When SSO is recorded
     store
@@ -548,7 +532,7 @@ fn a_user_token_without_sso_gets_403_with_the_sso_link_until_sso_is_recorded() {
         .expect("record");
 
     // Then
-    assert_eq!(status(on_org(&store, &ghu, &ORG_REPOS, SSO_ORG, base)), 200);
+    assert_eq!(status(on_org(&store, &ghu, &ORG_REPOS, SSO_ORG)), 200);
     assert_eq!(
         status(on_repo(&store, &ghu, &READ_CONTENTS, SSO_PRIVATE)),
         200
@@ -558,14 +542,10 @@ fn a_user_token_without_sso_gets_403_with_the_sso_link_until_sso_is_recorded() {
 #[test]
 fn org_writes_need_the_grant_and_for_users_the_owner_role() {
     let store = store();
-    let base = "";
 
     let members_read = actor(&store, "ghs_full");
-    assert_eq!(
-        status(on_org(&store, &members_read, &ORG_REPOS, ACME, base)),
-        200
-    );
-    let e = on_org(&store, &members_read, &ORG_MEMBERS_WRITE, ACME, base).expect_err("denied");
+    assert_eq!(status(on_org(&store, &members_read, &ORG_REPOS, ACME)), 200);
+    let e = on_org(&store, &members_read, &ORG_MEMBERS_WRITE, ACME).expect_err("denied");
     assert_eq!(
         header(&e, "X-Accepted-GitHub-Permissions"),
         Some("members=write")
@@ -575,8 +555,7 @@ fn org_writes_need_the_grant_and_for_users_the_owner_role() {
             &store,
             &actor(&store, "ghp_dave"),
             &ORG_MEMBERS_WRITE,
-            ACME,
-            base
+            ACME
         )),
         200
     );
@@ -585,19 +564,12 @@ fn org_writes_need_the_grant_and_for_users_the_owner_role() {
             &store,
             &actor(&store, "ghp_carol"),
             &ORG_MEMBERS_WRITE,
-            ACME,
-            base
+            ACME
         )),
         403
     );
     assert_eq!(
-        status(on_org(
-            &store,
-            &Actor::Anonymous,
-            &ORG_MEMBERS_WRITE,
-            ACME,
-            base
-        )),
+        status(on_org(&store, &Actor::Anonymous, &ORG_MEMBERS_WRITE, ACME)),
         401
     );
 }

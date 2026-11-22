@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use http::{HeaderMap, HeaderValue};
 use hubdouble_model::{
-    Access, Account, AccountKind, App, Collaborator, Installation, Membership, MembershipState,
-    OrgRole, Repo, RepoRole, RepositorySelection, Team, TeamMember, TeamPrivacy, TeamRepo,
-    TeamRole, Timestamp, Token, TokenKind, Visibility,
+    Access, Account, AccountKind, App, Collaborator, Config, Installation, Membership,
+    MembershipState, OrgRole, Repo, RepoRole, RepositorySelection, Team, TeamMember, TeamPrivacy,
+    TeamRepo, TeamRole, Timestamp, Token, TokenKind, Visibility,
 };
 use hubdouble_store::{
     Accounts, Apps, Installations, Memberships, Repos, Store, StoreBuilder, Teams, Tokens,
@@ -172,7 +173,10 @@ pub fn user_token(id: i64, value: &str, user: i64) -> Token {
 pub fn store() -> Store {
     let mut b = StoreBuilder::new();
     hubdouble_auth::register_tables(&mut b);
-    let store = b.build();
+    let store = b.build_with(Arc::new(Config {
+        base_url: "http://hubdouble:8000".to_owned(),
+        ..Config::default()
+    }));
     store
         .update(|tx| {
             let mut sso = account(SSO_ORG, "sso-org", AccountKind::Organization);

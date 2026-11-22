@@ -77,35 +77,18 @@ pub fn authenticate(tx: &Tx, clock: &dyn Clock, headers: &HeaderMap) -> Result<A
 
 /// The choke point: checks `req` against the actor's grant and the target.
 ///
-/// The `X-GitHub-SSO` link is relative here; [`authorize_at`] names the origin.
-///
 /// # Errors
 ///
 /// `404` for a repository the actor cannot see, `403` with `X-Accepted-GitHub-Permissions` for a
-/// missing permission, `403` with `X-GitHub-SSO` for an org that needs SSO.
+/// missing permission, `403` with `X-GitHub-SSO: required; url=<base_url>/orgs/<org>/sso` for an
+/// org that needs SSO, `base_url` being the store's [`Tx::config`].
 pub fn authorize(
     tx: &Tx,
     actor: &Actor,
     req: &Requirement,
     target: Target<'_>,
 ) -> Result<(), ApiError> {
-    authorize_at(tx, actor, req, target, "")
-}
-
-/// As [`authorize`], with `base_url` (`HUBDOUBLE_BASE_URL`, no trailing `/`) as the origin of
-/// the `X-GitHub-SSO` link `required; url=<base_url>/orgs/<org>/sso`.
-///
-/// # Errors
-///
-/// As [`authorize`].
-pub fn authorize_at(
-    tx: &Tx,
-    actor: &Actor,
-    req: &Requirement,
-    target: Target<'_>,
-    base_url: &str,
-) -> Result<(), ApiError> {
-    crate::check::authorize(tx, actor, req, target, base_url)
+    crate::check::authorize(tx, actor, req, target, &tx.config().base_url)
 }
 
 /// Whether the actor can see the repository, for GraphQL's per-object check. A public
