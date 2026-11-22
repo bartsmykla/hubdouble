@@ -153,6 +153,7 @@ impl Shared {
                 0 => QUEUE_BYTES,
                 n => n,
             },
+            refused_bytes: options.log_bytes,
         });
         let (drains, drain_rx) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
@@ -458,7 +459,11 @@ impl Shared {
 
     fn refuse(&self, job: Job) {
         let (app, id, epoch) = (job.app_id, job.id, job.epoch);
-        let delivery = job.logged(self.clock.now(), 0.0, Outcome::failed(OVER_BUDGET));
+        let shed = job.body.is_empty();
+        let mut delivery = job.logged(self.clock.now(), 0.0, Outcome::failed(OVER_BUDGET));
+        if shed {
+            strip(&mut delivery);
+        }
         let mut st = self.state.lock();
         let logged = (epoch == self.store.epoch()).then_some((epoch, delivery));
         self.finish(&mut st, app, id, logged);
@@ -468,8 +473,8 @@ impl Shared {
         let mut st = self.state.lock();
         let job = st.queue.pop_front()?;
         self.space.add_permits(1);
-        self.release_job(&job);
         if job.epoch != self.store.epoch() {
+            self.release_job(&job);
             self.finish(&mut st, job.app_id, job.id, None);
             return None;
         }
@@ -497,6 +502,7 @@ impl Shared {
         )
         .await
         .unwrap_or_else(|_| Outcome::failed("Timed out"));
+        self.release_job(&job);
         let delivery = job.logged(delivered_at, started.elapsed().as_secs_f64(), outcome);
         let mut st = self.state.lock();
         st.bodies.held -= sent;

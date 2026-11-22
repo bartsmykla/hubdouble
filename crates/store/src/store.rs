@@ -4,6 +4,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use bytes::Bytes;
 use hubdouble_model::{ApiError, Config};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
@@ -177,9 +178,39 @@ struct State {
     next_seq: u64,
 }
 
+#[derive(Default)]
+struct Outbox {
+    entries: Vec<Committed>,
+    refused_bytes: usize,
+    shed_until: usize,
+}
+
+impl Outbox {
+    fn refuse(&mut self, c: Committed, limit: usize) {
+        self.refused_bytes += c.entry.payload.len();
+        self.entries.push(c);
+        while self.refused_bytes > limit {
+            let Some(old) = self.entries.get_mut(self.shed_until) else {
+                break;
+            };
+            self.shed_until += 1;
+            if old.over_budget {
+                self.refused_bytes -= old.entry.payload.len();
+                old.entry.payload = Bytes::new();
+            }
+        }
+    }
+
+    fn take(&mut self) -> Vec<Committed> {
+        self.refused_bytes = 0;
+        self.shed_until = 0;
+        std::mem::take(&mut self.entries)
+    }
+}
+
 struct Inner {
     state: RwLock<State>,
-    outbox: Mutex<Vec<Committed>>,
+    outbox: Mutex<Outbox>,
     outbox_ready: Notify,
     epoch: AtomicU64,
     limit: Mutex<OutboxUse>,
@@ -278,15 +309,21 @@ impl Store {
         let delivered = deliver && !entries.is_empty();
         if delivered {
             let epoch = self.inner.epoch.load(Ordering::SeqCst);
+            let refused_limit = self.inner.limit.lock().refused_bytes;
             let mut outbox = self.inner.outbox.lock();
             for entry in entries {
                 *next_seq += 1;
-                outbox.push(Committed {
+                let c = Committed {
                     seq: *next_seq,
                     epoch,
                     over_budget: !self.inner.admit(entry.payload.len()),
                     entry,
-                });
+                };
+                if c.over_budget {
+                    outbox.refuse(c, refused_limit);
+                } else {
+                    outbox.entries.push(c);
+                }
             }
         }
         drop(state);
@@ -321,7 +358,7 @@ impl Store {
                 table.restore_dyn(&**seeded);
             }
         }
-        for c in self.inner.outbox.lock().drain(..) {
+        for c in self.inner.outbox.lock().take() {
             if !c.over_budget {
                 self.inner.release(c.entry.payload.len());
             }
@@ -331,7 +368,9 @@ impl Store {
 
     /// Bounds the committed entries that wait for delivery: an entry that would make them more
     /// than `limit.events` entries or `limit.bytes` payload bytes is committed with
-    /// [`Committed::over_budget`] set. Without a call there is no bound.
+    /// [`Committed::over_budget`] set. Over-budget entries keep at most `limit.refused_bytes`
+    /// payload bytes until they are taken; past it the oldest of them lose their payload.
+    /// Without a call there is no bound.
     pub fn limit_outbox(&self, limit: OutboxUse) {
         *self.inner.limit.lock() = limit;
     }
@@ -342,16 +381,20 @@ impl Store {
         self.inner.release(bytes);
     }
 
-    /// What the committed entries that fit the limits hold now.
+    /// What the committed entries hold now.
     #[must_use]
     pub fn outbox_use(&self) -> OutboxUse {
-        *self.inner.used.lock()
+        let refused_bytes = self.inner.outbox.lock().refused_bytes;
+        OutboxUse {
+            refused_bytes,
+            ..*self.inner.used.lock()
+        }
     }
 
     /// Takes every committed outbox entry, in commit sequence order.
     #[must_use]
     pub fn take_outbox(&self) -> Vec<Committed> {
-        std::mem::take(&mut *self.inner.outbox.lock())
+        self.inner.outbox.lock().take()
     }
 
     /// Wakes the publisher after a commit adds outbox entries; a commit before the wait still wakes it.
@@ -420,12 +463,13 @@ impl StoreBuilder {
                     },
                     next_seq: 0,
                 }),
-                outbox: Mutex::new(Vec::new()),
+                outbox: Mutex::new(Outbox::default()),
                 outbox_ready: Notify::new(),
                 epoch: AtomicU64::new(0),
                 limit: Mutex::new(OutboxUse {
                     events: usize::MAX,
                     bytes: usize::MAX,
+                    refused_bytes: usize::MAX,
                 }),
                 used: Mutex::new(OutboxUse::default()),
             }),

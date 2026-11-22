@@ -63,11 +63,13 @@ pub const QUEUE_BYTES: usize = 32 * 1024 * 1024;
 #[derive(Clone)]
 pub struct Options {
     pub workers: usize,
-    /// The most committed events that wait for an attempt.
+    /// The most committed events that wait for an attempt or are in one.
     pub queue_capacity: usize,
-    /// The most payload bytes that committed events waiting for an attempt hold; `0` means
+    /// The most payload bytes that committed events hold until their attempt ends; `0` means
     /// [`QUEUE_BYTES`]. An event committed past either bound is logged at once as a failed
-    /// delivery with `status_code` 0 and no attempt, so a writer never waits.
+    /// delivery with `status_code` 0 and no attempt, so a writer never waits. Such events keep
+    /// at most [`Options::log_bytes`] of payload before they are logged; past it the oldest of
+    /// them are logged without their request.
     pub queue_bytes: usize,
     /// The timeout of one attempt.
     pub timeout: Duration,
@@ -138,7 +140,7 @@ pub struct Stats {
     pub in_flight: usize,
     /// Deliveries with an ID that are not in the delivery log yet.
     pub unlogged: usize,
-    /// The payload bytes that committed events waiting for an attempt hold.
+    /// The payload bytes that committed events hold until their attempt ends.
     pub waiting_bytes: usize,
     /// The request and response bytes that in-flight, finishing and logged deliveries hold,
     /// bounded by

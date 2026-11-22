@@ -258,6 +258,7 @@ fn an_entry_past_the_outbox_limits_commits_over_budget_until_space_is_released()
     s.limit_outbox(OutboxUse {
         events: 2,
         bytes: 5,
+        ..OutboxUse::default()
     });
     let sized = |n: usize| OutboxEntry {
         payload: Bytes::from(vec![b'1'; n]),
@@ -290,9 +291,49 @@ fn an_entry_past_the_outbox_limits_commits_over_budget_until_space_is_released()
         s.outbox_use(),
         OutboxUse {
             events: 2,
-            bytes: 4
+            bytes: 4,
+            ..OutboxUse::default()
         }
     );
+}
+
+#[test]
+fn over_budget_entries_keep_only_the_newest_payloads_within_the_refused_limit() {
+    // Given an outbox with room for one byte and five bytes of refused payload
+    let s = store();
+    s.limit_outbox(OutboxUse {
+        events: 10,
+        bytes: 1,
+        refused_bytes: 5,
+    });
+    let commit = |n: usize| {
+        s.update(|tx| {
+            tx.push_outbox(OutboxEntry {
+                payload: Bytes::from(vec![b'1'; n]),
+                ..entry("push")
+            });
+            Ok(())
+        })
+        .unwrap();
+    };
+
+    // When one entry fits and over-budget entries of 2, 2, 3 and 2 bytes follow
+    for n in [1, 2, 2, 3, 2] {
+        commit(n);
+    }
+
+    // Then the oldest over-budget entries lost their payloads and the rest stay within the limit
+    assert_eq!(s.outbox_use().refused_bytes, 5);
+    let kept: Vec<_> = s
+        .take_outbox()
+        .iter()
+        .map(|c| (c.over_budget, c.entry.payload.len()))
+        .collect();
+    assert_eq!(
+        kept,
+        [(false, 1), (true, 0), (true, 0), (true, 3), (true, 2)]
+    );
+    assert_eq!(s.outbox_use().refused_bytes, 0);
 }
 
 #[test]
@@ -302,6 +343,7 @@ fn restore_releases_what_the_dropped_outbox_entries_held() {
     s.limit_outbox(OutboxUse {
         events: 10,
         bytes: 100,
+        ..OutboxUse::default()
     });
     let snapshot = s.snapshot();
     s.update(|tx| {

@@ -705,6 +705,54 @@ async fn an_event_past_the_byte_budget_is_logged_failed_without_an_attempt() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn in_flight_attempts_keep_their_share_of_the_queue_byte_budget() {
+    let large = |n: i64| {
+        let mut e = event("push", WIDGET);
+        e.payload.insert("n".to_owned(), json!(n));
+        e.payload
+            .insert("filler".to_owned(), json!("x".repeat(64 * 1024)));
+        e
+    };
+    let store = world();
+    let sizing = world();
+    emit_one(&sizing, large(1));
+    let one = sizing.take_outbox()[0].entry.payload.len();
+    // Given a budget of two large payloads, four workers and a receiver that answers nothing yet
+    let (hooks, hits) = start(&store, |o| {
+        o.workers = 4;
+        o.queue_bytes = 2 * one;
+    });
+    // When six large events commit, each after the one before it was taken or refused
+    for n in 1..=6 {
+        emit_one(&store, large(n));
+        hooks
+            .shared
+            .wait_stats(|s| {
+                s.unlogged == usize::try_from(n).unwrap() && (s.queued == 0 || s.in_flight == 4)
+            })
+            .await;
+    }
+    // Then the events in flight or queued never hold more than the budget
+    let s = hooks.stats();
+    assert!(s.in_flight + s.queued <= 2, "{s:?}");
+    assert!(s.waiting_bytes <= 2 * one, "{s:?}");
+    // And once the receiver answers, the two sent events succeed and the rest are Queue full
+    let _bodies = answer_all(hits);
+    hooks.drain().await.unwrap();
+    let codes: Vec<i64> = store
+        .view(|tx| {
+            Ok(tx
+                .table::<Deliveries>()
+                .children(APP_A)
+                .map(|d| d.status_code)
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(codes, [200, 200, 0, 0, 0, 0]);
+    assert_eq!(hooks.stats().waiting_bytes, 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn past_the_log_byte_budget_the_oldest_deliveries_lose_their_bodies() {
     let numbered = |n: i64| {
         let mut e = event("push", WIDGET);
