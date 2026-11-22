@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -177,14 +177,12 @@ impl Client {
 struct Receiver {
     runtime: Runtime,
     url: String,
-    started: Arc<AtomicU64>,
     payload_bytes: Arc<AtomicUsize>,
 }
 
 impl Receiver {
     fn start(delay: Duration) -> Receiver {
         let runtime = runtime(1);
-        let started = Arc::new(AtomicU64::new(0));
         let payload_bytes = Arc::new(AtomicUsize::new(0));
         let listener = runtime
             .block_on(TcpListener::bind("127.0.0.1:0"))
@@ -192,16 +190,15 @@ impl Receiver {
         let addr = listener
             .local_addr()
             .unwrap_or_else(|e| fail("read the receiver address", e));
-        let (count, size) = (started.clone(), payload_bytes.clone());
+        let size = payload_bytes.clone();
         runtime.spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let (count, size) = (count.clone(), size.clone());
+                let size = size.clone();
                 tokio::spawn(async move {
                     let service =
                         hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
-                            let (count, size) = (count.clone(), size.clone());
+                            let size = size.clone();
                             async move {
-                                count.fetch_add(1, Ordering::Relaxed);
                                 let body = req.into_body().collect().await.map_or_else(
                                     |_| Bytes::new(),
                                     http_body_util::Collected::to_bytes,
@@ -222,7 +219,6 @@ impl Receiver {
         Receiver {
             runtime,
             url: format!("http://{addr}/hook"),
-            started,
             payload_bytes,
         }
     }
@@ -1053,36 +1049,23 @@ fn slow_receiver(dir: &Path, client_runtime: &Runtime, rows: &mut Vec<Row>) {
             .unwrap_or_default()
     });
     let hooks = running.server.services().hooks.clone();
-    let committed = Arc::new(AtomicU64::new(0));
-    let started = receiver.started.clone();
     let rss_before = rss_kib(std::process::id()).unwrap_or_default();
-    let (mut latencies, peak_outbox, peak_rss, failures) = client_runtime.block_on(async {
+    let (mut latencies, peak_waiting, peak_rss, failures) = client_runtime.block_on(async {
         let mut clients = Vec::new();
         for _ in 0..SLOW_WRITERS {
             clients.push(Client::connect(addr, fixture::ALICE_TOKEN).await);
         }
         let done = Arc::new(AtomicUsize::new(0));
         let monitor = {
-            let (committed, started, done, hooks) = (
-                committed.clone(),
-                started.clone(),
-                done.clone(),
-                hooks.clone(),
-            );
+            let (done, hooks) = (done.clone(), hooks.clone());
             tokio::spawn(async move {
-                let (mut outbox, mut rss) = (0u64, 0u64);
+                let (mut waiting, mut rss) = (0usize, 0u64);
                 while done.load(Ordering::Relaxed) < SLOW_WRITERS {
-                    let stats = hooks.stats();
-                    let queued = u64::try_from(stats.queued).unwrap_or(u64::MAX);
-                    let pending = committed
-                        .load(Ordering::Relaxed)
-                        .saturating_sub(started.load(Ordering::Relaxed))
-                        .saturating_sub(queued);
-                    outbox = outbox.max(pending);
+                    waiting = waiting.max(hooks.stats().waiting_bytes);
                     rss = rss.max(rss_kib(std::process::id()).unwrap_or_default());
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
-                (outbox, rss)
+                (waiting, rss)
             })
         };
         let path = format!("/repos/acme/public/issues/{issue}/comments");
@@ -1090,7 +1073,7 @@ fn slow_receiver(dir: &Path, client_runtime: &Runtime, rows: &mut Vec<Row>) {
             .into_iter()
             .enumerate()
             .map(|(c, mut client)| {
-                let (path, committed, done) = (path.clone(), committed.clone(), done.clone());
+                let (path, done) = (path.clone(), done.clone());
                 tokio::spawn(async move {
                     let mut spent = Vec::with_capacity(SLOW_WRITES_PER_WRITER);
                     let mut failures = 0usize;
@@ -1100,9 +1083,7 @@ fn slow_receiver(dir: &Path, client_runtime: &Runtime, rows: &mut Vec<Row>) {
                         let t = Instant::now();
                         let answer = client.call(Method::POST, &path, Some(body)).await;
                         spent.push(t.elapsed());
-                        if answer.status == StatusCode::CREATED {
-                            committed.fetch_add(1, Ordering::Relaxed);
-                        } else {
+                        if answer.status != StatusCode::CREATED {
                             failures += 1;
                         }
                     }
@@ -1119,15 +1100,15 @@ fn slow_receiver(dir: &Path, client_runtime: &Runtime, rows: &mut Vec<Row>) {
                 failures += f;
             }
         }
-        let (outbox, rss) = monitor.await.unwrap_or_default();
-        (all, outbox, rss, failures)
+        let (waiting, rss) = monitor.await.unwrap_or_default();
+        (all, waiting, rss, failures)
     });
     latencies.sort();
     let run = SlowRun {
         latencies,
         failures,
         max_queued: hooks.stats().max_queued,
-        outbox: f64::from(u32::try_from(peak_outbox).unwrap_or(u32::MAX)),
+        waiting: float(peak_waiting),
         payload: float(receiver.payload_bytes.load(Ordering::Relaxed)),
         growth_kib: peak_rss.saturating_sub(rss_before),
     };
@@ -1140,7 +1121,7 @@ struct SlowRun {
     latencies: Vec<Duration>,
     failures: usize,
     max_queued: usize,
-    outbox: f64,
+    waiting: f64,
     payload: f64,
     growth_kib: u64,
 }
@@ -1151,10 +1132,11 @@ impl SlowRun {
             latencies,
             failures,
             max_queued,
-            outbox,
+            waiting,
             payload,
             growth_kib,
         } = self;
+        let mib = 1024.0 * 1024.0;
         let note = if failures == 0 {
             String::new()
         } else {
@@ -1181,18 +1163,12 @@ impl SlowRun {
             "events",
             Goal::Report,
         ));
-        rows.push(Row::new(
-            "Slow receiver: outbox depth, peak",
-            Some(outbox),
-            "events",
-            Goal::Report,
-        ));
         rows.push(
             Row::new(
-                "Slow receiver: outbox payload, peak",
-                Some(outbox * payload / 1e6),
-                "MB",
-                Goal::Report,
+                "Slow receiver: waiting payload, peak",
+                Some(waiting / mib),
+                "MiB",
+                Goal::Below(float(hubdouble_hooks::QUEUE_BYTES) / mib),
             )
             .note(format!("{payload:.0} B per payload")),
         );
@@ -1200,7 +1176,7 @@ impl SlowRun {
             "Slow receiver: process RSS growth",
             Some(f64::from(u32::try_from(growth_kib).unwrap_or(u32::MAX)) / 1024.0),
             "MiB",
-            Goal::Report,
+            Goal::Below(256.0),
         ));
     }
 }
