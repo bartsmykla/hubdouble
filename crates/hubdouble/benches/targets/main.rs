@@ -37,6 +37,7 @@ const PLACEHOLDER_OID: &str = "0123456789abcdef0123456789abcdef01234567";
 const USER_TOKEN: &str = "ghp_0123456789abcdef0123456789abcdef0123";
 const WARMUP: usize = 200;
 const SAMPLES: usize = 2_000;
+const DOC_ROUNDS: usize = 5;
 const MIXED_CONNECTIONS: usize = 16;
 const MIXED_PER_CONNECTION: usize = 2_500;
 const SLOW_WRITERS: usize = 16;
@@ -842,16 +843,40 @@ fn rest_rows(runtime: &Runtime, addr: SocketAddr, routes: &[String], rows: &mut 
 fn doc_rows(runtime: &Runtime, addr: SocketAddr, docs: &mut [Doc], rows: &mut Vec<Row>) {
     runtime.block_on(async {
         let mut client = Client::connect(addr, fixture::ALICE_TOKEN).await;
-        for doc in docs {
-            let (value, note) = match measure_doc(&mut client, doc).await {
-                Ok(samples) => {
-                    eprintln!(
-                        "graphql {}: p50 {:.1} µs, p99 {:.1} µs",
-                        doc.name,
-                        micros(percentile(&samples, 0.5)),
-                        micros(percentile(&samples, 0.99))
-                    );
-                    (Some(micros(percentile(&samples, 0.99))), String::new())
+        let mut rounds: Vec<Result<Vec<Duration>, String>> =
+            docs.iter().map(|_| Ok(Vec::new())).collect();
+        for round in 0..DOC_ROUNDS {
+            for (doc, p99s) in docs.iter_mut().zip(&mut rounds) {
+                let Ok(done) = p99s else {
+                    continue;
+                };
+                if round > 0 && !doc.query.trim_start().starts_with("query") {
+                    continue;
+                }
+                match measure_doc(&mut client, doc).await {
+                    Ok(samples) => {
+                        eprintln!(
+                            "graphql {}: p50 {:.1} µs, p99 {:.1} µs",
+                            doc.name,
+                            micros(percentile(&samples, 0.5)),
+                            micros(percentile(&samples, 0.99))
+                        );
+                        done.push(percentile(&samples, 0.99));
+                    }
+                    Err(e) => *p99s = Err(e),
+                }
+            }
+        }
+        for (doc, p99s) in docs.iter().zip(rounds) {
+            let (value, note) = match p99s {
+                Ok(mut p99s) => {
+                    p99s.sort();
+                    let note = if p99s.len() > 1 {
+                        format!("median of {} rounds", p99s.len())
+                    } else {
+                        String::new()
+                    };
+                    (Some(micros(percentile(&p99s, 0.5))), note)
                 }
                 Err(e) => (None, e),
             };
