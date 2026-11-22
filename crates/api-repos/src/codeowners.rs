@@ -6,13 +6,13 @@ use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::{Accounts, Teams, Tx};
 use serde::Serialize;
 
-use crate::METADATA;
+use crate::CONTENTS;
 
 /// Where GitHub looks for the file, in this order.
 const LOCATIONS: [&str; 3] = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"];
 
 pub(crate) fn register(r: &mut Registrar<'_>) {
-    r.rest.handle("repos/codeowners-errors", METADATA, errors);
+    r.rest.handle("repos/codeowners-errors", CONTENTS, errors);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

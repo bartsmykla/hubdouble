@@ -10,7 +10,7 @@ use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::{Accounts, Entity, Issues, Rows, Tx, TxMut};
 use serde::Serialize;
 
-use crate::METADATA;
+use crate::CONTENTS;
 
 const NODE_PREFIX: &str = "RAC";
 const HEADS: &str = "refs/heads/";
@@ -54,7 +54,7 @@ pub(crate) type Activities = Rows<Activity>;
 pub(crate) fn register(r: &mut Registrar<'_>) {
     r.store.register_table::<Activities>();
     r.git.on_ref_update(record);
-    r.rest.handle("repos/list-activities", METADATA, list);
+    r.rest.handle("repos/list-activities", CONTENTS, list);
 }
 
 fn merged_pull(tx: &Tx, c: &RefChange, branch: &str, new: ObjectId) -> bool {

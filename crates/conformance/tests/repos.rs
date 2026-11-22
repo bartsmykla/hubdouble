@@ -130,7 +130,7 @@ async fn a_repository_answers_by_name_and_id_and_a_hidden_one_is_not_found() {
     installation_token(
         &server,
         "ghs_1000000000000000000000000000000000a1",
-        &[("metadata", Access::Read)],
+        &[("contents", Access::Read)],
     );
     let installation =
         GoGithub::new(&server).with_token("ghs_1000000000000000000000000000000000a1");
@@ -555,6 +555,27 @@ fn activity_types(answer: &Answer) -> Vec<String> {
             .map(|a| a["activity_type"].as_str().unwrap_or_default().to_owned())
             .collect(),
         other => panic!("the activity answer is not a list: {other}"),
+    }
+}
+
+#[tokio::test]
+async fn repository_activity_and_codeowners_require_contents_from_an_installation() {
+    let server = start(Vec::new()).await;
+    installation_token(
+        &server,
+        "ghs_repository_metadata_only",
+        &[("metadata", Access::Read)],
+    );
+    let denied = GoGithub::new(&server).with_token("ghs_repository_metadata_only");
+    for suffix in ["activity", "codeowners/errors"] {
+        let answer = denied.get(&format!("repos/acme/public/{suffix}")).await;
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{suffix}");
+        assert_eq!(
+            answer.header("x-accepted-github-permissions"),
+            "contents=read"
+        );
+        let hidden = denied.get(&format!("repos/acme/private/{suffix}")).await;
+        assert_eq!(hidden.status, StatusCode::NOT_FOUND, "{suffix}");
     }
 }
 
