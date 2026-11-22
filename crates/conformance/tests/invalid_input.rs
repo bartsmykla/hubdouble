@@ -86,6 +86,11 @@ async fn writes_refuse_a_body_that_breaks_the_operation_schema() {
         ),
         (
             Method::POST,
+            format!("{REPO}/issues/{issue}/labels"),
+            json!({"labels": []}),
+        ),
+        (
+            Method::POST,
             format!("{REPO}/merges"),
             json!({"base": "main"}),
         ),

@@ -528,6 +528,9 @@ pub(crate) fn add_labels(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let names = match input {
         Value::Array(_) => label_names(input)?,
         Value::Object(mut o) => match o.remove("labels") {
+            Some(Value::Array(a)) if a.is_empty() => {
+                return Err(invalid("Issue", "labels", "invalid"));
+            }
             Some(v) => label_names(v)?,
             None => return Err(invalid("Issue", "labels", "missing_field")),
         },
