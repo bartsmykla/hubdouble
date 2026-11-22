@@ -35,6 +35,7 @@ hubdouble-server.workspace = true
 hubdouble-spec.workspace = true
 hubdouble-store.workspace = true
 hubdouble-testkit.workspace = true
+openidconnect.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

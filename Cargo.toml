@@ -53,6 +53,7 @@ imara-diff = "=0.2.0"
 jsonschema = { version = "=0.62.0", default-features = false }
 jsonwebtoken = { version = "=12.0.0", default-features = false, features = ["rust_crypto", "use_pem"] }
 mimalloc = "=0.1.52"
+openidconnect = { version = "=4.1.0", default-features = false }
 parking_lot = "=0.13.0"
 percent-encoding = "=2.3.2"
 pgp = { version = "=0.21.1", default-features = false }
