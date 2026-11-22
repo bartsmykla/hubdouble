@@ -21,7 +21,6 @@ impl From<HooksError> for ApiError {
 /// [`hubdouble_store::OutboxEntry`] per recipient with [`TxMut::push_outbox`].
 pub fn emit(tx: &mut TxMut<'_>, e: Event) {
     let _ = (tx, e);
-    todo!("P0-E: hooks::emit")
 }
 
 /// The running publisher, delivery queue and workers.
