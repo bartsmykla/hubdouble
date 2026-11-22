@@ -5,7 +5,7 @@
 
 use http::header::ACCEPT;
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
-use hubdouble_testkit::fixture::ALICE_TOKEN;
+use hubdouble_testkit::fixture::{ALICE_ID, ALICE_TOKEN, ORG_ID, PRIVATE_REPO_ID, PUBLIC_REPO_ID};
 use hubdouble_testkit::{Answer, GoGithub, TestServer};
 use serde_json::json;
 
@@ -15,6 +15,7 @@ async fn repo_with_labels(total: usize) -> (TestServer, GoGithub) {
     let server = TestServer::builder()
         .fixture()
         .register(hubdouble_api_issues::register)
+        .register(hubdouble_api_repos::register)
         .start()
         .await;
     let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
@@ -88,6 +89,98 @@ async fn pages_hold_30_by_default_at_most_100_and_link_prev_next_last_first() {
     assert_eq!(past_the_end.status, StatusCode::OK);
     assert_eq!(len(&past_the_end), 0);
     assert!(links(&past_the_end).iter().all(|(rel, _)| rel != "next"));
+}
+
+fn next_link(client: &GoGithub, answer: &Answer) -> Option<String> {
+    answer
+        .header("link")
+        .split(", ")
+        .find(|l| l.ends_with("rel=\"next\""))
+        .map(|l| {
+            let url = l.split_once('>').unwrap().0.trim_start_matches('<');
+            url.strip_prefix(client.base()).unwrap().to_owned()
+        })
+}
+
+async fn follow_every_next(client: &GoGithub, first: &str) -> (Vec<String>, Vec<String>) {
+    let mut names = Vec::new();
+    let mut followed = Vec::new();
+    let mut answer = client.get(first).await;
+    loop {
+        assert_eq!(answer.status, StatusCode::OK);
+        let page = answer.json();
+        names.extend(
+            page.as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["name"].as_str().unwrap().to_owned()),
+        );
+        let Some(next) = next_link(client, &answer) else {
+            break;
+        };
+        answer = client.get(&next).await;
+        followed.push(next);
+    }
+    (names, followed)
+}
+
+#[tokio::test]
+async fn a_client_follows_githubs_by_id_next_links_to_the_last_page() {
+    // Given 65 labels on acme/public and two repositories in acme
+    let (_server, alice) = repo_with_labels(65).await;
+
+    // When the client follows each next link from the first page
+    let (labels, label_pages) = follow_every_next(&alice, &format!("{LABELS}?per_page=20")).await;
+    let (repos, repo_pages) = follow_every_next(&alice, "orgs/acme/repos?per_page=1").await;
+
+    // Then each link is in api.github.com's by-ID form and the pages hold every item once
+    assert_eq!(
+        label_pages,
+        (2..=4)
+            .map(|p| format!("repositories/{PUBLIC_REPO_ID}/labels?per_page=20&page={p}"))
+            .collect::<Vec<_>>()
+    );
+    let mut unique = labels.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!((labels.len(), unique.len()), (65, 65));
+    assert_eq!(
+        repo_pages,
+        [format!("organizations/{ORG_ID}/repos?per_page=1&page=2")]
+    );
+    assert_eq!(repos.len(), 2);
+}
+
+#[tokio::test]
+async fn a_by_id_alias_answers_as_the_named_route_with_the_same_access_checks() {
+    // Given
+    let (server, alice) = repo_with_labels(1).await;
+    let anonymous = GoGithub::new(&server);
+    let private_by_id = format!("repositories/{PRIVATE_REPO_ID}/labels");
+
+    // When
+    let named = alice.get("repos/acme/private/labels").await;
+    let by_id = alice.get(&private_by_id).await;
+    let hidden_named = anonymous.get("repos/acme/private/labels").await;
+    let hidden_by_id = anonymous.get(&private_by_id).await;
+    let public_by_id = anonymous
+        .get(&format!("repositories/{PUBLIC_REPO_ID}/labels"))
+        .await;
+    let unknown = alice.get("repositories/999999/labels").await;
+    let org_by_id = alice.get(&format!("organizations/{ORG_ID}/repos")).await;
+    let user_as_org = alice.get(&format!("organizations/{ALICE_ID}/repos")).await;
+
+    // Then
+    assert_eq!(named.status, StatusCode::OK);
+    assert_eq!(by_id.status, StatusCode::OK);
+    assert_eq!(by_id.json(), named.json());
+    assert_eq!(hidden_named.status, StatusCode::NOT_FOUND);
+    assert_eq!(hidden_by_id.status, StatusCode::NOT_FOUND);
+    assert_eq!(public_by_id.status, StatusCode::OK);
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    assert_eq!(org_by_id.status, StatusCode::OK);
+    assert_eq!(len(&org_by_id), 2);
+    assert_eq!(user_as_org.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

@@ -202,6 +202,10 @@ pub fn api_path(path: &str) -> &str {
 ///   (<https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps>),
 ///   and `GET /repositories/{repository_id}` against `repos/get`, which go-github v93 calls
 ///   it (`Repositories.GetByID`, `github/repos.go`). GraphQL is checked by its own client.
+/// - `/repositories/{id}/...` and `/organizations/{id}/...` are checked against the
+///   `/repos/{owner}/{repo}/...` and `/orgs/{org}/...` operation they alias, and every `Link`
+///   URL of a repository or organization answer has that by-ID form, as api.github.com writes
+///   it; any other `Link` URL keeps the request path.
 ///
 /// # Errors
 ///
@@ -219,12 +223,73 @@ pub fn check(x: &Exchange<'_>, registered: &dyn Fn(&str) -> bool) -> Result<Chec
             status,
         });
     }
-    let op = resolve_operation(x.method, path)
+    let canonical = by_id_alias(path);
+    let resolved = canonical.as_deref().unwrap_or(path);
+    let op = resolve_operation(x.method, resolved)
         .ok_or_else(|| vec![format!("{} {path} resolves to no operation", x.method)])?;
     check_operation(x, op, registered).map(|status| Checked {
         route: format!("{} {}", x.method, op.template),
         status,
     })
+}
+
+fn by_id_alias(path: &str) -> Option<String> {
+    let numbered = |prefix: &str| {
+        let (id, tail) = path.strip_prefix(prefix)?.split_once('/')?;
+        (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())).then_some(tail)
+    };
+    numbered("/repositories/")
+        .map(|tail| format!("/repos/o/r/{tail}"))
+        .or_else(|| numbered("/organizations/").map(|tail| format!("/orgs/o/{tail}")))
+}
+
+fn by_id_form(path: &str) -> Option<(&'static str, &str)> {
+    let tail = |prefix: &str, skip: usize| {
+        path.strip_prefix(prefix)
+            .and_then(|rest| rest.splitn(skip + 1, '/').nth(skip))
+    };
+    tail("/repos/", 2)
+        .or_else(|| tail("/repositories/", 1))
+        .map(|t| ("/repositories/", t))
+        .or_else(|| {
+            tail("/orgs/", 1)
+                .or_else(|| tail("/organizations/", 1))
+                .map(|t| ("/organizations/", t))
+        })
+}
+
+fn link_errors(x: &Exchange<'_>, id: &str) -> Vec<String> {
+    let request = api_path(x.path);
+    let mut errors = Vec::new();
+    for part in header(x.headers, "link")
+        .split(", ")
+        .filter(|p| !p.is_empty())
+    {
+        let url = part
+            .split_once('>')
+            .and_then(|(url, _)| url.strip_prefix('<'))
+            .unwrap_or(part);
+        let target = url
+            .split_once("://")
+            .and_then(|(_, rest)| rest.find('/').map(|i| &rest[i..]))
+            .unwrap_or("");
+        let target = api_path(target.split('?').next().unwrap_or(""));
+        let github_form = match by_id_form(request) {
+            Some((alias, tail)) => target
+                .strip_prefix(alias)
+                .and_then(|rest| rest.split_once('/'))
+                .is_some_and(|(n, t)| {
+                    !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && t == tail
+                }),
+            None => target == request,
+        };
+        if !github_form {
+            errors.push(format!(
+                "{id}: the Link URL {url} is not the form GitHub uses for {request}"
+            ));
+        }
+    }
+    errors
 }
 
 fn segments_eq(path: &str, template: &str) -> bool {
@@ -250,6 +315,7 @@ fn check_operation(
     if header(x.headers, "x-ratelimit-remaining") == "0" {
         errors.push(format!("{}: x-ratelimit-remaining is 0", op.id));
     }
+    errors.extend(link_errors(x, op.id));
     let doc = &OPENAPI.doc;
     let responses = op.op.get("responses");
     let documented = responses
@@ -713,5 +779,63 @@ mod tests {
         let empty = HeaderMap::new();
         let unknown = exchange("GET", "/repos/o/r/nope", 404, &empty, b"");
         assert!(check(&unknown, &yes).is_err());
+    }
+
+    #[test]
+    fn by_id_aliases_check_as_their_operation_and_links_take_githubs_by_id_form() {
+        // Given api.github.com's Link forms, read from live answers on cli/cli and cli
+        let yes = |_: &str| true;
+        let with_link = |link: &str| {
+            let mut h = github_headers();
+            h.insert("link", http::HeaderValue::from_str(link).unwrap());
+            h
+        };
+        let by_id = with_link(
+            r#"<https://api.github.com/repositories/212613049/labels?per_page=1&page=2>; rel="next""#,
+        );
+        let by_name =
+            with_link(r#"<https://api.github.com/repos/o/r/labels?per_page=1&page=2>; rel="next""#);
+        let org_by_id = with_link(
+            r#"<https://api.github.com/organizations/59704711/repos?per_page=1&page=2>; rel="next""#,
+        );
+        let other_tail = with_link(
+            r#"<https://api.github.com/repositories/212613049/issues?per_page=1&page=2>; rel="next""#,
+        );
+        // When
+        let listed = check(
+            &exchange("GET", "/repos/o/r/labels", 200, &by_id, b"[]"),
+            &yes,
+        );
+        let aliased = check(
+            &exchange("GET", "/repositories/212613049/labels", 200, &by_id, b"[]"),
+            &yes,
+        );
+        let org = check(
+            &exchange("GET", "/orgs/o/repos", 200, &org_by_id, b"[]"),
+            &yes,
+        );
+        // Then
+        let labels = Checked {
+            route: "GET /repos/{owner}/{repo}/labels".to_owned(),
+            status: 200,
+        };
+        assert_eq!(listed, Ok(labels.clone()));
+        assert_eq!(aliased, Ok(labels));
+        assert!(org.is_ok(), "{org:?}");
+        assert!(
+            check(
+                &exchange("GET", "/repos/o/r/labels", 200, &by_name, b"[]"),
+                &yes
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                &exchange("GET", "/repos/o/r/labels", 200, &other_tail, b"[]"),
+                &yes
+            )
+            .is_err()
+        );
+        assert!(check(&exchange("GET", "/orgs/o/repos", 200, &by_id, b"[]"), &yes).is_err());
     }
 }
