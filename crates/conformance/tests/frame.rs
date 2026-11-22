@@ -20,3 +20,21 @@ async fn a_request_to_the_seeded_server_shows_in_the_request_log() {
     assert_eq!(entry["operation_id"], json!("repos/get"));
     assert_eq!(entry["status"], json!(answer.status.as_u16()));
 }
+
+#[tokio::test]
+async fn the_whole_server_loads_a_yaml_seed_file() {
+    // Given
+    let server = TestServer::builder()
+        .frame(hubdouble_api::register_all)
+        .seed_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/testdata/whole-server-seed.yaml"
+        ))
+        .env("SEED_NAME", "Yaml User")
+        .start()
+        .await;
+    // When
+    let user = GoGithub::new(&server).get("users/yaml-user").await;
+    // Then
+    assert_eq!(user.json()["name"], json!("Yaml User"));
+}

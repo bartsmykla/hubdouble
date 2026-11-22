@@ -1,0 +1,3 @@
+- kind: user
+  login: yaml-user
+  name: '{{env "SEED_NAME"}}'

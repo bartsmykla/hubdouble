@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use http::Method;
@@ -21,12 +22,30 @@ pub const ADMIN_TOKEN: &str = "hubdouble-test-admin";
 
 /// What a test server is built from. Start with [`TestServer::builder`].
 pub struct Builder {
+    frame: fn(&mut Registrar<'_>),
     registers: Vec<fn(&mut Registrar<'_>)>,
     seed: Vec<Value>,
+    seed_file: Option<PathBuf>,
     env: HashMap<String, String>,
 }
 
 impl Builder {
+    /// Replaces the phase 0 frame (`hubdouble_admin::register`) with `f`, which then registers
+    /// the admin frame itself, as `hubdouble_api::register_all` does for the whole server.
+    #[must_use]
+    pub fn frame(mut self, f: fn(&mut Registrar<'_>)) -> Builder {
+        self.frame = f;
+        self
+    }
+
+    /// Loads this seed file (YAML or JSON) as the server would, in place of
+    /// [`Builder::fixture`] and [`Builder::entry`].
+    #[must_use]
+    pub fn seed_file(mut self, path: impl Into<PathBuf>) -> Builder {
+        self.seed_file = Some(path.into());
+        self
+    }
+
     /// Adds a registration after the phase 0 frame: the track under test or a stand-in from
     /// [`crate::standins`]. They run in the order added.
     #[must_use]
@@ -60,8 +79,13 @@ impl Builder {
     ///
     /// # Panics
     ///
-    /// When the server cannot start or the seed does not load.
+    /// When the server cannot start, the seed does not load, or both a seed file and entries are
+    /// given.
     pub async fn start(self) -> TestServer {
+        assert!(
+            self.seed_file.is_none() || self.seed.is_empty(),
+            "a test server takes a seed file or seed entries, not both"
+        );
         let receiver = Receiver::start().await;
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -71,9 +95,15 @@ impl Builder {
             .unwrap_or_else(|e| panic!("read the test server's address: {e}"));
         let dir =
             tempfile::TempDir::new().unwrap_or_else(|e| panic!("make the seed directory: {e}"));
-        let seed = dir.path().join("seed.json");
-        let text = serde_json::to_vec(&self.seed).unwrap_or_else(|e| panic!("write the seed: {e}"));
-        std::fs::write(&seed, text).unwrap_or_else(|e| panic!("write the seed: {e}"));
+        let seed = if let Some(file) = self.seed_file {
+            file
+        } else {
+            let seed = dir.path().join("seed.json");
+            let text =
+                serde_json::to_vec(&self.seed).unwrap_or_else(|e| panic!("write the seed: {e}"));
+            std::fs::write(&seed, text).unwrap_or_else(|e| panic!("write the seed: {e}"));
+            seed
+        };
         let base = format!("http://{addr}");
         let config = Config {
             addr,
@@ -91,7 +121,7 @@ impl Builder {
             receiver.url().to_owned(),
         );
         let lookup = |name: &str| env.get(name).cloned();
-        let registries = registries(&self.registers);
+        let registries = registries(self.frame, &self.registers);
         let server = Server::start(config, clock.clone(), &lookup, registries)
             .unwrap_or_else(|e| panic!("start the test server: {e}"));
         let (stop, stopped) = oneshot::channel::<()>();
@@ -115,7 +145,7 @@ impl Builder {
     }
 }
 
-fn registries(extra: &[fn(&mut Registrar<'_>)]) -> Registries {
+fn registries(frame: fn(&mut Registrar<'_>), extra: &[fn(&mut Registrar<'_>)]) -> Registries {
     let mut store = StoreBuilder::new();
     let git = GitBuilder::new(&mut store);
     hubdouble_auth::register_tables(&mut store);
@@ -126,7 +156,7 @@ fn registries(extra: &[fn(&mut Registrar<'_>)]) -> Registries {
         git,
         admin: hubdouble_admin::Admin::new(),
     };
-    for f in std::iter::once(&(hubdouble_admin::register as fn(&mut Registrar<'_>))).chain(extra) {
+    for f in std::iter::once(&frame).chain(extra) {
         f(&mut Registrar {
             store: &mut r.store,
             rest: &mut r.rest,
@@ -154,8 +184,10 @@ impl TestServer {
     #[must_use]
     pub fn builder() -> Builder {
         Builder {
+            frame: hubdouble_admin::register,
             registers: Vec::new(),
             seed: Vec::new(),
+            seed_file: None,
             env: HashMap::new(),
         }
     }

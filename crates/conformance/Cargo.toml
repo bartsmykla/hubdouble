@@ -12,6 +12,7 @@ publish.workspace = true
 bytes.workspace = true
 http.workspace = true
 hubdouble-admin.workspace = true
+hubdouble-api.workspace = true
 hubdouble-api-actions.workspace = true
 hubdouble-api-apps.workspace = true
 hubdouble-api-checks.workspace = true

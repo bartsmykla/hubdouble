@@ -2109,6 +2109,7 @@ dependencies = [
  "bytes",
  "http",
  "hubdouble-admin",
+ "hubdouble-api",
  "hubdouble-api-actions",
  "hubdouble-api-apps",
  "hubdouble-api-checks",
