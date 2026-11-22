@@ -179,6 +179,24 @@ async fn pull_list_sorts_oldest_first_for_an_unknown_sort() {
 }
 
 #[tokio::test]
+async fn pull_list_sorts_newest_first_for_an_unknown_direction() {
+    let server = fixture()
+        .entry(seeded("main", false))
+        .entry(seeded("develop", false))
+        .start()
+        .await;
+    let client = writer(&server);
+    for direction in ["bogus", "ASC", ""] {
+        let answer = client
+            .get(&format!("{PULLS}?sort=created&direction={direction}"))
+            .await;
+        let pulls = checked("pulls/list", StatusCode::OK, &answer);
+        assert_eq!(pulls[0]["number"], 2);
+        assert_eq!(pulls[1]["number"], 1);
+    }
+}
+
+#[tokio::test]
 async fn fork_commits_and_files_preserve_head_and_base_identity() {
     // Given go-github v93 github/pulls.go:216,243,313,428,454.
     let server = fixture().entry(json!({

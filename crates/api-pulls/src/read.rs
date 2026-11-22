@@ -21,7 +21,7 @@ pub(crate) fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 
 pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?;
-    let filter = ListFilter::parse(ctx)?;
+    let filter = ListFilter::parse(ctx);
     let mut pulls: Vec<_> = ctx
         .tx()
         .table::<Issues>()
@@ -41,7 +41,7 @@ struct ListFilter<'a> {
 }
 
 impl<'a> ListFilter<'a> {
-    fn parse(ctx: &'a Ctx<'_>) -> Result<Self, ApiError> {
+    fn parse(ctx: &'a Ctx<'_>) -> Self {
         let query = ctx.query();
         let state = query
             .get("state")
@@ -56,16 +56,13 @@ impl<'a> ListFilter<'a> {
             .get("head")
             .and_then(|value| value.split_once(':'))
             .filter(|(_, branch)| !branch.is_empty());
-        if !matches!(direction, "asc" | "desc") {
-            return Err(ApiError::unprocessable("Invalid pull request filter"));
-        }
-        Ok(Self {
+        Self {
             state,
             head,
             base: query.get("base"),
             sort: sort.unwrap_or("created"),
             ascending: direction == "asc",
-        })
+        }
     }
 
     fn matches(&self, ctx: &Ctx<'_>, issue: &Issue) -> bool {
