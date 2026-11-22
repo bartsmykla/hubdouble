@@ -397,10 +397,34 @@ struct GraphqlBody {
 #[derive(Serialize)]
 struct ErrorBody<'a> {
     message: &'a str,
-    #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    errors: &'a [FieldError],
+    #[serde(skip_serializing_if = "Errors::is_empty")]
+    errors: Errors<'a>,
     documentation_url: &'a str,
     status: String,
+}
+
+struct Errors<'a>(&'a [FieldError]);
+
+impl Errors<'_> {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Serialize for Errors<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq as _;
+        let mut seq = s.serialize_seq(Some(self.0.len()))?;
+        for e in self.0 {
+            match &e.message {
+                Some(text) if e.resource.is_empty() && e.field.is_empty() && e.code.is_empty() => {
+                    seq.serialize_element(text)?;
+                }
+                _ => seq.serialize_element(e)?,
+            }
+        }
+        seq.end()
+    }
 }
 
 fn error_call<'r>(
@@ -425,7 +449,7 @@ fn error_call<'r>(
 pub(crate) fn error_reply(e: &ApiError) -> Reply {
     let body = ErrorBody {
         message: &e.message,
-        errors: &e.errors,
+        errors: Errors(&e.errors),
         documentation_url: &e.documentation_url,
         status: e.status.to_string(),
     };
