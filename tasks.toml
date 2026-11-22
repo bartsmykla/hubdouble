@@ -40,3 +40,7 @@ run = "cargo run --locked -p xtask -- inventory"
 ["inventory:check"]
 description = "Check the client API inventory for changes"
 run = "cargo run --locked -p xtask -- inventory --check"
+
+["smoke:kind"]
+description = "Build the Docker image and test it in a disposable kind cluster"
+run = "cargo run --locked -p xtask -- smoke-kind"

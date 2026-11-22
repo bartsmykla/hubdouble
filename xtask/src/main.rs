@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod inventory;
+mod smoke_kind;
 
 const BUNDLE: &str = "spec/openapi/api.github.com.json";
 const OUTPUT: &str = "crates/spec/src/ops_gen.rs";
@@ -22,7 +23,11 @@ fn main() -> ExitCode {
     let result = match args.as_slice() {
         [task] if task == "gen" => generate(&root()),
         [task, rest @ ..] if task == "inventory" => inventory::run(&root(), rest),
-        _ => Err("usage: xtask gen | xtask inventory --client <path> [--check]".into()),
+        [task] if task == "smoke-kind" => smoke_kind::run(&root()),
+        _ => Err(
+            "usage: xtask gen | xtask inventory --client <path> [--check] | xtask smoke-kind"
+                .into(),
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

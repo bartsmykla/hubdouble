@@ -5747,10 +5747,17 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "hubdouble-gql",
+ "jsonwebtoken",
+ "rand 0.8.8",
+ "reqwest",
+ "rsa 0.10.0",
+ "rustix",
  "serde-saphyr",
  "serde_json",
  "tempfile",
+ "tokio",
  "tree-sitter",
  "tree-sitter-go",
 ]
