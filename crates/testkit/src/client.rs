@@ -57,7 +57,7 @@ pub(crate) async fn send(request: reqwest::RequestBuilder) -> Answer {
     let response = request
         .send()
         .await
-        .unwrap_or_else(|e| panic!("send the request: {e}"));
+        .unwrap_or_else(|e| panic!("send the request: {e:?}"));
     let status = response.status();
     let headers = response.headers().clone();
     let body = response
