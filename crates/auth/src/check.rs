@@ -4,7 +4,7 @@ use hubdouble_model::{
     Access, Account, AccountKind, ApiError, Grant, Installation, MembershipState, OrgRole, Repo,
     RepoRole, RepositorySelection, Requirement, Scope, Token, TokenKind, Visibility,
 };
-use hubdouble_store::{Accounts, Installations, Memberships, Teams, Tx};
+use hubdouble_store::{Accounts, Installations, Memberships, Repos, Teams, Tx};
 
 use crate::contract::{Actor, Target};
 use crate::sso::has_sso;
@@ -92,28 +92,37 @@ pub fn repo_role(tx: &Tx, user_id: i64, repo: &Repo) -> Option<RepoRole> {
         .filter(|c| c.user_id == user_id)
         .map(|c| c.role)
         .max();
-    let is_org = tx
-        .table::<Accounts>()
-        .get(repo.owner_id)
-        .is_some_and(|o| o.kind == AccountKind::Organization);
-    if !is_org {
-        return best;
-    }
-    let membership = tx
-        .table::<Memberships>()
-        .of(repo.owner_id, user_id)
-        .filter(|m| m.state == MembershipState::Active);
-    if let Some(m) = membership {
-        if m.role == OrgRole::Admin {
-            return Some(RepoRole::Admin);
+    let accounts = tx.table::<Accounts>();
+    let is_org = |id: i64| {
+        accounts
+            .get(id)
+            .is_some_and(|o| o.kind == AccountKind::Organization)
+    };
+    let owner_org = is_org(repo.owner_id).then_some(repo.owner_id);
+    if owner_org.is_some() {
+        let membership = tx
+            .table::<Memberships>()
+            .of(repo.owner_id, user_id)
+            .filter(|m| m.state == MembershipState::Active);
+        if let Some(m) = membership {
+            if m.role == OrgRole::Admin {
+                return Some(RepoRole::Admin);
+            }
+            if repo.visibility == Visibility::Internal {
+                best = best.max(Some(RepoRole::Read));
+            }
         }
-        if repo.visibility == Visibility::Internal {
-            best = best.max(Some(RepoRole::Read));
-        }
     }
+    let parent_org = repo
+        .fork_of
+        .and_then(|id| tx.table::<Repos>().get(id))
+        .map(|parent| parent.owner_id)
+        .filter(|&org| org != repo.owner_id && is_org(org));
     let teams = tx.table::<Teams>();
-    for team in teams
-        .children(repo.owner_id)
+    for team in [owner_org, parent_org]
+        .into_iter()
+        .flatten()
+        .flat_map(|org| teams.children(org))
         .filter(|t| t.members.iter().any(|m| m.user_id == user_id))
     {
         let mut current = Some(team);

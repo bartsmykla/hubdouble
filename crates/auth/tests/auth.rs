@@ -7,9 +7,9 @@ use hubdouble_auth::{
     narrow, record_sso, repo_role, verify_app_jwt,
 };
 use hubdouble_model::{
-    Access, ApiError, Grant, ManualClock, RepoRole, Requirement, Scope, Timestamp,
+    Access, ApiError, Grant, ManualClock, RepoRole, Requirement, Scope, TeamRepo, Timestamp,
 };
-use hubdouble_store::{Accounts, Installations, Repos, Store, Tx};
+use hubdouble_store::{Accounts, Installations, Repos, Store, Teams, Tx};
 use serde_json::json;
 
 const READ_CONTENTS: Requirement = Requirement {
@@ -479,6 +479,40 @@ fn repo_role_takes_the_highest_of_owner_collaborator_team_and_org_role() {
             Ok(())
         })
         .expect("view");
+}
+
+#[test]
+fn a_team_grant_reaches_a_fork_of_its_orgs_repository_owned_by_a_user() {
+    // Given a fork of acme's private repository owned by alice, granted to carol's parent team
+    let store = store();
+    let fork_id = 105;
+    store
+        .update(|tx| {
+            let mut fork = (**tx.table::<Repos>().get(PRIVATE).expect("repo")).clone();
+            fork.id = fork_id;
+            fork.node_id = format!("R_{fork_id}");
+            fork.owner_id = ALICE;
+            fork.fork_of = Some(PRIVATE);
+            fork.collaborators.clear();
+            tx.table_mut::<Repos>().insert(fork)?;
+            let mut team = (**tx.table::<Teams>().get(PARENT_TEAM).expect("team")).clone();
+            team.repos.push(TeamRepo {
+                repo_id: fork_id,
+                role: RepoRole::Write,
+            });
+            tx.table_mut::<Teams>().replace(team)?;
+            Ok(())
+        })
+        .expect("update");
+    // When
+    let role = store
+        .view(|tx| {
+            let fork = tx.table::<Repos>().get(fork_id).cloned().expect("fork");
+            Ok((repo_role(tx, CAROL, &fork), repo_role(tx, BOB, &fork)))
+        })
+        .expect("view");
+    // Then
+    assert_eq!(role, (Some(RepoRole::Write), None));
 }
 
 #[test]
