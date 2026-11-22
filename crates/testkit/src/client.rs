@@ -1,10 +1,14 @@
+use std::collections::HashSet;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode};
 use serde_json::Value;
 
 use crate::TestServer;
+use crate::answer::{self, Exchange};
+use crate::coverage::Recorder;
 
 /// go-github v93's `User-Agent` (`github/github.go:47`, `Version` at `:33`).
 pub const USER_AGENT: &str = "go-github/v93.0.0";
@@ -64,24 +68,64 @@ pub(crate) async fn send(request: reqwest::RequestBuilder) -> Answer {
     }
 }
 
+/// Checks one answer with [`crate::answer::check`] and records it for the inventory gate, for
+/// a test that sends a request without [`GoGithub`]. `registered` says whether hubdouble
+/// implements an operation.
+///
+/// # Panics
+///
+/// When the answer differs from GitHub's docs.
+pub fn check_answer(x: &Exchange<'_>, registered: &dyn Fn(&str) -> bool) {
+    checked(x, registered, &Recorder::from_process_env());
+}
+
+fn checked(x: &Exchange<'_>, registered: &dyn Fn(&str) -> bool, recorder: &Recorder) {
+    match answer::check(x, registered) {
+        Ok(c) => recorder.record(&c),
+        Err(errors) => panic!(
+            "{} {} answered {}, which differs from GitHub's docs:\n  {}\nbody: {}",
+            x.method,
+            x.path,
+            x.status,
+            errors.join("\n  "),
+            String::from_utf8_lossy(x.body)
+        ),
+    }
+}
+
 /// A client that sends what go-github v93's `Client.NewRequest` sends: `Accept`, `User-Agent`,
 /// `X-Github-Api-Version`, `Authorization: Bearer <token>` (`github/github.go:650`), and a JSON
 /// body written by Go's `json.Encoder`, which ends it with a newline.
+///
+/// Every answer goes through [`crate::answer::check`], and a test fails on the first that
+/// differs from GitHub's docs. Redirects are not followed, so each answer is checked against
+/// the operation that gave it; a test follows a `Location` with another call.
 #[derive(Clone)]
 pub struct GoGithub {
     http: reqwest::Client,
     base: String,
     token: Option<String>,
+    registered: Arc<HashSet<&'static str>>,
+    recorder: Recorder,
 }
 
 impl GoGithub {
     /// A client whose base URL is the server root, as `github.NewClient` with a custom base URL.
+    ///
+    /// # Panics
+    ///
+    /// When the HTTP client cannot be built.
     #[must_use]
     pub fn new(server: &TestServer) -> GoGithub {
         GoGithub {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap_or_else(|e| panic!("build the HTTP client: {e}")),
             base: format!("{}/", server.base),
             token: None,
+            registered: server.registered.clone(),
+            recorder: server.recorder.clone(),
         }
     }
 
@@ -106,9 +150,7 @@ impl GoGithub {
         &self.base
     }
 
-    /// A request to `path`, relative to the base URL and already escaped as go-github escapes it
-    /// (see [`path_escape`], [`ref_escape`], [`contents_path`]).
-    pub fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+    fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
         let mut request = self
             .http
             .request(
@@ -124,9 +166,50 @@ impl GoGithub {
         request
     }
 
-    /// Sends a request without a body.
+    async fn exchange(&self, request: reqwest::RequestBuilder) -> Answer {
+        let (http, request) = request.build_split();
+        let request = request.unwrap_or_else(|e| panic!("build the request: {e}"));
+        let method = request.method().as_str().to_owned();
+        let path = request.url().path().to_owned();
+        let request_headers = request.headers().clone();
+        let answer = send(reqwest::RequestBuilder::from_parts(http, request)).await;
+        checked(
+            &Exchange {
+                method: &method,
+                path: &path,
+                request_headers: &request_headers,
+                status: answer.status.as_u16(),
+                headers: &answer.headers,
+                body: &answer.body,
+            },
+            &|id| self.registered.contains(id),
+            &self.recorder,
+        );
+        answer
+    }
+
+    /// Sends a request to `path`, relative to the base URL and already escaped as go-github
+    /// escapes it (see [`path_escape`], [`ref_escape`], [`contents_path`]), without a body.
     pub async fn call(&self, method: Method, path: &str) -> Answer {
-        send(self.request(method, path)).await
+        self.exchange(self.request(method, path)).await
+    }
+
+    /// As [`GoGithub::call`], with `headers` set over go-github's own, as a go-github method
+    /// that sets its own `Accept` or a raw call with its own headers sends them.
+    ///
+    /// # Panics
+    ///
+    /// When the request cannot be built or the answer differs from GitHub's docs.
+    pub async fn call_headers(&self, method: Method, path: &str, headers: HeaderMap) -> Answer {
+        let (http, request) = self.request(method, path).build_split();
+        let mut request = request.unwrap_or_else(|e| panic!("build the request: {e}"));
+        for (name, value) in headers {
+            if let Some(name) = name {
+                request.headers_mut().insert(name, value);
+            }
+        }
+        self.exchange(reqwest::RequestBuilder::from_parts(http, request))
+            .await
     }
 
     /// Sends a request with `body` encoded as go-github encodes it.
@@ -141,7 +224,7 @@ impl GoGithub {
             .request(method, path)
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(bytes);
-        send(request).await
+        self.exchange(request).await
     }
 
     pub async fn get(&self, path: &str) -> Answer {

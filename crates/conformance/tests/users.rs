@@ -13,7 +13,7 @@ use hubdouble_model::{
 use hubdouble_rest::Reply;
 use hubdouble_server::{Registries, Server};
 use hubdouble_store::{Accounts, Tokens};
-use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer, fixture, validate};
+use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer, fixture};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -109,9 +109,10 @@ async fn raw(
     addr: SocketAddr,
     method: &str,
     target: &str,
-    headers: &[(&str, &str)],
+    headers_sent: &[(&str, &str)],
     body: &str,
 ) -> Raw {
+    let headers = headers_sent;
     let mut stream = TcpStream::connect(addr)
         .await
         .unwrap_or_else(|e| panic!("connect: {e}"));
@@ -142,10 +143,31 @@ async fn raw(
         .and_then(|l| l.split(' ').nth(1))
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| panic!("no status: {head}"));
-    let headers = lines
+    let headers: Vec<(String, String)> = lines
         .filter_map(|l| l.split_once(": "))
         .map(|(n, v)| (n.to_owned(), v.to_owned()))
         .collect();
+    let header_map = |pairs: &mut dyn Iterator<Item = (&str, &str)>| {
+        pairs
+            .filter_map(|(n, v)| {
+                Some((
+                    http::HeaderName::from_bytes(n.as_bytes()).ok()?,
+                    http::HeaderValue::from_str(v).ok()?,
+                ))
+            })
+            .collect::<http::HeaderMap>()
+    };
+    hubdouble_testkit::check_answer(
+        &hubdouble_testkit::answer::Exchange {
+            method,
+            path: target.split('?').next().unwrap_or(target),
+            request_headers: &header_map(&mut headers_sent.iter().copied()),
+            status,
+            headers: &header_map(&mut headers.iter().map(|(n, v)| (n.as_str(), v.as_str()))),
+            body: body.as_bytes(),
+        },
+        &|_| true,
+    );
     Raw {
         status,
         headers,
@@ -229,10 +251,7 @@ fn ok(answer: &Answer, operation: &str) -> Value {
         "{operation}: {:?}",
         answer.body
     );
-    let value = answer.json();
-    validate::openapi_response(operation, 200, &value)
-        .unwrap_or_else(|errors| panic!("{operation}: {errors:?}"));
-    value
+    answer.json()
 }
 
 #[tokio::test]

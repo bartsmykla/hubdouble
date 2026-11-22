@@ -37,10 +37,7 @@ fn seeded(base: &str, draft: bool) -> Value {
 
 fn checked(operation: &str, status: StatusCode, answer: &Answer) -> Value {
     assert_eq!(answer.status, status, "{operation}: {:?}", answer.json());
-    let json = answer.json();
-    validate::openapi_response(operation, status.as_u16(), &json)
-        .unwrap_or_else(|issues| panic!("{operation}: {issues:?}"));
-    json
+    answer.json()
 }
 
 async fn edit(client: &GoGithub, path: &str, body: Value) -> Value {

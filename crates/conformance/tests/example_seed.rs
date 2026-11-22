@@ -4,7 +4,7 @@
 )]
 
 use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
-use hubdouble_testkit::{Answer, GoGithub, Graphql, Receiver, TestServer, fixture, validate};
+use hubdouble_testkit::{Answer, GoGithub, Graphql, Receiver, TestServer, fixture};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -47,10 +47,7 @@ async fn example_server() -> (TestServer, Receiver) {
 
 fn json_body(answer: &Answer, operation: &str, status: StatusCode) -> Value {
     assert_eq!(answer.status, status, "{operation}: {:?}", answer.body);
-    let body = answer.json();
-    validate::openapi_response(operation, status.as_u16(), &body)
-        .unwrap_or_else(|errors| panic!("{operation}: {errors:?}"));
-    body
+    answer.json()
 }
 
 async fn get(client: &GoGithub, path: &str, operation: &str) -> Value {
@@ -72,13 +69,14 @@ async fn file_at(client: &GoGithub, repo: &str, path: &str, sha: &str) -> String
         HeaderValue::from_static("application/vnd.github.raw"),
     )]);
     let response = client
-        .request(Method::GET, &format!("{repo}/contents/{path}?ref={sha}"))
-        .headers(headers)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK, "{repo}/{path}@{sha}");
-    response.text().await.unwrap()
+        .call_headers(
+            Method::GET,
+            &format!("{repo}/contents/{path}?ref={sha}"),
+            headers,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{repo}/{path}@{sha}");
+    String::from_utf8(response.body.to_vec()).unwrap()
 }
 
 async fn main_sha(client: &GoGithub, repo: &str) -> String {

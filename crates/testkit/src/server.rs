@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::client::{Answer, send};
+use crate::coverage::Recorder;
 use crate::fixture;
 use crate::receiver::Receiver;
 
@@ -122,6 +123,12 @@ impl Builder {
         );
         let lookup = |name: &str| env.get(name).cloned();
         let registries = registries(self.frame, &self.registers);
+        let registered: HashSet<&'static str> = registries
+            .rest
+            .operations()
+            .filter(|op| op.registered)
+            .map(|op| op.operation_id)
+            .collect();
         let server = Server::start(config, clock.clone(), &lookup, registries)
             .unwrap_or_else(|e| panic!("start the test server: {e}"));
         let (stop, stopped) = oneshot::channel::<()>();
@@ -141,6 +148,8 @@ impl Builder {
             receiver,
             http: reqwest::Client::new(),
             stop: Some(stop),
+            registered: Arc::new(registered),
+            recorder: Recorder::from_process_env(),
         }
     }
 }
@@ -178,9 +187,17 @@ pub struct TestServer {
     pub receiver: Receiver,
     http: reqwest::Client,
     stop: Option<oneshot::Sender<()>>,
+    pub(crate) registered: Arc<HashSet<&'static str>>,
+    pub(crate) recorder: Recorder,
 }
 
 impl TestServer {
+    /// Whether hubdouble implements `operation_id` on this server.
+    #[must_use]
+    pub fn registered(&self, operation_id: &str) -> bool {
+        self.registered.contains(operation_id)
+    }
+
     #[must_use]
     pub fn builder() -> Builder {
         Builder {

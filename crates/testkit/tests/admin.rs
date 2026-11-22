@@ -105,13 +105,14 @@ async fn the_log_names_each_request_and_reset_makes_old_cursors_gone() {
 async fn a_counted_fault_answers_that_many_requests_then_stops() {
     // Given
     let server = TestServer::builder().fixture().start().await;
+    let limited = json!({"message": "You have exceeded a secondary rate limit.",
+                         "documentation_url": "https://docs.github.com/rest", "status": "429"});
     let added = server
         .admin(
             Method::POST,
             "faults",
-            Some(&json!({"method": "GET", "path": "/zen", "status": 503,
-                         "headers": {"retry-after": "7"}, "body": {"message": "down"},
-                         "count": 1})),
+            Some(&json!({"method": "GET", "path": "/zen", "status": 429,
+                         "headers": {"retry-after": "7"}, "body": limited, "count": 1})),
         )
         .await;
     let client = GoGithub::new(&server);
@@ -120,10 +121,10 @@ async fn a_counted_fault_answers_that_many_requests_then_stops() {
     let second = client.get("zen").await;
     // Then
     assert_eq!(added.status, StatusCode::CREATED);
-    assert_eq!(first.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(first.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(first.header("retry-after"), "7");
-    assert_eq!(first.json(), json!({"message": "down"}));
-    assert_ne!(second.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(first.json(), limited);
+    assert_ne!(second.status, StatusCode::TOO_MANY_REQUESTS);
     let faults = server.admin(Method::GET, "faults", None).await.json();
     assert_eq!(faults, json!([]));
 }

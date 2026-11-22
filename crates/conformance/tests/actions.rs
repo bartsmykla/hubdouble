@@ -10,14 +10,13 @@ mod support;
 
 use std::collections::BTreeSet;
 
-use http::{Method, StatusCode};
+use http::header::{self, HeaderValue};
+use http::{HeaderMap, Method, StatusCode};
 use hubdouble_store::WorkflowRuns;
 use hubdouble_testkit::fixture::{ALICE_TOKEN, BOB_TOKEN, WEBHOOK_SECRET};
 use hubdouble_testkit::validate::webhook_payload;
 use hubdouble_testkit::{GoGithub, TestServer};
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 use support::{
     ACTIONS, LIMITED, PRIVATE_ACTIONS, WORKFLOW, WRITER, client, dispatch, dispatch_workflow,
@@ -341,34 +340,27 @@ async fn assert_lifecycle_webhooks(server: &TestServer, final_run: &serde_json::
 }
 
 async fn log_range(server: &TestServer, path: &str) {
-    let mut socket = TcpStream::connect(server.addr).await.unwrap();
-    let request = format!(
-        "GET /api/v3/{path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {ALICE_TOKEN}\r\nConnection: close\r\n\r\n",
-        server.addr
-    );
-    socket.write_all(request.as_bytes()).await.unwrap();
-    let mut raw = String::new();
-    socket.read_to_string(&mut raw).await.unwrap();
-    assert!(raw.starts_with("HTTP/1.1 302 "));
-    let location = raw
-        .lines()
-        .find_map(|line| line.strip_prefix("location: "))
-        .unwrap();
-    let path = location.strip_prefix(&server.base).unwrap();
+    let logs = GoGithub::enterprise(server)
+        .with_token(ALICE_TOKEN)
+        .get(path)
+        .await;
+    assert_eq!(logs.status, StatusCode::FOUND);
+    let path = logs.header("location").strip_prefix(&server.base).unwrap();
     assert!(path.starts_with("/_blobs/"));
     let root = GoGithub::new(server);
     let metadata = root.call(Method::HEAD, path).await;
     assert_eq!(metadata.status, StatusCode::OK);
     assert_eq!(metadata.header("content-length"), "13");
     let range = root
-        .request(Method::GET, path)
-        .header("Range", "bytes=6-11")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
-    assert_eq!(range.headers()["content-range"], "bytes 6-11/13");
-    assert_eq!(range.bytes().await.unwrap(), "second");
+        .call_headers(
+            Method::GET,
+            path,
+            HeaderMap::from_iter([(header::RANGE, HeaderValue::from_static("bytes=6-11"))]),
+        )
+        .await;
+    assert_eq!(range.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(range.header("content-range"), "bytes 6-11/13");
+    assert_eq!(&range.body[..], b"second");
 }
 
 #[tokio::test]

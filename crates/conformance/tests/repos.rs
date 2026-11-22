@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use http::header::{ACCEPT, HeaderValue};
-use http::{Method, StatusCode};
+use http::{HeaderMap, Method, StatusCode};
 use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
 use hubdouble_model::{Access, Clock, Issue, IssueState, Pull, PullRef, Token, TokenKind, node_id};
 use hubdouble_store::{Issues, Tokens};
@@ -32,11 +32,8 @@ fn alice(server: &TestServer) -> GoGithub {
 }
 
 fn valid(operation_id: &str, answer: &Answer) -> Value {
-    let body = answer.json();
-    if let Err(e) = validate::openapi_response(operation_id, answer.status.as_u16(), &body) {
-        panic!("{operation_id} {}: {e:?}", answer.status);
-    }
-    body
+    serde_json::from_slice(&answer.body)
+        .unwrap_or_else(|e| panic!("{operation_id} {}: not JSON: {e}", answer.status))
 }
 
 fn installation_token(server: &TestServer, token: &str, permissions: &[(&str, Access)]) {
@@ -274,14 +271,19 @@ async fn an_asset_asked_for_as_octet_stream_redirects_to_its_bytes() {
     let path = "repos/acme/public/releases/assets/7101";
     // When
     let metadata = alice(&server).get(path).await;
-    let (client, request) = alice(&server).request(Method::GET, path).build_split();
-    let mut request = request.unwrap();
-    request
-        .headers_mut()
-        .insert(ACCEPT, HeaderValue::from_static(OCTET_STREAM));
-    let followed = client.execute(request).await.unwrap();
-    let landed = followed.url().path().to_owned();
-    let bytes = followed.bytes().await.unwrap();
+    let redirect = alice(&server)
+        .call_headers(
+            Method::GET,
+            path,
+            HeaderMap::from_iter([(ACCEPT, HeaderValue::from_static(OCTET_STREAM))]),
+        )
+        .await;
+    let landed = redirect
+        .header("location")
+        .strip_prefix(&server.base)
+        .unwrap()
+        .to_owned();
+    let bytes = GoGithub::new(&server).get(&landed).await.body;
     let log = server.admin(Method::GET, "log", None).await.json();
     // Then
     let asset = valid("repos/get-release-asset", &metadata);

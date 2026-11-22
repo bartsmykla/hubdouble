@@ -15,12 +15,12 @@ const OPENAPI_PATH: &str = concat!(
 );
 const OCTOKIT: &str = include_str!("../spec/octokit/schema.json");
 
-struct OpenApi {
-    doc: Value,
+pub(crate) struct OpenApi {
+    pub(crate) doc: Value,
     registry: Registry<'static>,
 }
 
-static OPENAPI: LazyLock<OpenApi> = LazyLock::new(|| {
+pub(crate) static OPENAPI: LazyLock<OpenApi> = LazyLock::new(|| {
     let text = std::fs::read_to_string(OPENAPI_PATH)
         .unwrap_or_else(|e| panic!("read {OPENAPI_PATH}: {e}"));
     let doc: Value =
@@ -102,7 +102,7 @@ fn convert(v: Value) -> Value {
     }
 }
 
-fn resolve<'a>(doc: &'a Value, v: &'a Value) -> &'a Value {
+pub(crate) fn resolve<'a>(doc: &'a Value, v: &'a Value) -> &'a Value {
     match v
         .get("$ref")
         .and_then(Value::as_str)
@@ -163,6 +163,15 @@ pub fn response_schema(operation_id: &str, status: u16) -> Result<Value, String>
         .pointer("/content/application~1json/schema")
         .ok_or_else(|| format!("{operation_id} {status} has no JSON schema"))?;
     Ok(convert(schema.clone()))
+}
+
+pub(crate) fn openapi_schema(schema: &Value, body: &Value) -> Result<(), Vec<String>> {
+    check(
+        &convert(schema.clone()),
+        &OPENAPI.registry,
+        Draft::Draft4,
+        body,
+    )
 }
 
 /// Validates a REST answer body against GitHub's schema for `operation_id` and `status`.
