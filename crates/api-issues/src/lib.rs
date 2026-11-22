@@ -1,4 +1,5 @@
 mod comments;
+mod cursor;
 mod events;
 mod graphql;
 mod issues;

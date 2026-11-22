@@ -8,6 +8,7 @@ use hubdouble_store::{Accounts, Counters, IssueComments, Issues, Labels, Tx, TxM
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+use crate::cursor::{self, Keyed};
 use crate::events::{self, What};
 use crate::shared::{
     Who, changed_from, created, emit_issue, full_name, invalid, issue_view, label_view,
@@ -201,7 +202,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let assignee_id = assignee
         .filter(|a| !matches!(*a, "none" | "*"))
         .map(|login| accounts.by_login(login).map(|a| a.id));
-    let mut issues: Vec<Arc<Issue>> = if unknown {
+    let issues: Vec<Arc<Issue>> = if unknown {
         Vec::new()
     } else {
         tx.table::<Issues>()
@@ -221,18 +222,33 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     };
     let comments = tx.table::<IssueComments>();
     let ascending = q.get("direction") == Some("asc");
-    match q.get("sort").unwrap_or("created") {
-        "updated" => issues.sort_by_key(|i| (i.updated_at, i.id)),
-        "comments" => issues.sort_by_key(|i| (comments.children(i.id).count(), i.id)),
-        "created" => issues.sort_by_key(|i| (i.created_at, i.id)),
-        _ => return Err(invalid("Issue", "sort", "invalid")),
+    let sort = q.get("sort").unwrap_or("created");
+    if !matches!(sort, "updated" | "comments" | "created") {
+        return Err(invalid("Issue", "sort", "invalid"));
     }
+    let millis = |t: Timestamp| u64::try_from(t.unix()).unwrap_or(0).saturating_mul(1000);
+    let mut keyed: Vec<Keyed<Arc<Issue>>> = issues
+        .into_iter()
+        .map(|i| Keyed {
+            key: match sort {
+                "updated" => millis(i.updated_at),
+                "comments" => u64::try_from(comments.children(i.id).count()).unwrap_or(u64::MAX),
+                _ => millis(i.created_at),
+            },
+            id: u64::try_from(i.id).unwrap_or(0),
+            item: i,
+        })
+        .collect();
+    keyed.sort_by_key(|e| (e.key, e.id));
     if !ascending {
-        issues.reverse();
+        keyed.reverse();
     }
     let urls = ctx.urls();
     let full = full_name(tx, &repo);
-    ctx.page(&issues, |i| issue_view(tx, urls, &repo, &full, i))
+    let base = format!("{}/repositories/{}/issues", urls.api, repo.id);
+    cursor::page(ctx, &base, !ascending, &keyed, |i| {
+        issue_view(tx, urls, &repo, &full, i)
+    })
 }
 
 pub(crate) fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {

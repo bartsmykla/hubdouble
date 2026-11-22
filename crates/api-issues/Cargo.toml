@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
 http.workspace = true
 hubdouble-admin.workspace = true
 hubdouble-auth.workspace = true
