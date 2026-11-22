@@ -458,6 +458,15 @@ pub(crate) fn create_commit_on_branch(
         )));
     }
     let changes = input.file_changes.unwrap_or_default();
+    if changes
+        .additions
+        .iter()
+        .map(|file| &file.path)
+        .chain(changes.deletions.iter().map(|file| &file.path))
+        .any(|path| path.starts_with(".github/workflows/"))
+    {
+        m.authorize(&crate::WRITE_WORKFLOWS, &repo)?;
+    }
     let mut writes = Vec::with_capacity(changes.additions.len() + changes.deletions.len());
     for d in changes.deletions {
         writes.push(FileChange::Delete { path: d.path });

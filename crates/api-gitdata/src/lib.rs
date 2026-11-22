@@ -23,6 +23,12 @@ pub(crate) const WRITE_CONTENTS: Requirement = Requirement {
     scopes: &[],
 };
 
+pub(crate) const WRITE_WORKFLOWS: Requirement = Requirement {
+    any_of: &[Grant::write("workflows")],
+    scope: Scope::Repo,
+    scopes: &["workflow"],
+};
+
 /// Registers what T4 owns: the git data, contents, commits, compare, merge and branch
 /// operations, and the GraphQL git fields and mutations.
 pub fn register(r: &mut Registrar<'_>) {
