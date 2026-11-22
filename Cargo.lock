@@ -1752,6 +1752,7 @@ dependencies = [
  "gix-object",
  "hubdouble-hooks",
  "hubdouble-model",
+ "hubdouble-render",
  "hubdouble-store",
  "imara-diff",
  "parking_lot 0.13.0",

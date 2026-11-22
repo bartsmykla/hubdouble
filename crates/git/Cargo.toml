@@ -14,6 +14,7 @@ gix-hash = { workspace = true, features = ["sha1"] }
 gix-object = { workspace = true, features = ["sha1"] }
 hubdouble-hooks.workspace = true
 hubdouble-model.workspace = true
+hubdouble-render.workspace = true
 hubdouble-store.workspace = true
 imara-diff.workspace = true
 parking_lot.workspace = true

@@ -2,10 +2,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use hubdouble_model::{Account, AccountKind, Event, Repo, Timestamp};
+use hubdouble_render::Urls;
 use hubdouble_store::{Accounts, Repos, Tx};
 use serde_json::{Map, Value, json};
 
-use crate::contract::{Commit, Git, GitError, ObjectId, RefChange, Signature};
+use crate::contract::{Commit, GitError, ObjectId, RefChange, Signature};
 use crate::odb::Odb;
 use crate::{diff, history, refs};
 
@@ -147,12 +148,7 @@ fn new_commits(
     Ok(list)
 }
 
-pub(crate) fn push(
-    tx: &Tx,
-    git: &Git,
-    odb: &Odb,
-    change: &RefChange,
-) -> Result<Option<Event>, GitError> {
+pub(crate) fn push(tx: &Tx, odb: &Odb, change: &RefChange) -> Result<Option<Event>, GitError> {
     let Some((short_name, _)) = pushed(&change.name) else {
         return Ok(None);
     };
@@ -160,7 +156,8 @@ pub(crate) fn push(
     let Some(scope) = scope(tx, change, head.as_ref().map(|(_, c)| &**c)) else {
         return Ok(None);
     };
-    let web = git.inner.web_url.as_str();
+    let urls = Urls::new(tx.config(), "");
+    let web = urls.web.as_str();
     let commits = match head {
         Some((id, _)) => new_commits(tx, odb, change, id)?,
         None => Vec::new(),
@@ -237,13 +234,8 @@ pub(crate) fn create(tx: &Tx, odb: &Odb, change: &RefChange) -> Option<Event> {
     })
 }
 
-pub(crate) fn for_change(
-    tx: &Tx,
-    git: &Git,
-    odb: &Odb,
-    change: &RefChange,
-) -> Result<Vec<Event>, GitError> {
-    Ok(push(tx, git, odb, change)?
+pub(crate) fn for_change(tx: &Tx, odb: &Odb, change: &RefChange) -> Result<Vec<Event>, GitError> {
+    Ok(push(tx, odb, change)?
         .into_iter()
         .chain(create(tx, odb, change))
         .collect())

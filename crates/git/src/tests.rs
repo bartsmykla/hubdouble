@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use hubdouble_model::{
-    Account, AccountKind, ApiError, ManualClock, Repo, Timestamp, Visibility, node_id,
+    Account, AccountKind, ApiError, Config, ManualClock, Repo, Timestamp, Visibility, node_id,
 };
 use hubdouble_store::{Accounts, Repos, Store, StoreBuilder, Table, TxMut};
 use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
@@ -109,9 +109,12 @@ fn fixture_with(subscribers: &[RefSubscriber]) -> Fx {
         git.on_ref_update(*s);
     }
     git.clock(Arc::new(ManualClock::new(MERGE_TIME)));
-    git.web_url("https://github.com/");
+    let config = Config {
+        web_url: "https://github.com".to_owned(),
+        ..Config::default()
+    };
     let fx = Fx {
-        store: builder.build(),
+        store: builder.build_with(Arc::new(config)),
         git: git.build(),
     };
     fx.store
@@ -993,7 +996,7 @@ fn events(fx: &Fx, change: &RefChange) -> Vec<(&'static str, i64, Option<i64>, V
     fx.store
         .view(|tx| {
             let odb = fx.git.odb(tx, change.repo_id);
-            Ok(crate::events::for_change(tx, &fx.git, &odb, change)?
+            Ok(crate::events::for_change(tx, &odb, change)?
                 .into_iter()
                 .map(|e| {
                     assert_eq!(e.repo_id, Some(change.repo_id));

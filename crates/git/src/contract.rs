@@ -395,7 +395,6 @@ pub type RefSubscriber = fn(&mut TxMut<'_>, &Git, &RefChange) -> Result<(), ApiE
 pub struct GitBuilder {
     subscribers: Vec<RefSubscriber>,
     clock: Arc<dyn Clock>,
-    web_url: String,
 }
 
 impl GitBuilder {
@@ -406,7 +405,6 @@ impl GitBuilder {
         GitBuilder {
             subscribers: Vec::new(),
             clock: Arc::new(SystemClock),
-            web_url: hubdouble_model::Config::default().web_url,
         }
     }
 
@@ -420,11 +418,6 @@ impl GitBuilder {
         self.clock = clock;
     }
 
-    /// The origin of the links in `push` payloads (`HUBDOUBLE_WEB_URL`), without a trailing `/`.
-    pub fn web_url(&mut self, url: &str) {
-        url.trim_end_matches('/').clone_into(&mut self.web_url);
-    }
-
     #[must_use]
     pub fn build(self) -> Git {
         Git {
@@ -433,7 +426,6 @@ impl GitBuilder {
                 networks: RwLock::new(HashMap::new()),
                 web_flow: WebFlow::new(),
                 clock: self.clock,
-                web_url: self.web_url,
             }),
         }
     }
@@ -444,7 +436,6 @@ pub(crate) struct Inner {
     networks: RwLock<HashMap<i64, Arc<Odb>>>,
     web_flow: Result<WebFlow, GitError>,
     clock: Arc<dyn Clock>,
-    pub(crate) web_url: String,
 }
 
 /// One per server: objects shared per fork network outside the store lock, refs per repository
@@ -540,7 +531,7 @@ impl Git {
             new,
             forced,
         };
-        for event in events::for_change(tx, self, &odb, &change)? {
+        for event in events::for_change(tx, &odb, &change)? {
             hubdouble_hooks::emit(tx, event);
         }
         for subscriber in &self.inner.subscribers {
