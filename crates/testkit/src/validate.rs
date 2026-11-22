@@ -39,6 +39,7 @@ pub(crate) static OPENAPI: LazyLock<OpenApi> = LazyLock::new(|| {
 fn allow_newer_fields(mut schema: Value) -> Value {
     let newer = [
         ("user", "user_view_type", json!({ "type": "string" })),
+        ("app", "client_id", json!({ "type": "string" })),
         ("release", "immutable", json!({ "type": "boolean" })),
         (
             "release",
@@ -210,6 +211,87 @@ pub fn webhook_payload(
     check(&target, registry, Draft::Draft7, payload)
 }
 
+/// Checks one webhook delivery: its payload against octokit's schema for the `X-GitHub-Event`
+/// header and the payload's `action`, and its headers against
+/// <https://docs.github.com/en/webhooks/webhook-events-and-payloads#delivery-headers>:
+/// `X-GitHub-Event`, `X-GitHub-Delivery` (a lowercase UUID, plan section 4.3),
+/// `X-GitHub-Hook-ID` and `X-GitHub-Hook-Installation-Target-ID` (numbers),
+/// `X-GitHub-Hook-Installation-Target-Type`, `X-Hub-Signature-256` (`sha256=` and 64 hex) and
+/// `X-Hub-Signature` (`sha1=` and 40 hex), both or neither, a `User-Agent` that starts with
+/// `GitHub-Hookshot/`, and `Content-Type: application/json`.
+///
+/// # Errors
+///
+/// Each way the delivery differs from GitHub's docs.
+pub fn webhook_delivery(headers: &http::HeaderMap, body: &[u8]) -> Result<(), Vec<String>> {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+    };
+    let hex = |s: &str, len: usize| {
+        s.len() == len
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let mut errors = Vec::new();
+    let event = header("x-github-event");
+    if event.is_empty() {
+        errors.push("no X-GitHub-Event".to_owned());
+    }
+    let guid: Vec<&str> = header("x-github-delivery").split('-').collect();
+    let lengths: Vec<usize> = guid.iter().map(|g| g.len()).collect();
+    if lengths != [8, 4, 4, 4, 12] || !guid.iter().all(|g| hex(g, g.len())) {
+        errors.push(format!(
+            "X-GitHub-Delivery {:?} is not a lowercase UUID",
+            header("x-github-delivery")
+        ));
+    }
+    for name in ["x-github-hook-id", "x-github-hook-installation-target-id"] {
+        if header(name).parse::<u64>().is_err() {
+            errors.push(format!("{name} {:?} is not a number", header(name)));
+        }
+    }
+    if header("x-github-hook-installation-target-type").is_empty() {
+        errors.push("no X-GitHub-Hook-Installation-Target-Type".to_owned());
+    }
+    let sha256 = header("x-hub-signature-256");
+    let sha1 = header("x-hub-signature");
+    match (sha256.is_empty(), sha1.is_empty()) {
+        (true, true) => {}
+        (false, false) => {
+            if !sha256.strip_prefix("sha256=").is_some_and(|h| hex(h, 64)) {
+                errors.push(format!("X-Hub-Signature-256 {sha256:?}"));
+            }
+            if !sha1.strip_prefix("sha1=").is_some_and(|h| hex(h, 40)) {
+                errors.push(format!("X-Hub-Signature {sha1:?}"));
+            }
+        }
+        _ => errors.push("only one of X-Hub-Signature and X-Hub-Signature-256".to_owned()),
+    }
+    if !header("user-agent").starts_with("GitHub-Hookshot/") {
+        errors.push(format!("User-Agent {:?}", header("user-agent")));
+    }
+    if header("content-type").split(';').next().map(str::trim) != Some("application/json") {
+        errors.push(format!("Content-Type {:?}", header("content-type")));
+    }
+    match serde_json::from_slice::<Value>(body) {
+        Ok(payload) => {
+            let action = payload.get("action").and_then(Value::as_str);
+            if let Err(e) = webhook_payload(event, action, &payload) {
+                errors.extend(e);
+            }
+        }
+        Err(e) => errors.push(format!("the payload is not JSON: {e}")),
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +340,53 @@ mod tests {
     fn an_unknown_operation_or_event_has_no_schema() {
         assert!(openapi_response("nope/nope", 200, &json!({})).is_err());
         assert!(webhook_payload("nope", None, &json!({})).is_err());
+    }
+
+    #[test]
+    fn a_delivery_needs_githubs_headers_and_a_schema_valid_payload() {
+        // Given a ping as GitHub delivers it
+        let ping = br#"{"zen": "z", "hook_id": 1, "hook": {"type": "App", "id": 1, "name": "web",
+            "active": true, "events": ["push"], "config": {"content_type": "json",
+            "insecure_ssl": "0", "url": "http://r/webhook"}, "updated_at": "2026-01-01T00:00:00Z",
+            "created_at": "2026-01-01T00:00:00Z", "app_id": 1, "deliveries_url": "http://d",
+            "url": "http://h", "ping_url": "http://p"}}"#;
+        let mut headers = http::HeaderMap::new();
+        for (n, v) in [
+            ("x-github-event", "ping"),
+            ("x-github-delivery", "72d3162e-cc78-11e3-81ab-4c9367dc0958"),
+            ("x-github-hook-id", "292430182"),
+            ("x-github-hook-installation-target-id", "79929171"),
+            ("x-github-hook-installation-target-type", "integration"),
+            (
+                "x-hub-signature",
+                "sha1=7d38cdd689735b008b3c702edd92eea23791c5f6",
+            ),
+            (
+                "x-hub-signature-256",
+                "sha256=d57c68ca6f92289e6987922ff26938930f6e66a2d161ef06abdf1859230aa23c",
+            ),
+            ("user-agent", "GitHub-Hookshot/044aadd"),
+            ("content-type", "application/json"),
+        ] {
+            headers.insert(n, v.parse().unwrap());
+        }
+        // Then
+        assert_eq!(webhook_delivery(&headers, ping), Ok(()));
+        for (name, bad) in [
+            ("x-github-delivery", "72D3162E-CC78-11E3-81AB-4C9367DC0958"),
+            ("x-github-hook-id", "web"),
+            ("x-hub-signature-256", "sha256=nope"),
+            ("user-agent", "hubdouble"),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ] {
+            let mut broken = headers.clone();
+            broken.insert(name, bad.parse().unwrap());
+            assert!(webhook_delivery(&broken, ping).is_err(), "{name}");
+        }
+        let mut unsigned = headers.clone();
+        unsigned.remove("x-hub-signature");
+        assert!(webhook_delivery(&unsigned, ping).is_err());
+        assert!(webhook_delivery(&headers, br#"{"zen": 1}"#).is_err());
     }
 
     #[test]

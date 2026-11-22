@@ -128,23 +128,53 @@ impl Receiver {
     ///
     /// # Panics
     ///
-    /// When the receiver task has stopped.
+    /// When the receiver task has stopped, or the delivery differs from GitHub's docs
+    /// ([`crate::validate::webhook_delivery`]).
     pub async fn next(&self) -> Delivery {
-        self.deliveries
+        let d = self
+            .deliveries
             .lock()
             .await
             .recv()
             .await
-            .unwrap_or_else(|| panic!("the webhook receiver stopped"))
+            .unwrap_or_else(|| panic!("the webhook receiver stopped"));
+        checked(d)
     }
 
     /// Every delivery already received, without waiting.
+    ///
+    /// # Panics
+    ///
+    /// When a delivery differs from GitHub's docs ([`crate::validate::webhook_delivery`]).
     pub async fn received(&self) -> Vec<Delivery> {
         let mut rx = self.deliveries.lock().await;
         let mut out = Vec::new();
         while let Ok(d) = rx.try_recv() {
-            out.push(d);
+            out.push(checked(d));
         }
         out
+    }
+}
+
+fn checked(d: Delivery) -> Delivery {
+    if let Err(errors) = crate::validate::webhook_delivery(&d.headers, &d.body) {
+        panic!(
+            "the {} delivery differs from GitHub's docs:\n  {}\nbody: {}",
+            d.header("x-github-event"),
+            errors.join("\n  "),
+            String::from_utf8_lossy(&d.body)
+        );
+    }
+    d
+}
+
+impl Drop for Receiver {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        while let Ok(d) = self.deliveries.get_mut().try_recv() {
+            checked(d);
+        }
     }
 }
