@@ -76,6 +76,12 @@ fn object_param(ctx: &Ctx<'_>, name: &str) -> Result<(ObjectId, ObjectData), Api
 }
 
 pub(crate) fn get_blob(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    let text = ctx.param("file_sha")?;
+    if text.len() != 40 || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(ApiError::unprocessable(
+            "The sha parameter must be exactly 40 characters and contain only [0-9a-f].",
+        ));
+    }
     let (sha, ObjectData::Blob(data)) = object_param(ctx, "file_sha")? else {
         return Err(ApiError::not_found());
     };
