@@ -17,7 +17,6 @@ struct Scope {
     full_name: String,
     org_id: Option<i64>,
     sender: Option<Arc<Account>>,
-    sender_id: i64,
 }
 
 fn object(v: Value) -> Map<String, Value> {
@@ -57,17 +56,14 @@ fn local_time(s: &Signature) -> String {
     )
 }
 
-fn scope(tx: &Tx, change: &RefChange, head: Option<&Commit>) -> Option<Scope> {
+fn scope(tx: &Tx, change: &RefChange) -> Option<Scope> {
+    let accounts = tx.table::<Accounts>();
     let repo = tx.table::<Repos>().get(change.repo_id)?.clone();
-    let owner = tx.table::<Accounts>().get(repo.owner_id)?.clone();
-    let sender = head
-        .and_then(|c| account_by_email(tx, &c.author.email))
-        .cloned();
+    let owner = accounts.get(repo.owner_id)?;
     Some(Scope {
         full_name: format!("{}/{}", owner.login, repo.name),
         org_id: (owner.kind == AccountKind::Organization).then_some(owner.id),
-        sender_id: sender.as_ref().map_or(owner.id, |a| a.id),
-        sender: sender.or(Some(owner)),
+        sender: accounts.get(change.sender).cloned(),
         repo,
     })
 }
@@ -153,7 +149,7 @@ pub(crate) fn push(tx: &Tx, odb: &Odb, change: &RefChange) -> Result<Option<Even
         return Ok(None);
     };
     let head = change.new.and_then(|n| odb.peel_commit(n).ok());
-    let Some(scope) = scope(tx, change, head.as_ref().map(|(_, c)| &**c)) else {
+    let Some(scope) = scope(tx, change) else {
         return Ok(None);
     };
     let urls = Urls::new(tx.config(), "");
@@ -190,7 +186,7 @@ pub(crate) fn push(tx: &Tx, odb: &Odb, change: &RefChange) -> Result<Option<Even
         action: None,
         repo_id: Some(scope.repo.id),
         org_id: scope.org_id,
-        sender_id: scope.sender_id,
+        sender_id: change.sender,
         app_id: None,
         installation_id: None,
         payload: object(json!({
@@ -209,19 +205,18 @@ pub(crate) fn push(tx: &Tx, odb: &Odb, change: &RefChange) -> Result<Option<Even
     }))
 }
 
-pub(crate) fn create(tx: &Tx, odb: &Odb, change: &RefChange) -> Option<Event> {
+pub(crate) fn create(tx: &Tx, change: &RefChange) -> Option<Event> {
     if change.old.is_some() {
         return None;
     }
     let (short_name, ref_type) = pushed(&change.name)?;
-    let head = change.new.and_then(|n| odb.peel_commit(n).ok());
-    let scope = scope(tx, change, head.as_ref().map(|(_, c)| &**c))?;
+    let scope = scope(tx, change)?;
     Some(Event {
         name: "create",
         action: None,
         repo_id: Some(scope.repo.id),
         org_id: scope.org_id,
-        sender_id: scope.sender_id,
+        sender_id: change.sender,
         app_id: None,
         installation_id: None,
         payload: object(json!({
@@ -237,6 +232,6 @@ pub(crate) fn create(tx: &Tx, odb: &Odb, change: &RefChange) -> Option<Event> {
 pub(crate) fn for_change(tx: &Tx, odb: &Odb, change: &RefChange) -> Result<Vec<Event>, GitError> {
     Ok(push(tx, odb, change)?
         .into_iter()
-        .chain(create(tx, odb, change))
+        .chain(create(tx, change))
         .collect())
 }

@@ -93,9 +93,10 @@ impl Server {
             store,
             rest,
             gql,
-            git,
+            mut git,
             admin,
         } = registries;
+        git.clock(clock.clone());
         let config = Arc::new(config);
         let store = store.build_with(config.clone());
         let hooks = hubdouble_hooks::Handle::start(store.clone(), clock.clone())?;

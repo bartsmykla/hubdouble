@@ -4,7 +4,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use hubdouble_model::{ApiError, Clock, SystemClock, Timestamp};
-use hubdouble_store::{StoreBuilder, Tx, TxMut};
+use hubdouble_store::{Accounts, StoreBuilder, Tx, TxMut};
 use parking_lot::RwLock;
 use serde::{Serialize, Serializer};
 
@@ -195,6 +195,8 @@ pub struct Ref {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefChange {
     pub repo_id: i64,
+    /// The account ID of the actor, the `sender` and `pusher` of the `push` event.
+    pub sender: i64,
     pub name: String,
     pub old: Option<ObjectId>,
     pub new: Option<ObjectId>,
@@ -479,16 +481,22 @@ impl Git {
     }
 
     /// Every ref change goes through here, and runs the subscribers in the same transaction.
-    /// `old` is the value the caller expects, `None` meaning the ref must not exist; `new`
-    /// `None` deletes the ref. Setting a ref to its current value changes nothing.
+    /// `sender` is the account ID of the actor. `old` is the value the caller expects, `None`
+    /// meaning the ref must not exist; `new` `None` deletes the ref. Setting a ref to its
+    /// current value changes nothing.
     ///
     /// # Errors
     ///
     /// [`GitError::Stale`] when `old` does not match, [`GitError::NotFastForward`] without `force`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the frozen contract of plan section 6.4 plus the sender"
+    )]
     pub fn update_ref(
         &self,
         tx: &mut TxMut<'_>,
         repo: i64,
+        sender: i64,
         name: &str,
         old: Option<ObjectId>,
         new: Option<ObjectId>,
@@ -526,6 +534,7 @@ impl Git {
         refs::set(tx, repo, name, new);
         let change = RefChange {
             repo_id: repo,
+            sender,
             name: name.to_owned(),
             old: current,
             new,
@@ -653,11 +662,12 @@ impl Git {
         odb.put(ObjectData::Tag(Arc::new(tag.clone())))
     }
 
-    /// Writes a commit of `changes` on `parent` and moves `branch` to it; `sign` signs it with the web-flow key.
+    /// Writes a commit of `changes` on `parent` and moves `branch` (a branch name or a full ref
+    /// name) to it as `sender`; `sign` signs it with the web-flow key.
     ///
     /// # Errors
     ///
-    /// [`GitError::Stale`] when `branch` is not at `parent`.
+    /// [`GitError::Stale`] when `branch` is not at `parent`, [`GitError::Invalid`] for a bad path.
     #[expect(
         clippy::too_many_arguments,
         reason = "the frozen contract of plan section 6.4"
@@ -666,31 +676,7 @@ impl Git {
         &self,
         tx: &mut TxMut<'_>,
         repo: i64,
-        branch: &str,
-        parent: Option<ObjectId>,
-        changes: &[FileChange],
-        author: &Signature,
-        committer: &Signature,
-        sign: bool,
-    ) -> Result<ObjectId, GitError> {
-        self.commit_with_message(
-            tx, repo, branch, parent, changes, "", author, committer, sign,
-        )
-    }
-
-    /// [`Git::commit`] with a commit message. `branch` is a branch name or a full ref name.
-    ///
-    /// # Errors
-    ///
-    /// [`GitError::Stale`] when `branch` is not at `parent`, [`GitError::Invalid`] for a bad path.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the frozen contract of plan section 6.4 plus the message"
-    )]
-    pub fn commit_with_message(
-        &self,
-        tx: &mut TxMut<'_>,
-        repo: i64,
+        sender: i64,
         branch: &str,
         parent: Option<ObjectId>,
         changes: &[FileChange],
@@ -720,7 +706,7 @@ impl Git {
             self.sign(&mut commit)?;
         }
         let id = odb.put(ObjectData::Commit(Arc::new(commit)))?;
-        self.update_ref(tx, repo, &name, parent, Some(id), false)?;
+        self.update_ref(tx, repo, sender, &name, parent, Some(id), false)?;
         Ok(id)
     }
 
@@ -816,14 +802,17 @@ impl Git {
 
     /// Merges `head` (a branch, ref or commit ID) into the branch `base` with a web-flow signed
     /// merge commit whose first parent is base, then moves base through [`Git::update_ref`].
+    /// The author is the `sender` account and the committer is GitHub, at the clock's time.
     ///
     /// # Errors
     ///
-    /// [`GitError::NothingToMerge`] when base already holds head, [`GitError::Conflict`] on a conflict.
+    /// [`GitError::NothingToMerge`] when base already holds head, [`GitError::Conflict`] on a
+    /// conflict, [`GitError::NotFound`] when the sender account is missing.
     pub fn merge(
         &self,
         tx: &mut TxMut<'_>,
         repo: i64,
+        sender: i64,
         base: &str,
         head: &str,
         msg: &str,
@@ -852,18 +841,33 @@ impl Git {
             Some(t) => t,
             None => tree::empty(&odb)?,
         };
-        let github = Signature::web_flow(self.inner.clock.now());
+        let now = self.inner.clock.now();
+        let account = tx
+            .table::<Accounts>()
+            .get(sender)
+            .ok_or(GitError::NotFound)?;
+        let author = Signature {
+            name: account
+                .name
+                .clone()
+                .unwrap_or_else(|| account.login.clone()),
+            email: account.email.clone().unwrap_or_else(|| {
+                format!("{}+{}@users.noreply.github.com", account.id, account.login)
+            }),
+            time: now,
+            offset_minutes: 0,
+        };
         let mut commit = Commit {
             tree,
             parents: vec![base_id, head_id],
-            author: github.clone(),
-            committer: github,
+            author,
+            committer: Signature::web_flow(now),
             message: msg.to_owned(),
             gpg_signature: None,
         };
         self.sign(&mut commit)?;
         let id = odb.put(ObjectData::Commit(Arc::new(commit)))?;
-        self.update_ref(tx, repo, &name, Some(base_ref), Some(id), false)?;
+        self.update_ref(tx, repo, sender, &name, Some(base_ref), Some(id), false)?;
         Ok(MergeResult { commit: id })
     }
 

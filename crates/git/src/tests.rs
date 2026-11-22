@@ -177,8 +177,8 @@ impl Fx {
                 .git
                 .resolve_ref(tx, repo, &format!("refs/heads/{branch}"))
                 .ok();
-            Ok(self.git.commit_with_message(
-                tx, repo, branch, parent, changes, message, author, author, false,
+            Ok(self.git.commit(
+                tx, repo, ALICE, branch, parent, changes, message, author, author, false,
             )?)
         })
     }
@@ -190,7 +190,11 @@ impl Fx {
 
     fn branch(&self, repo: i64, name: &str, at: ObjectId) {
         self.store
-            .update(|tx| Ok(self.git.update_ref(tx, repo, name, None, Some(at), false)?))
+            .update(|tx| {
+                Ok(self
+                    .git
+                    .update_ref(tx, repo, ALICE, name, None, Some(at), false)?)
+            })
             .unwrap();
     }
 
@@ -222,8 +226,11 @@ impl Fx {
         new: Option<ObjectId>,
         force: bool,
     ) -> Result<(), ApiError> {
-        self.store
-            .update(|tx| Ok(self.git.update_ref(tx, REPO, name, old, new, force)?))
+        self.store.update(|tx| {
+            Ok(self
+                .git
+                .update_ref(tx, REPO, ALICE, name, old, new, force)?)
+        })
     }
 }
 
@@ -322,7 +329,7 @@ fn seed_history(fx: &Fx) -> Vec<(String, ObjectId)> {
                 },
             )?;
             fx.git
-                .update_ref(tx, REPO, "refs/tags/v1.0.0", None, Some(tag), false)?;
+                .update_ref(tx, REPO, ALICE, "refs/tags/v1.0.0", None, Some(tag), false)?;
             Ok(())
         })
         .unwrap();
@@ -397,6 +404,7 @@ fn update_ref_checks_the_expected_value_and_fast_forwards() {
         vec![
             RefChange {
                 repo_id: REPO,
+                sender: ALICE,
                 name: "refs/heads/main".to_owned(),
                 old: Some(c2),
                 new: Some(c1),
@@ -404,6 +412,7 @@ fn update_ref_checks_the_expected_value_and_fast_forwards() {
             },
             RefChange {
                 repo_id: REPO,
+                sender: ALICE,
                 name: "refs/heads/topic".to_owned(),
                 old: Some(c1),
                 new: Some(c2),
@@ -411,6 +420,7 @@ fn update_ref_checks_the_expected_value_and_fast_forwards() {
             },
             RefChange {
                 repo_id: REPO,
+                sender: ALICE,
                 name: "refs/heads/topic".to_owned(),
                 old: Some(c2),
                 new: None,
@@ -427,7 +437,7 @@ fn update_ref_refuses_bad_names_and_targets() {
     let c1 = fx.commit("main", &[write("a", "1")], "1");
     let errors = |name: &str, new: Option<ObjectId>| {
         fx.store
-            .update(|tx| Ok(fx.git.update_ref(tx, REPO, name, None, new, false)))
+            .update(|tx| Ok(fx.git.update_ref(tx, REPO, ALICE, name, None, new, false)))
             .unwrap()
             .unwrap_err()
     };
@@ -470,7 +480,7 @@ fn a_refused_or_failed_update_leaves_the_refs_as_they_were() {
     let refused = fx.update_ref("refs/heads/blocked", None, Some(c1), false);
     let failed: Result<(), ApiError> = fx.store.update(|tx| {
         fx.git
-            .update_ref(tx, REPO, "refs/heads/later", None, Some(c1), false)?;
+            .update_ref(tx, REPO, ALICE, "refs/heads/later", None, Some(c1), false)?;
         Err(ApiError::internal("later step failed"))
     });
 
@@ -562,9 +572,11 @@ fn commits_refuse_bad_paths_and_a_stale_parent() {
         Ok(fx.git.commit(
             tx,
             REPO,
+            ALICE,
             "main",
             None,
             &[write("x", "x")],
+            "x",
             &Signature::seed(),
             &Signature::seed(),
             false,
@@ -594,7 +606,7 @@ fn expressions_name_blobs_trees_commits_and_tags() {
                 },
             )?;
             fx.git
-                .update_ref(tx, REPO, "refs/tags/v1", None, Some(tag), false)?;
+                .update_ref(tx, REPO, ALICE, "refs/tags/v1", None, Some(tag), false)?;
             Ok(tag)
         })
         .unwrap();
@@ -769,13 +781,26 @@ fn merge_joins_divergent_branches_with_a_signed_web_flow_commit() {
 
     let merged = fx
         .store
-        .update(|tx| Ok(fx.git.merge(tx, REPO, "main", "feature", "Merge feature")?))
+        .update(|tx| {
+            Ok(fx
+                .git
+                .merge(tx, REPO, ALICE, "main", "feature", "Merge feature")?)
+        })
         .unwrap();
 
     assert_eq!(fx.head(REPO, "refs/heads/main"), Ok(merged.commit));
     let commit = fx.commit_object(REPO, merged.commit);
     assert_eq!(commit.parents, [main, feature]);
     assert_eq!(commit.message, "Merge feature");
+    assert_eq!(
+        commit.author,
+        Signature {
+            name: "alice".to_owned(),
+            email: "alice@example.com".to_owned(),
+            time: MERGE_TIME,
+            offset_minutes: 0,
+        }
+    );
     assert_eq!(commit.committer, Signature::web_flow(MERGE_TIME));
     assert_eq!(fx.git.verification(&commit), SignatureState::Valid);
     fx.store
@@ -797,14 +822,14 @@ fn merge_joins_divergent_branches_with_a_signed_web_flow_commit() {
         .unwrap();
     let last = fx.seen().pop().unwrap();
     assert_eq!(
-        (last.old, last.new, last.forced),
-        (Some(main), Some(merged.commit), false)
+        (last.sender, last.old, last.new, last.forced),
+        (ALICE, Some(main), Some(merged.commit), false)
     );
 
     let again = fx.store.update(|tx| {
         Ok(fx
             .git
-            .merge(tx, REPO, "main", &feature.to_string(), "again")?)
+            .merge(tx, REPO, ALICE, "main", &feature.to_string(), "again")?)
     });
     assert_eq!(again.unwrap_err(), ApiError::from(GitError::NothingToMerge));
 }
@@ -816,11 +841,21 @@ fn merge_combines_new_files_in_the_same_directory() {
     fx.branch(REPO, "refs/heads/feature", base);
     fx.commit("main", &[write("dir/x", "x")], "x");
     fx.commit("feature", &[write("dir/y", "y")], "y");
+    let bob = 3;
 
-    fx.store
-        .update(|tx| Ok(fx.git.merge(tx, REPO, "main", "feature", "m")?))
+    let merged = fx
+        .store
+        .update(|tx| {
+            tx.table_mut::<Accounts>()
+                .insert(account(bob, "bob", AccountKind::User, None))?;
+            Ok(fx.git.merge(tx, REPO, bob, "main", "feature", "m")?)
+        })
         .unwrap();
 
+    assert_eq!(
+        fx.commit_object(REPO, merged.commit).author.email,
+        "3+bob@users.noreply.github.com"
+    );
     let names = fx
         .store
         .view(|tx| match fx.git.expression(tx, REPO, "main:dir")?.data {
@@ -848,12 +883,13 @@ fn merge_reports_a_conflict_and_changes_nothing() {
     );
     let main = fx.commit("main", &[write("b.txt", "changed\n")], "main again");
 
-    let result = fx
-        .store
-        .update(|tx| match fx.git.merge(tx, REPO, "main", "feature", "m") {
-            Err(GitError::Conflict { paths }) => Ok(paths),
-            other => Err(ApiError::internal(format!("{other:?}"))),
-        });
+    let result =
+        fx.store.update(
+            |tx| match fx.git.merge(tx, REPO, ALICE, "main", "feature", "m") {
+                Err(GitError::Conflict { paths }) => Ok(paths),
+                other => Err(ApiError::internal(format!("{other:?}"))),
+            },
+        );
 
     assert_eq!(result.unwrap(), ["a.txt", "b.txt"]);
     assert_eq!(fx.head(REPO, "main"), Ok(main));
@@ -875,7 +911,7 @@ fn log_follows_first_parents_or_committer_time() {
     let (base, main, feature) = divergent(&fx);
     let merged = fx
         .store
-        .update(|tx| Ok(fx.git.merge(tx, REPO, "main", "feature", "m")?))
+        .update(|tx| Ok(fx.git.merge(tx, REPO, ALICE, "main", "feature", "m")?))
         .unwrap()
         .commit;
 
@@ -907,9 +943,10 @@ fn web_flow_signatures_verify_against_the_published_key() {
     let signed = fx
         .store
         .update(|tx| {
-            Ok(fx.git.commit_with_message(
+            Ok(fx.git.commit(
                 tx,
                 REPO,
+                ALICE,
                 "main",
                 None,
                 &[write("a", "1")],
@@ -1088,6 +1125,7 @@ fn a_push_lists_only_the_new_commits_with_their_file_changes() {
     let c3 = fx.commit("main", &[delete("gone.txt")], "3");
     let change = RefChange {
         repo_id: REPO,
+        sender: ALICE,
         name: "refs/heads/main".to_owned(),
         old: Some(c1),
         new: Some(c3),
@@ -1098,8 +1136,15 @@ fn a_push_lists_only_the_new_commits_with_their_file_changes() {
 
     assert_eq!(sent.len(), 1);
     let (name, sender, _, push) = &sent[0];
-    assert_eq!((*name, *sender), ("push", ORG));
-    assert_eq!(push["pusher"], json!({"name": "octo-org", "email": null}));
+    assert_eq!((*name, *sender), ("push", ALICE));
+    assert_eq!(
+        push["pusher"],
+        json!({"name": "alice", "email": "alice@example.com"})
+    );
+    assert_eq!(
+        push["head_commit"]["author"]["email"],
+        "seed@hubdouble.invalid"
+    );
     assert_eq!(commit_ids(push), [c2.to_string(), c3.to_string()]);
     assert_eq!(push["commits"][0]["added"], json!(["new.txt"]));
     assert_eq!(push["commits"][0]["modified"], json!(["a.txt"]));

@@ -7,6 +7,7 @@ use hubdouble_git::{EntryMode, FileChange, Git, GitBuilder, ObjectId, Signature}
 use hubdouble_model::{Account, AccountKind, Repo, Timestamp, Visibility, node_id};
 use hubdouble_store::{Accounts, Repos, Store, StoreBuilder};
 
+const OWNER: i64 = 1;
 const REPO: i64 = 2;
 
 fn account() -> Account {
@@ -97,8 +98,8 @@ fn commit(store: &Store, git: &Git, branch: &str, changes: &[FileChange]) -> Obj
                 .resolve_ref(tx, REPO, &format!("refs/heads/{branch}"))
                 .ok();
             let me = Signature::seed();
-            Ok(git.commit_with_message(
-                tx, REPO, branch, parent, changes, "change", &me, &me, false,
+            Ok(git.commit(
+                tx, REPO, OWNER, branch, parent, changes, "change", &me, &me, false,
             )?)
         })
         .unwrap()
@@ -120,12 +121,11 @@ fn bench(c: &mut Criterion) {
         );
     });
 
-    store
-        .update(|tx| Ok(git.update_ref(tx, REPO, "refs/heads/left", None, Some(base), false)?))
-        .unwrap();
-    store
-        .update(|tx| Ok(git.update_ref(tx, REPO, "refs/heads/right", None, Some(base), false)?))
-        .unwrap();
+    for branch in ["refs/heads/left", "refs/heads/right"] {
+        store
+            .update(|tx| Ok(git.update_ref(tx, REPO, OWNER, branch, None, Some(base), false)?))
+            .unwrap();
+    }
     let (mut left, mut right) = (base, base);
     for i in 0..50 {
         left = commit(&store, &git, "left", &files(1000 + i, 3));
