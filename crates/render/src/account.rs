@@ -1,7 +1,7 @@
 use hubdouble_model as m;
 use serde::Serialize;
 
-use crate::Urls;
+use crate::{Urls, url};
 
 /// GitHub's `simple-user`, for users, bots and organizations as actors.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -35,10 +35,10 @@ pub struct SimpleUser {
 impl SimpleUser {
     #[must_use]
     pub fn new(urls: &Urls, a: &m::Account) -> SimpleUser {
-        let api = format!("{}/users/{}", urls.api, crate::escape(&a.login));
+        let api = url!("{}/users/{}", urls.api, crate::escaped(&a.login));
         let html_url = match (a.kind, a.login.strip_suffix("[bot]")) {
-            (m::AccountKind::Bot, Some(slug)) => format!("{}/apps/{slug}", urls.web),
-            _ => format!("{}/{}", urls.web, a.login),
+            (m::AccountKind::Bot, Some(slug)) => url!("{}/apps/{slug}", urls.web),
+            _ => url!("{}/{}", urls.web, a.login),
         };
         SimpleUser {
             name: None,
@@ -46,18 +46,18 @@ impl SimpleUser {
             login: a.login.clone(),
             id: a.id,
             node_id: a.node_id.clone(),
-            avatar_url: format!("{}/avatars/u/{}?v=4", urls.base, a.id),
+            avatar_url: url!("{}/avatars/u/{}?v=4", urls.base, a.id),
             gravatar_id: String::new(),
             html_url,
-            followers_url: format!("{api}/followers"),
-            following_url: format!("{api}/following{{/other_user}}"),
-            gists_url: format!("{api}/gists{{/gist_id}}"),
-            starred_url: format!("{api}/starred{{/owner}}{{/repo}}"),
-            subscriptions_url: format!("{api}/subscriptions"),
-            organizations_url: format!("{api}/orgs"),
-            repos_url: format!("{api}/repos"),
-            events_url: format!("{api}/events{{/privacy}}"),
-            received_events_url: format!("{api}/received_events"),
+            followers_url: url!("{api}/followers"),
+            following_url: url!("{api}/following{{/other_user}}"),
+            gists_url: url!("{api}/gists{{/gist_id}}"),
+            starred_url: url!("{api}/starred{{/owner}}{{/repo}}"),
+            subscriptions_url: url!("{api}/subscriptions"),
+            organizations_url: url!("{api}/orgs"),
+            repos_url: url!("{api}/repos"),
+            events_url: url!("{api}/events{{/privacy}}"),
+            received_events_url: url!("{api}/received_events"),
             url: api,
             kind: a.kind.as_str(),
             site_admin: a.site_admin,
@@ -86,18 +86,18 @@ pub struct OrganizationSimple {
 impl OrganizationSimple {
     #[must_use]
     pub fn new(urls: &Urls, org: &m::Account) -> OrganizationSimple {
-        let api = format!("{}/orgs/{}", urls.api, org.login);
+        let api = url!("{}/orgs/{}", urls.api, org.login);
         OrganizationSimple {
             login: org.login.clone(),
             id: org.id,
             node_id: org.node_id.clone(),
-            repos_url: format!("{api}/repos"),
-            events_url: format!("{api}/events"),
-            hooks_url: format!("{api}/hooks"),
-            issues_url: format!("{api}/issues"),
-            members_url: format!("{api}/members{{/member}}"),
-            public_members_url: format!("{api}/public_members{{/member}}"),
-            avatar_url: format!("{}/avatars/u/{}?v=4", urls.base, org.id),
+            repos_url: url!("{api}/repos"),
+            events_url: url!("{api}/events"),
+            hooks_url: url!("{api}/hooks"),
+            issues_url: url!("{api}/issues"),
+            members_url: url!("{api}/members{{/member}}"),
+            public_members_url: url!("{api}/public_members{{/member}}"),
+            avatar_url: url!("{}/avatars/u/{}?v=4", urls.base, org.id),
             description: org.description.clone(),
             url: api,
         }
@@ -127,12 +127,12 @@ pub struct TeamSimple {
 impl TeamSimple {
     #[must_use]
     pub fn new(urls: &Urls, t: &m::Team, org: &m::Account) -> TeamSimple {
-        let api = format!("{}/organizations/{}/team/{}", urls.api, t.org_id, t.id);
+        let api = url!("{}/organizations/{}/team/{}", urls.api, t.org_id, t.id);
         TeamSimple {
             id: t.id,
             node_id: t.node_id.clone(),
-            members_url: format!("{api}/members{{/member}}"),
-            repositories_url: format!("{api}/repos"),
+            members_url: url!("{api}/members{{/member}}"),
+            repositories_url: url!("{api}/repos"),
             url: api,
             name: t.name.clone(),
             description: t.description.clone(),
@@ -143,7 +143,7 @@ impl TeamSimple {
             } else {
                 "notifications_disabled"
             },
-            html_url: format!("{}/orgs/{}/teams/{}", urls.web, org.login, t.slug),
+            html_url: url!("{}/orgs/{}/teams/{}", urls.web, org.login, t.slug),
             slug: t.slug.clone(),
             kind: "organization",
             organization_id: t.org_id,
@@ -189,10 +189,10 @@ impl OrgMembership {
         user: &m::Account,
     ) -> OrgMembership {
         OrgMembership {
-            url: format!("{}/orgs/{}/memberships/{}", urls.api, org.login, user.login),
+            url: url!("{}/orgs/{}/memberships/{}", urls.api, org.login, user.login),
             state: ms.state.as_str(),
             role: ms.role.as_str(),
-            organization_url: format!("{}/orgs/{}", urls.api, org.login),
+            organization_url: url!("{}/orgs/{}", urls.api, org.login),
             organization: OrganizationSimple::new(urls, org),
             user: Some(SimpleUser::new(urls, user)),
         }
@@ -216,9 +216,12 @@ impl TeamMembership {
         user: &m::Account,
     ) -> TeamMembership {
         TeamMembership {
-            url: format!(
+            url: url!(
                 "{}/organizations/{}/team/{}/memberships/{}",
-                urls.api, t.org_id, t.id, user.login
+                urls.api,
+                t.org_id,
+                t.id,
+                user.login
             ),
             role: member.role.as_str(),
             state: "active",

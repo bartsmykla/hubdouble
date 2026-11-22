@@ -1,7 +1,7 @@
 use hubdouble_model as m;
 use serde::Serialize;
 
-use crate::{Integration, Repository, SimpleUser, TeamSimple, Urls, escape};
+use crate::{Integration, Repository, SimpleUser, TeamSimple, Urls, escaped, url};
 
 /// GitHub's `label`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -23,7 +23,7 @@ impl Label {
         Label {
             id: l.id,
             node_id: l.node_id.clone(),
-            url: format!("{}/repos/{full_name}/labels/{}", urls.api, escape(&l.name)),
+            url: url!("{}/repos/{full_name}/labels/{}", urls.api, escaped(&l.name)),
             name: l.name.clone(),
             description: l.description.clone(),
             color: l.color.clone(),
@@ -145,23 +145,23 @@ impl Issue {
         labels: Vec<Label>,
         assignees: Vec<SimpleUser>,
     ) -> Issue {
-        let api = format!("{}/repos/{full_name}/issues/{}", urls.api, i.number);
+        let api = url!("{}/repos/{full_name}/issues/{}", urls.api, i.number);
         let web_kind = if i.pull.is_some() { "pull" } else { "issues" };
         Issue {
             id: i.id,
             node_id: i.node_id.clone(),
-            repository_url: format!("{}/repos/{full_name}", urls.api),
-            labels_url: format!("{api}/labels{{/name}}"),
-            comments_url: format!("{api}/comments"),
-            events_url: format!("{api}/events"),
-            timeline_url: format!("{api}/timeline"),
-            reactions: ReactionRollup::new(format!("{api}/reactions"), []),
-            html_url: format!("{}/{full_name}/{web_kind}/{}", urls.web, i.number),
+            repository_url: url!("{}/repos/{full_name}", urls.api),
+            labels_url: url!("{api}/labels{{/name}}"),
+            comments_url: url!("{api}/comments"),
+            events_url: url!("{api}/events"),
+            timeline_url: url!("{api}/timeline"),
+            reactions: ReactionRollup::new(url!("{api}/reactions"), []),
+            html_url: url!("{}/{full_name}/{web_kind}/{}", urls.web, i.number),
             pull_request: i.pull.as_ref().map(|p| IssuePullLinks {
-                url: format!("{}/repos/{full_name}/pulls/{}", urls.api, i.number),
-                html_url: format!("{}/{full_name}/pull/{}", urls.web, i.number),
-                diff_url: format!("{}/{full_name}/pull/{}.diff", urls.web, i.number),
-                patch_url: format!("{}/{full_name}/pull/{}.patch", urls.web, i.number),
+                url: url!("{}/repos/{full_name}/pulls/{}", urls.api, i.number),
+                html_url: url!("{}/{full_name}/pull/{}", urls.web, i.number),
+                diff_url: url!("{}/{full_name}/pull/{}.diff", urls.web, i.number),
+                patch_url: url!("{}/{full_name}/pull/{}.patch", urls.web, i.number),
                 merged_at: p.merged_at,
             }),
             draft: i.pull.as_ref().map(|p| p.draft),
@@ -217,22 +217,23 @@ impl IssueComment {
         is_pull: bool,
         user: Option<SimpleUser>,
     ) -> IssueComment {
-        let api = format!("{}/repos/{full_name}/issues/comments/{}", urls.api, c.id);
+        let api = url!("{}/repos/{full_name}/issues/comments/{}", urls.api, c.id);
         let web_kind = if is_pull { "pull" } else { "issues" };
         IssueComment {
             id: c.id,
             node_id: c.node_id.clone(),
-            html_url: format!(
+            html_url: url!(
                 "{}/{full_name}/{web_kind}/{number}#issuecomment-{}",
-                urls.web, c.id
+                urls.web,
+                c.id
             ),
-            reactions: ReactionRollup::new(format!("{api}/reactions"), []),
+            reactions: ReactionRollup::new(url!("{api}/reactions"), []),
             url: api,
             body: c.body.clone(),
             user,
             created_at: c.created_at,
             updated_at: c.updated_at,
-            issue_url: format!("{}/repos/{full_name}/issues/{number}", urls.api),
+            issue_url: url!("{}/repos/{full_name}/issues/{number}", urls.api),
             author_association: "NONE",
             performed_via_github_app: None,
         }
@@ -289,7 +290,7 @@ impl PullBranch {
         repo: Option<Repository>,
     ) -> PullBranch {
         PullBranch {
-            label: format!("{}:{}", owner.login, r.ref_name),
+            label: url!("{}:{}", owner.login, r.ref_name),
             ref_name: r.ref_name.clone(),
             sha: r.sha.clone(),
             user: SimpleUser::new(urls, owner),
@@ -381,25 +382,25 @@ impl PullRequest {
         base: PullBranch,
     ) -> Option<PullRequest> {
         let p = issue.pull.as_ref()?;
-        let api = format!("{}/repos/{full_name}/pulls/{}", urls.api, issue.number);
-        let issue_api = format!("{}/repos/{full_name}/issues/{}", urls.api, issue.number);
-        let html = format!("{}/{full_name}/pull/{}", urls.web, issue.number);
-        let statuses = format!("{}/repos/{full_name}/statuses/{}", urls.api, p.head.sha);
-        let review_comment = format!("{}/repos/{full_name}/pulls/comments{{/number}}", urls.api);
+        let api = url!("{}/repos/{full_name}/pulls/{}", urls.api, issue.number);
+        let issue_api = url!("{}/repos/{full_name}/issues/{}", urls.api, issue.number);
+        let html = url!("{}/{full_name}/pull/{}", urls.web, issue.number);
+        let statuses = url!("{}/repos/{full_name}/statuses/{}", urls.api, p.head.sha);
+        let review_comment = url!("{}/repos/{full_name}/pulls/comments{{/number}}", urls.api);
         let href = |s: &str| Href { href: s.to_owned() };
         let links = PullLinks {
             self_link: href(&api),
             html: href(&html),
             issue: href(&issue_api),
             comments: Href {
-                href: format!("{issue_api}/comments"),
+                href: url!("{issue_api}/comments"),
             },
             review_comments: Href {
-                href: format!("{api}/comments"),
+                href: url!("{api}/comments"),
             },
             review_comment: href(&review_comment),
             commits: Href {
-                href: format!("{api}/commits"),
+                href: url!("{api}/commits"),
             },
             statuses: href(&statuses),
         };
@@ -407,13 +408,13 @@ impl PullRequest {
         Some(PullRequest {
             id: p.id,
             node_id: p.node_id.clone(),
-            diff_url: format!("{html}.diff"),
-            patch_url: format!("{html}.patch"),
+            diff_url: url!("{html}.diff"),
+            patch_url: url!("{html}.patch"),
             html_url: html,
-            commits_url: format!("{api}/commits"),
-            review_comments_url: format!("{api}/comments"),
+            commits_url: url!("{api}/commits"),
+            review_comments_url: url!("{api}/comments"),
             review_comment_url: review_comment,
-            comments_url: format!("{issue_api}/comments"),
+            comments_url: url!("{issue_api}/comments"),
             issue_url: issue_api,
             statuses_url: statuses,
             url: api,
@@ -520,11 +521,12 @@ impl Review {
         number: i64,
         user: Option<SimpleUser>,
     ) -> Review {
-        let html = format!(
+        let html = url!(
             "{}/{full_name}/pull/{number}#pullrequestreview-{}",
-            urls.web, r.id
+            urls.web,
+            r.id
         );
-        let pull = format!("{}/repos/{full_name}/pulls/{number}", urls.api);
+        let pull = url!("{}/repos/{full_name}/pulls/{number}", urls.api);
         Review {
             id: r.id,
             node_id: r.node_id.clone(),
@@ -600,12 +602,13 @@ impl ReviewComment {
         number: i64,
         user: Option<SimpleUser>,
     ) -> ReviewComment {
-        let api = format!("{}/repos/{full_name}/pulls/comments/{}", urls.api, c.id);
-        let html = format!(
+        let api = url!("{}/repos/{full_name}/pulls/comments/{}", urls.api, c.id);
+        let html = url!(
             "{}/{full_name}/pull/{number}#discussion_r{}",
-            urls.web, c.id
+            urls.web,
+            c.id
         );
-        let pull = format!("{}/repos/{full_name}/pulls/{number}", urls.api);
+        let pull = url!("{}/repos/{full_name}/pulls/{number}", urls.api);
         ReviewComment {
             pull_request_review_id: c.review_id,
             id: c.id,
@@ -626,7 +629,7 @@ impl ReviewComment {
                 html: Href { href: html.clone() },
                 pull_request: Href { href: pull.clone() },
             },
-            reactions: ReactionRollup::new(format!("{api}/reactions"), []),
+            reactions: ReactionRollup::new(url!("{api}/reactions"), []),
             url: api,
             html_url: html,
             pull_request_url: pull,

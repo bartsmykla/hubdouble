@@ -79,5 +79,23 @@ pub fn escape(segment: &str) -> String {
     utf8_percent_encode(segment, SEGMENT).to_string()
 }
 
+fn escaped(segment: &str) -> impl std::fmt::Display {
+    utf8_percent_encode(segment, SEGMENT)
+}
+
+fn sized(args: std::fmt::Arguments<'_>) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(128);
+    let _ = out.write_fmt(args);
+    out
+}
+
+macro_rules! url {
+    ($($arg:tt)*) => {
+        $crate::sized(format_args!($($arg)*))
+    };
+}
+use url;
+
 #[cfg(test)]
 mod tests;

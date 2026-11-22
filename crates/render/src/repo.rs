@@ -1,7 +1,7 @@
 use hubdouble_model as m;
 use serde::Serialize;
 
-use crate::{SimpleUser, Urls};
+use crate::{SimpleUser, Urls, url};
 
 /// The URL templates every repository shape carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -53,50 +53,50 @@ pub struct RepoUrls {
 impl RepoUrls {
     #[must_use]
     pub fn new(urls: &Urls, full_name: &str) -> RepoUrls {
-        let a = format!("{}/repos/{full_name}", urls.api);
+        let a = url!("{}/repos/{full_name}", urls.api);
         let host = urls.web_host();
         RepoUrls {
-            archive_url: format!("{a}/{{archive_format}}{{/ref}}"),
-            assignees_url: format!("{a}/assignees{{/user}}"),
-            blobs_url: format!("{a}/git/blobs{{/sha}}"),
-            branches_url: format!("{a}/branches{{/branch}}"),
-            collaborators_url: format!("{a}/collaborators{{/collaborator}}"),
-            comments_url: format!("{a}/comments{{/number}}"),
-            commits_url: format!("{a}/commits{{/sha}}"),
-            compare_url: format!("{a}/compare/{{base}}...{{head}}"),
-            contents_url: format!("{a}/contents/{{+path}}"),
-            contributors_url: format!("{a}/contributors"),
-            deployments_url: format!("{a}/deployments"),
-            downloads_url: format!("{a}/downloads"),
-            events_url: format!("{a}/events"),
-            forks_url: format!("{a}/forks"),
-            git_commits_url: format!("{a}/git/commits{{/sha}}"),
-            git_refs_url: format!("{a}/git/refs{{/sha}}"),
-            git_tags_url: format!("{a}/git/tags{{/sha}}"),
-            git_url: format!("git://{host}/{full_name}.git"),
-            issue_comment_url: format!("{a}/issues/comments{{/number}}"),
-            issue_events_url: format!("{a}/issues/events{{/number}}"),
-            issues_url: format!("{a}/issues{{/number}}"),
-            keys_url: format!("{a}/keys{{/key_id}}"),
-            labels_url: format!("{a}/labels{{/name}}"),
-            languages_url: format!("{a}/languages"),
-            merges_url: format!("{a}/merges"),
-            milestones_url: format!("{a}/milestones{{/number}}"),
-            notifications_url: format!("{a}/notifications{{?since,all,participating}}"),
-            pulls_url: format!("{a}/pulls{{/number}}"),
-            releases_url: format!("{a}/releases{{/id}}"),
-            ssh_url: format!("git@{host}:{full_name}.git"),
-            stargazers_url: format!("{a}/stargazers"),
-            statuses_url: format!("{a}/statuses/{{sha}}"),
-            subscribers_url: format!("{a}/subscribers"),
-            subscription_url: format!("{a}/subscription"),
-            tags_url: format!("{a}/tags"),
-            teams_url: format!("{a}/teams"),
-            trees_url: format!("{a}/git/trees{{/sha}}"),
-            clone_url: format!("{}/{full_name}.git", urls.web),
+            archive_url: url!("{a}/{{archive_format}}{{/ref}}"),
+            assignees_url: url!("{a}/assignees{{/user}}"),
+            blobs_url: url!("{a}/git/blobs{{/sha}}"),
+            branches_url: url!("{a}/branches{{/branch}}"),
+            collaborators_url: url!("{a}/collaborators{{/collaborator}}"),
+            comments_url: url!("{a}/comments{{/number}}"),
+            commits_url: url!("{a}/commits{{/sha}}"),
+            compare_url: url!("{a}/compare/{{base}}...{{head}}"),
+            contents_url: url!("{a}/contents/{{+path}}"),
+            contributors_url: url!("{a}/contributors"),
+            deployments_url: url!("{a}/deployments"),
+            downloads_url: url!("{a}/downloads"),
+            events_url: url!("{a}/events"),
+            forks_url: url!("{a}/forks"),
+            git_commits_url: url!("{a}/git/commits{{/sha}}"),
+            git_refs_url: url!("{a}/git/refs{{/sha}}"),
+            git_tags_url: url!("{a}/git/tags{{/sha}}"),
+            git_url: url!("git://{host}/{full_name}.git"),
+            issue_comment_url: url!("{a}/issues/comments{{/number}}"),
+            issue_events_url: url!("{a}/issues/events{{/number}}"),
+            issues_url: url!("{a}/issues{{/number}}"),
+            keys_url: url!("{a}/keys{{/key_id}}"),
+            labels_url: url!("{a}/labels{{/name}}"),
+            languages_url: url!("{a}/languages"),
+            merges_url: url!("{a}/merges"),
+            milestones_url: url!("{a}/milestones{{/number}}"),
+            notifications_url: url!("{a}/notifications{{?since,all,participating}}"),
+            pulls_url: url!("{a}/pulls{{/number}}"),
+            releases_url: url!("{a}/releases{{/id}}"),
+            ssh_url: url!("git@{host}:{full_name}.git"),
+            stargazers_url: url!("{a}/stargazers"),
+            statuses_url: url!("{a}/statuses/{{sha}}"),
+            subscribers_url: url!("{a}/subscribers"),
+            subscription_url: url!("{a}/subscription"),
+            tags_url: url!("{a}/tags"),
+            teams_url: url!("{a}/teams"),
+            trees_url: url!("{a}/git/trees{{/sha}}"),
+            clone_url: url!("{}/{full_name}.git", urls.web),
             mirror_url: None,
-            hooks_url: format!("{a}/hooks"),
-            svn_url: format!("{}/{full_name}", urls.web),
+            hooks_url: url!("{a}/hooks"),
+            svn_url: url!("{}/{full_name}", urls.web),
             url: a,
         }
     }
@@ -189,14 +189,14 @@ pub struct Repository {
 impl Repository {
     #[must_use]
     pub fn new(urls: &Urls, r: &m::Repo, owner: &m::Account) -> Repository {
-        let full_name = format!("{}/{}", owner.login, r.name);
+        let full_name = url!("{}/{}", owner.login, r.name);
         Repository {
             id: r.id,
             node_id: r.node_id.clone(),
             name: r.name.clone(),
             owner: SimpleUser::new(urls, owner),
             private: r.is_private(),
-            html_url: format!("{}/{full_name}", urls.web),
+            html_url: url!("{}/{full_name}", urls.web),
             description: r.description.clone(),
             fork: r.fork_of.is_some(),
             urls: RepoUrls::new(urls, &full_name),
