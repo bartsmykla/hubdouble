@@ -4,7 +4,8 @@ use bytes::Bytes;
 use hubdouble_model::{Access, AccountKind, App, Event, Installation, RepositorySelection};
 use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
 use hubdouble_store::{Accounts, Apps, Deliveries, Installations, OutboxEntry, Repos, Tx, TxMut};
-use serde::Serialize;
+use serde::ser::SerializeMap as _;
+use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
 use crate::HooksError;
@@ -127,37 +128,104 @@ pub(crate) fn recipients(tx: &Tx, e: &Event) -> Vec<(i64, Option<Arc<Installatio
         .collect()
 }
 
-fn insert_absent(p: &mut Map<String, Value>, key: &str, value: impl FnOnce() -> Option<Value>) {
-    if !p.contains_key(key)
-        && let Some(v) = value()
-    {
-        p.insert(key.to_owned(), v);
+enum Rendered {
+    Repository(Box<Repository>),
+    Organization(OrganizationSimple),
+    Sender(SimpleUser),
+}
+
+#[derive(Serialize)]
+struct InstallationRef<'a> {
+    id: i64,
+    node_id: &'a str,
+}
+
+enum Entry<'a> {
+    Value(&'a Value),
+    Rendered(&'a Rendered),
+    Installation(InstallationRef<'a>),
+}
+
+impl Serialize for Entry<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Entry::Value(v) => v.serialize(s),
+            Entry::Rendered(Rendered::Repository(r)) => r.serialize(s),
+            Entry::Rendered(Rendered::Organization(o)) => o.serialize(s),
+            Entry::Rendered(Rendered::Sender(u)) => u.serialize(s),
+            Entry::Installation(i) => i.serialize(s),
+        }
     }
 }
 
-fn to_value(v: &impl Serialize) -> Option<Value> {
-    serde_json::to_value(v).ok()
+struct Body<'a>(Vec<(&'a str, Entry<'a>)>);
+
+impl Serialize for Body<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(self.0.len()))?;
+        for (key, value) in &self.0 {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
 }
 
-fn base_payload(tx: &Tx, e: &Event, mut p: Map<String, Value>) -> Map<String, Value> {
+fn rendered(tx: &Tx, e: &Event, p: &Map<String, Value>) -> Vec<(&'static str, Rendered)> {
     let urls = payload_urls(tx);
     let accounts = tx.table::<Accounts>();
     let repo = e.repo_id.and_then(|id| tx.table::<Repos>().get(id));
-    insert_absent(&mut p, "action", || e.action.map(Value::from));
-    insert_absent(&mut p, "repository", || {
-        let r = repo?;
-        to_value(&Repository::new(&urls, r, accounts.get(r.owner_id)?))
-    });
-    insert_absent(&mut p, "organization", || {
-        let org = accounts.get(e.org_id.or(repo.map(|r| r.owner_id))?)?;
-        (org.kind == AccountKind::Organization)
-            .then(|| to_value(&OrganizationSimple::new(&urls, org)))
-            .flatten()
-    });
-    insert_absent(&mut p, "sender", || {
-        to_value(&SimpleUser::new(&urls, accounts.get(e.sender_id)?))
-    });
-    p
+    let absent = |key: &str| !p.contains_key(key);
+    let mut out = Vec::with_capacity(3);
+    if absent("repository")
+        && let Some(r) = repo
+        && let Some(owner) = accounts.get(r.owner_id)
+    {
+        out.push((
+            "repository",
+            Rendered::Repository(Box::new(Repository::new(&urls, r, owner))),
+        ));
+    }
+    if absent("organization")
+        && let Some(org) = e
+            .org_id
+            .or(repo.map(|r| r.owner_id))
+            .and_then(|id| accounts.get(id))
+        && org.kind == AccountKind::Organization
+    {
+        out.push((
+            "organization",
+            Rendered::Organization(OrganizationSimple::new(&urls, org)),
+        ));
+    }
+    if absent("sender")
+        && let Some(sender) = accounts.get(e.sender_id)
+    {
+        out.push(("sender", Rendered::Sender(SimpleUser::new(&urls, sender))));
+    }
+    out
+}
+
+fn payload_body(
+    p: &Map<String, Value>,
+    rendered: &[(&'static str, Rendered)],
+    installation: Option<&Installation>,
+) -> Bytes {
+    let mut entries: Vec<(&str, Entry<'_>)> = p
+        .iter()
+        .map(|(k, v)| (k.as_str(), Entry::Value(v)))
+        .chain(rendered.iter().map(|(k, r)| (*k, Entry::Rendered(r))))
+        .collect();
+    if let Some(i) = installation.filter(|_| !p.contains_key("installation")) {
+        entries.push((
+            "installation",
+            Entry::Installation(InstallationRef {
+                id: i.id,
+                node_id: &i.node_id,
+            }),
+        ));
+    }
+    entries.sort_unstable_by_key(|(k, _)| *k);
+    body(&Body(entries))
 }
 
 fn webhook_label(l: &mut Value) {
@@ -193,26 +261,19 @@ pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
     }
     let mut payload = std::mem::take(&mut e.payload);
     webhook_form(&mut payload);
-    let mut payload = base_payload(tx, &e, payload);
-    let mut recipients = recipients.into_iter().peekable();
-    while let Some((app_id, installation)) = recipients.next() {
-        let mut p = if recipients.peek().is_some() {
-            payload.clone()
-        } else {
-            std::mem::take(&mut payload)
-        };
-        insert_absent(&mut p, "installation", || {
-            installation
-                .as_ref()
-                .map(|i| json!({ "id": i.id, "node_id": i.node_id }))
-        });
+    if let Some(action) = e.action.filter(|_| !payload.contains_key("action")) {
+        payload.insert("action".to_owned(), Value::from(action));
+    }
+    let rendered = rendered(tx, &e, &payload);
+    for (app_id, installation) in recipients {
+        let body = payload_body(&payload, &rendered, installation.as_deref());
         tx.push_outbox(OutboxEntry {
             app_id,
             installation_id: installation.map(|i| i.id),
             repo_id: e.repo_id,
             event: e.name,
             action: e.action,
-            payload: body(&Value::Object(p)),
+            payload: body,
             redelivery_of: None,
         });
     }
@@ -259,7 +320,7 @@ pub(crate) fn ping(tx: &mut TxMut<'_>, app_id: i64) {
     });
 }
 
-fn body(payload: &Value) -> Bytes {
+fn body(payload: &impl Serialize) -> Bytes {
     Bytes::copy_from_slice(&serde_json::to_vec(payload).unwrap_or_default())
 }
 
