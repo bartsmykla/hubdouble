@@ -212,6 +212,9 @@ pub(crate) fn tree_of(
     if let ObjectData::Tree(entries) = object.data {
         return Ok((object.id, entries));
     }
+    if rev.contains(':') {
+        return Err(GitError::WrongKind);
+    }
     let root = git.expression(tx, repo, &format!("{rev}:"))?;
     match root.data {
         ObjectData::Tree(entries) => Ok((root.id, entries)),
@@ -221,8 +224,12 @@ pub(crate) fn tree_of(
 
 pub(crate) fn get_tree(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let rev = ctx.param("tree_sha")?;
-    let (id, entries) =
-        tree_of(ctx.git(), ctx.tx(), ctx.repo()?.id, rev).map_err(|_| ApiError::not_found())?;
+    let (id, entries) = tree_of(ctx.git(), ctx.tx(), ctx.repo()?.id, rev).map_err(|e| match e {
+        GitError::WrongKind => ApiError::unprocessable(
+            "Invalid object requested. SHA must identify a commit or a tree.",
+        ),
+        _ => ApiError::not_found(),
+    })?;
     let recursive = ctx.query().get("recursive").is_some();
     Reply::json(&render_tree(ctx, id, &entries, recursive)?)
 }

@@ -11,7 +11,7 @@ pub use ops_gen::{NODES, OPERATIONS};
 pub const GRAPHQL_SCHEMA: &str = include_str!("../../../spec/graphql/schema.docs.graphql");
 
 /// The path parameters GitHub allows to hold `/`; each matches one or more segments.
-pub const SLASH_PARAMS: [&str; 5] = ["ref", "path", "branch", "basehead", "tag"];
+pub const SLASH_PARAMS: [&str; 6] = ["ref", "path", "branch", "basehead", "tag", "tree_sha"];
 
 /// The `rest`/`param` value of a [`Node`] without that child.
 pub const NONE: u32 = u32::MAX;

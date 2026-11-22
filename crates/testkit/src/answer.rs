@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::validate::{OPENAPI, openapi_schema, resolve};
 
-const MANY: [&str; 5] = ["ref", "path", "branch", "basehead", "tag"];
+const MANY: [&str; 6] = ["ref", "path", "branch", "basehead", "tag", "tree_sha"];
 
 const PROSE_STATUSES: [u16; 7] = [304, 400, 401, 403, 404, 422, 429];
 

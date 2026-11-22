@@ -309,6 +309,41 @@ async fn a_tree_on_a_base_adds_nested_paths_and_deletes_null_shas() {
 }
 
 #[tokio::test]
+async fn a_tree_ish_with_a_path_answers_the_subtree_at_that_path() {
+    // Given
+    let s = server().await;
+    let client = alice(&s);
+    let commit = head(&s, "refs/heads/feature");
+    let root = at(&s, "feature:").id;
+    let src = at(&s, "feature:src").id;
+    let blob = at(&s, "feature:src/feature.txt").id;
+    // When
+    let from_commit = client
+        .get(&format!("repos/acme/public/git/trees/{commit}:src"))
+        .await;
+    let from_tree = client
+        .get(&format!("repos/acme/public/git/trees/{root}:src/"))
+        .await;
+    let to_blob = client
+        .get("repos/acme/public/git/trees/feature:src/feature.txt")
+        .await;
+    let a_blob = client
+        .get(&format!("repos/acme/public/git/trees/{blob}"))
+        .await;
+    let missing = client.get("repos/acme/public/git/trees/feature:nope").await;
+    // Then
+    for answer in [&from_commit, &from_tree] {
+        assert_eq!(answer.status, StatusCode::OK);
+        let body = valid("git/get-tree", answer);
+        assert_eq!(body["sha"], src.to_string());
+        assert_eq!(body["tree"][0]["path"], "feature.txt");
+    }
+    assert_eq!(to_blob.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(a_blob.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn a_commit_and_a_ref_made_through_the_git_data_api_read_back() {
     // Given
     let s = server().await;

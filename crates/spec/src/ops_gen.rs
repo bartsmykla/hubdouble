@@ -1967,7 +1967,7 @@ pub static NODES: [Node; 1017] = [
     Node { literals: &[], param: NONE, rest: NONE, ops: &[(Method::Patch, 833), (Method::Delete, 834)] },
     Node { literals: &[], param: 679, rest: NONE, ops: &[(Method::Post, 835)] },
     Node { literals: &[], param: NONE, rest: NONE, ops: &[(Method::Get, 836)] },
-    Node { literals: &[], param: 681, rest: NONE, ops: &[(Method::Post, 837)] },
+    Node { literals: &[], param: NONE, rest: 681, ops: &[(Method::Post, 837)] },
     Node { literals: &[], param: NONE, rest: NONE, ops: &[(Method::Get, 838)] },
     Node { literals: &[], param: NONE, rest: NONE, ops: &[(Method::Get, 839)] },
     Node { literals: &[], param: 684, rest: NONE, ops: &[(Method::Get, 840), (Method::Post, 841)] },

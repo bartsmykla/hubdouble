@@ -568,11 +568,13 @@ impl Git {
     }
 
     /// Resolves `main:docs/a.md`, `HEAD:`, a ref or an object ID. A ref or ID alone answers the
-    /// object itself (an annotated tag stays a tag); with `:` it peels to the commit's tree.
+    /// object itself (an annotated tag stays a tag); with `:` it reads the path from that tree,
+    /// or from the tree of the commit it peels to.
     ///
     /// # Errors
     ///
-    /// [`GitError::NotFound`] when the expression names nothing.
+    /// [`GitError::NotFound`] when the expression names nothing, [`GitError::WrongKind`] when the
+    /// part before `:` is neither a tree nor peels to a commit.
     pub fn expression(&self, tx: &Tx, repo: i64, expr: &str) -> Result<Object, GitError> {
         let odb = self.odb(tx, repo);
         let Some((rev, path)) = expr.split_once(':') else {
@@ -582,8 +584,12 @@ impl Git {
                 data: odb.get(id)?,
             });
         };
-        let (_, commit) = odb.peel_commit(self.rev(tx, repo, &odb, rev)?)?;
-        let id = tree::lookup(&odb, commit.tree, path)?;
+        let base = self.rev(tx, repo, &odb, rev)?;
+        let root = match odb.get(base)? {
+            ObjectData::Tree(_) => base,
+            _ => odb.peel_commit(base)?.1.tree,
+        };
+        let id = tree::lookup(&odb, root, path)?;
         Ok(Object {
             id,
             data: odb.get(id)?,

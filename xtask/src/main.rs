@@ -9,7 +9,7 @@ mod smoke_kind;
 
 const BUNDLE: &str = "spec/openapi/api.github.com.json";
 const OUTPUT: &str = "crates/spec/src/ops_gen.rs";
-const SLASH_PARAMS: [&str; 5] = ["ref", "path", "branch", "basehead", "tag"];
+const SLASH_PARAMS: [&str; 6] = ["ref", "path", "branch", "basehead", "tag", "tree_sha"];
 const METHODS: [(&str, &str); 5] = [
     ("get", "Get"),
     ("post", "Post"),
