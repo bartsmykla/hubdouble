@@ -7,6 +7,9 @@ mod ops_gen;
 
 pub use ops_gen::{NODES, OPERATIONS};
 
+/// GitHub's pinned public GraphQL schema, `schema.docs.graphql`.
+pub const GRAPHQL_SCHEMA: &str = include_str!("../../../spec/graphql/schema.docs.graphql");
+
 /// The path parameters GitHub allows to hold `/`; each matches one or more segments.
 pub const SLASH_PARAMS: [&str; 5] = ["ref", "path", "branch", "basehead", "tag"];
 

@@ -17,6 +17,12 @@ pub enum ErrorType {
     Unprocessable,
     Internal,
     NotImplemented,
+    /// A connection without `first` or `last`.
+    MissingPaginationBoundaries,
+    /// A connection with `first` or `last` above 100.
+    ExcessivePagination,
+    /// A document or variable error; GitHub sends these without a `type`.
+    Validation,
 }
 
 impl ErrorType {
@@ -28,7 +34,15 @@ impl ErrorType {
             ErrorType::Unprocessable => "UNPROCESSABLE",
             ErrorType::Internal => "INTERNAL",
             ErrorType::NotImplemented => "HUBDOUBLE_NOT_IMPLEMENTED",
+            ErrorType::MissingPaginationBoundaries => "MISSING_PAGINATION_BOUNDARIES",
+            ErrorType::ExcessivePagination => "EXCESSIVE_PAGINATION",
+            ErrorType::Validation => "VALIDATION",
         }
+    }
+
+    #[must_use]
+    pub fn is_validation(&self) -> bool {
+        *self == ErrorType::Validation
     }
 }
 
@@ -260,7 +274,7 @@ pub struct Request<'a> {
 /// One error of a [`Response`], with GitHub's `type`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResponseError {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", skip_serializing_if = "ErrorType::is_validation")]
     pub kind: ErrorType,
     pub message: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
