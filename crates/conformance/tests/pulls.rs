@@ -4,7 +4,9 @@ use http::{Method, StatusCode};
 use hubdouble_admin::Registrar;
 use hubdouble_git::{CommitNode, EntryMode, FileChange, RefNode, Signature};
 use hubdouble_gql::{Args, Ctx, ErrorType, GqlError, Obj, Resolved};
-use hubdouble_model::{ApiError, Clock, Repo, Review, ReviewState, Token, TokenKind, node_id};
+use hubdouble_model::{
+    Access, ApiError, Clock, Repo, Review, ReviewState, Token, TokenKind, node_id,
+};
 use hubdouble_store::{Issues, Reviews, Tokens};
 use hubdouble_testkit::{
     Answer, Builder, GoGithub, Graphql, TestServer, fixture, standins, validate,
@@ -14,6 +16,7 @@ use serde_json::{Value, json};
 const PULLS: &str = "repos/acme/public/pulls";
 const NUM: &str = "repos/acme/public/pulls/1";
 const INSTALLATION_TOKEN: &str = "ghs_fixture_pulls_without_a_grant";
+const CONTENTS_TOKEN: &str = "ghs_fixture_pulls_with_contents";
 const READY: &str = include_str!("../../../docs/inventory/graphql/ready.graphql");
 const PULL_OF_NODE: &str = include_str!("../../../docs/inventory/graphql/pullOfNode.graphql");
 
@@ -169,22 +172,33 @@ async fn access_checks_precede_all_pull_handlers() {
     let store = &server.server.services().store;
     store
         .update(|tx| {
-            let id = tx.next_id();
-            tx.table_mut::<Tokens>().insert(Token {
-                id,
-                token: INSTALLATION_TOKEN.into(),
-                kind: TokenKind::Installation,
-                app_id: Some(fixture::APP_ID),
-                installation_id: Some(fixture::INSTALLATION_ID),
-                user_id: None,
-                repo_ids: Some(vec![fixture::PUBLIC_REPO_ID]),
-                permissions: BTreeMap::new(),
-                scopes: vec![],
-                expires_at: None,
-                revoked: false,
-                owner_seeded: false,
-                created_at: server.clock.now(),
-            })?;
+            for (token, permissions) in [
+                (
+                    INSTALLATION_TOKEN,
+                    BTreeMap::from([("metadata".into(), Access::Read)]),
+                ),
+                (
+                    CONTENTS_TOKEN,
+                    BTreeMap::from([("contents".into(), Access::Read)]),
+                ),
+            ] {
+                let id = tx.next_id();
+                tx.table_mut::<Tokens>().insert(Token {
+                    id,
+                    token: token.into(),
+                    kind: TokenKind::Installation,
+                    app_id: Some(fixture::APP_ID),
+                    installation_id: Some(fixture::INSTALLATION_ID),
+                    user_id: None,
+                    repo_ids: Some(vec![fixture::PUBLIC_REPO_ID]),
+                    permissions,
+                    scopes: vec![],
+                    expires_at: None,
+                    revoked: false,
+                    owner_seeded: false,
+                    created_at: server.clock.now(),
+                })?;
+            }
             Ok(())
         })
         .unwrap();
@@ -192,7 +206,7 @@ async fn access_checks_precede_all_pull_handlers() {
     for (method, path, grant) in [
         (Method::GET, "pulls", "pull_requests=read"),
         (Method::POST, "pulls", "pull_requests=write"),
-        (Method::GET, "pulls/1", "pull_requests=read"),
+        (Method::GET, "pulls/1", "pull_requests=read; contents=read"),
         (Method::PATCH, "pulls/1", "pull_requests=write"),
         (Method::GET, "pulls/1/files", "pull_requests=read"),
         (Method::GET, "pulls/1/commits", "pull_requests=read"),
@@ -209,6 +223,10 @@ async fn access_checks_precede_all_pull_handlers() {
         assert_eq!(denied.header("x-accepted-github-permissions"), grant);
         assert_eq!(hidden.status, StatusCode::NOT_FOUND, "{path}");
     }
+    let contents = GoGithub::new(&server).with_token(CONTENTS_TOKEN);
+    let answer = get(&contents, NUM, "pulls/get").await;
+    assert_eq!(answer["number"], 1);
+    assert_eq!(contents.get(PULLS).await.status, StatusCode::FORBIDDEN);
 }
 
 async fn hooks(server: &TestServer, actions: &[&str]) -> Vec<Value> {

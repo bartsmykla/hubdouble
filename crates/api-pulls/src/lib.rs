@@ -17,6 +17,7 @@ const fn repo_requirement(grants: &'static [Grant]) -> Requirement {
 }
 
 const READ: Requirement = repo_requirement(&[Grant::read("pull_requests")]);
+const GET: Requirement = repo_requirement(&[Grant::read("pull_requests"), Grant::read("contents")]);
 const WRITE: Requirement = repo_requirement(&[Grant::write("pull_requests")]);
 const CONTENTS_WRITE: Requirement = repo_requirement(&[Grant::write("contents")]);
 
@@ -24,7 +25,7 @@ pub fn register(r: &mut Registrar<'_>) {
     r.store.register_table::<state::PullHeads>();
     r.rest.handle("pulls/list", READ, read::list);
     r.rest.handle("pulls/create", WRITE, change::create);
-    r.rest.handle("pulls/get", READ, read::get);
+    r.rest.handle("pulls/get", GET, read::get);
     r.rest.handle("pulls/update", WRITE, change::update);
     r.rest.handle("pulls/list-files", READ, read::files);
     r.rest.handle("pulls/list-commits", READ, read::commits);
