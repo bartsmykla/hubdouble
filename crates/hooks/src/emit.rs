@@ -238,9 +238,7 @@ pub(crate) fn ping(tx: &mut TxMut<'_>, app_id: i64) {
 }
 
 fn body(payload: &Value) -> Bytes {
-    let mut out = serde_json::to_vec(payload).unwrap_or_default();
-    out.shrink_to_fit();
-    Bytes::from(out)
+    Bytes::copy_from_slice(&serde_json::to_vec(payload).unwrap_or_default())
 }
 
 pub(crate) fn redeliver(

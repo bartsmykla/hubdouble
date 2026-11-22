@@ -111,7 +111,7 @@ pub enum Notice<'a> {
 pub const RESPONSE_BYTES: usize = 4 * 1024;
 
 /// The default of [`Options::log_bytes`].
-pub const LOG_BYTES: usize = 16 * 1024 * 1024;
+pub const LOG_BYTES: usize = 8 * 1024 * 1024;
 
 impl Default for Options {
     fn default() -> Options {
