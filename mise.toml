@@ -1,0 +1,9 @@
+[settings]
+lockfile = false
+
+[task_config]
+includes = ["tasks.toml"]
+
+[tools]
+cargo-deny = "0.22.0"
+cargo-nextest = "0.9.152"

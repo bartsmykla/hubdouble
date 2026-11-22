@@ -1,0 +1,34 @@
+[fmt]
+description = "Format every crate"
+run = "cargo fmt --all"
+
+[lint]
+description = "Check formatting, Clippy with warnings as errors, and cargo-deny"
+run = [
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --all-targets --locked -- -D warnings",
+  "cargo deny --locked check",
+]
+
+[test]
+description = "Run every test with nextest, then the doc tests"
+run = [
+  "cargo nextest run --workspace --locked --no-tests=pass",
+  "cargo test --workspace --locked --doc",
+]
+
+[check]
+description = "Everything CI checks: lint, tests and doc tests"
+depends = ["lint", "test"]
+
+[build]
+description = "Build the release binary"
+run = "cargo build --release --locked -p hubdouble"
+
+[bench]
+description = "Run the criterion benchmarks"
+run = "cargo bench --workspace --locked"
+
+[gen]
+description = "Generate crates/spec/src/ops_gen.rs from the pinned OpenAPI bundle"
+run = "cargo run --locked -p xtask -- gen"
