@@ -22,6 +22,7 @@ const METADATA: Requirement = Requirement {
 };
 
 const TEAM_REPOSITORY: Requirement = Requirement {
+    any_of: MEMBERS.any_of,
     scopes: &[],
     ..METADATA
 };
