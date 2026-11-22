@@ -1,6 +1,8 @@
 mod contract;
+mod exec;
 #[cfg(test)]
 mod inventory;
+mod load;
 mod schema;
 mod validate;
 

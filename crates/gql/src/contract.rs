@@ -1,13 +1,16 @@
-use std::any::Any;
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use hubdouble_auth::Actor;
+use hubdouble_auth::{Actor, Target as AuthTarget};
 use hubdouble_git::Git;
-use hubdouble_model::{ApiError, Clock};
+use hubdouble_model::{ApiError, Clock, Repo, Requirement};
 use hubdouble_render::Urls;
 use hubdouble_store::{Store, Tx, TxMut};
 use serde::de::DeserializeOwned;
 use serde::{Serialize, Serializer};
+
+use crate::schema::Schema;
 
 /// GitHub's GraphQL error `type`s, plus hubdouble's own for an unimplemented field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -143,17 +146,19 @@ pub struct Ctx<'a> {
     pub actor: &'a Actor,
     pub clock: &'a dyn Clock,
     pub urls: &'a Urls,
+    pub registry: &'a Registry,
 }
 
 impl Ctx<'_> {
     /// The repository, org or node behind `t`, after the actor's grant check.
+    /// A node ID resolves through the loader [`Registry::node`] registered for its prefix; a
+    /// legacy ID through the loader of its type name.
     ///
     /// # Errors
     ///
     /// `NOT_FOUND` for an object the actor cannot see or that does not exist.
     pub fn load(&self, t: Target<'_>) -> Result<Resolved, GqlError> {
-        let _ = t;
-        Err(GqlError::new(ErrorType::NotImplemented, "gql/load"))
+        crate::load::load(self, t)
     }
 }
 
@@ -164,17 +169,54 @@ pub struct MutCtx<'a> {
     pub actor: &'a Actor,
     pub clock: &'a dyn Clock,
     pub urls: &'a Urls,
+    pub registry: &'a Registry,
 }
 
 impl MutCtx<'_> {
+    /// A query view of the mutation's transaction, which sees the mutation's own writes.
+    #[must_use]
+    pub fn ctx(&self) -> Ctx<'_> {
+        Ctx {
+            tx: &self.tx,
+            git: self.git,
+            actor: self.actor,
+            clock: self.clock,
+            urls: self.urls,
+            registry: self.registry,
+        }
+    }
+
     /// As [`Ctx::load`], inside the mutation's transaction.
     ///
     /// # Errors
     ///
     /// `NOT_FOUND` for an object the actor cannot see or that does not exist.
     pub fn load(&self, t: Target<'_>) -> Result<Resolved, GqlError> {
-        let _ = t;
-        Err(GqlError::new(ErrorType::NotImplemented, "gql/load"))
+        self.ctx().load(t)
+    }
+
+    /// Checks `req` against the actor's grant on `repo` through the authorization choke point,
+    /// before the mutation changes anything.
+    ///
+    /// # Errors
+    ///
+    /// `NOT_FOUND` for a repository the actor cannot see, `FORBIDDEN` for a missing permission.
+    pub fn authorize(&self, req: &Requirement, repo: &Arc<Repo>) -> Result<(), GqlError> {
+        hubdouble_auth::authorize(&self.tx, self.actor, req, AuthTarget::Repo(repo))
+            .map_err(GqlError::from)
+    }
+}
+
+impl From<ApiError> for GqlError {
+    fn from(e: ApiError) -> GqlError {
+        let kind = match e.status {
+            404 => ErrorType::NotFound,
+            401 | 403 => ErrorType::Forbidden,
+            422 | 409 => ErrorType::Unprocessable,
+            501 => ErrorType::NotImplemented,
+            _ => ErrorType::Internal,
+        };
+        GqlError::new(kind, e.message)
     }
 }
 
@@ -182,41 +224,147 @@ pub type Resolver = fn(&Ctx<'_>, &Obj, &Args) -> Result<Resolved, GqlError>;
 pub type MutationResolver = fn(&mut MutCtx<'_>, &Args) -> Result<Resolved, GqlError>;
 pub type NodeLoader = fn(&Ctx<'_>, i64) -> Result<Resolved, GqlError>;
 
+pub(crate) struct ObjectType {
+    pub(crate) type_id: TypeId,
+    pub(crate) rust_name: &'static str,
+    pub(crate) serialize: fn(&(dyn Any + Send + Sync)) -> Option<serde_json::Value>,
+}
+
+pub(crate) struct NodeType {
+    pub(crate) prefix: &'static str,
+    pub(crate) type_name: &'static str,
+    pub(crate) load: NodeLoader,
+}
+
 /// The resolvers of every GraphQL type, field, mutation and node prefix; frozen at start.
-#[derive(Default)]
 pub struct Registry {
-    _frozen: (),
+    pub(crate) schema: Arc<Schema>,
+    pub(crate) objects: HashMap<&'static str, ObjectType>,
+    pub(crate) fields: HashMap<String, HashMap<String, Resolver>>,
+    pub(crate) mutations: HashMap<String, MutationResolver>,
+    pub(crate) nodes: Vec<NodeType>,
+    pub(crate) root: Arc<dyn Any + Send + Sync>,
+}
+
+impl Default for Registry {
+    fn default() -> Registry {
+        Registry::new()
+    }
+}
+
+fn serialize_as<T: Serialize + 'static>(v: &(dyn Any + Send + Sync)) -> Option<serde_json::Value> {
+    serde_json::to_value(v.downcast_ref::<T>()?).ok()
 }
 
 impl Registry {
+    /// A registry on GitHub's pinned schema, parsed here.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the embedded schema does not load, which a test of this crate rules out.
     #[must_use]
     pub fn new() -> Registry {
-        Registry::default()
+        match Schema::load() {
+            Ok(schema) => Registry::with_schema(Arc::new(schema)),
+            Err(e) => panic!("the embedded GraphQL schema does not load: {e}"),
+        }
+    }
+
+    /// A registry on an already parsed schema, so tests can share one parse.
+    #[must_use]
+    pub fn with_schema(schema: Arc<Schema>) -> Registry {
+        Registry {
+            schema,
+            objects: HashMap::new(),
+            fields: HashMap::new(),
+            mutations: HashMap::new(),
+            nodes: Vec::new(),
+            root: Arc::new(()),
+        }
+    }
+
+    #[must_use]
+    pub fn schema(&self) -> &Arc<Schema> {
+        &self.schema
     }
 
     /// Declares the Rust value behind `type_name`; only the type's owner calls it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `type_name` is not an object type of the schema or is already declared.
     pub fn object<T: Serialize + Send + Sync + 'static>(&mut self, type_name: &'static str) {
-        let _ = type_name;
-        todo!("P0-B: gql::Registry::object")
+        assert!(
+            self.schema.is_object(type_name),
+            "{type_name} is not an object type of the schema"
+        );
+        let previous = self.objects.insert(
+            type_name,
+            ObjectType {
+                type_id: TypeId::of::<T>(),
+                rust_name: std::any::type_name::<T>(),
+                serialize: serialize_as::<T>,
+            },
+        );
+        assert!(previous.is_none(), "{type_name} is declared twice");
     }
 
     /// # Panics
     ///
-    /// Panics on a second registration of the same field.
+    /// Panics on a second registration of the same field, and on a field the schema does not
+    /// define on the object type. `Query.node` and `Query.nodes` are this crate's.
     pub fn field(&mut self, type_name: &str, field_name: &str, r: Resolver) {
-        let _ = (type_name, field_name, r);
-        todo!("P0-B: gql::Registry::field")
+        assert!(
+            self.schema.is_object(type_name)
+                && self.schema.inner.type_field(type_name, field_name).is_ok(),
+            "{type_name}.{field_name} is not a field of an object type of the schema"
+        );
+        let builtin = type_name == "Query" && matches!(field_name, "node" | "nodes");
+        let previous = self
+            .fields
+            .entry(type_name.to_owned())
+            .or_default()
+            .insert(field_name.to_owned(), r);
+        assert!(
+            previous.is_none() && !builtin,
+            "{type_name}.{field_name} is registered twice"
+        );
     }
 
+    /// # Panics
+    ///
+    /// Panics on a second registration, and on a name that is not a mutation of the schema.
     pub fn mutation(&mut self, name: &str, r: MutationResolver) {
-        let _ = (name, r);
-        todo!("P0-B: gql::Registry::mutation")
+        assert!(
+            self.schema.inner.type_field("Mutation", name).is_ok(),
+            "{name} is not a mutation of the schema"
+        );
+        let previous = self.mutations.insert(name.to_owned(), r);
+        assert!(previous.is_none(), "mutation {name} is registered twice");
     }
 
     /// Loads the objects whose node IDs carry `prefix`, for `node` and `nodes`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `prefix` or `type_name` already has a loader.
     pub fn node(&mut self, prefix: &'static str, type_name: &'static str, load: NodeLoader) {
-        let _ = (prefix, type_name, load);
-        todo!("P0-B: gql::Registry::node")
+        assert!(
+            !self
+                .nodes
+                .iter()
+                .any(|n| n.prefix == prefix || n.type_name == type_name),
+            "node prefix {prefix} or type {type_name} is registered twice"
+        );
+        self.nodes.push(NodeType {
+            prefix,
+            type_name,
+            load,
+        });
+    }
+
+    pub(crate) fn resolver(&self, type_name: &str, field_name: &str) -> Option<Resolver> {
+        self.fields.get(type_name)?.get(field_name).copied()
     }
 }
 
@@ -258,8 +406,91 @@ pub fn connection<T>(
     cursor: impl Fn(&T) -> String,
     node: impl Fn(&T) -> Resolved,
 ) -> Result<Resolved, GqlError> {
-    let _ = (type_name, items, args, cursor, node);
-    Err(GqlError::new(ErrorType::NotImplemented, "gql/connection"))
+    let first = page_size(args, "first")?;
+    let last = page_size(args, "last")?;
+    if first.is_none() && last.is_none() {
+        return Err(GqlError::new(
+            ErrorType::MissingPaginationBoundaries,
+            "You must provide a `first` or `last` value to properly paginate the connection.",
+        ));
+    }
+    let mut start = 0;
+    let mut end = items.len();
+    if let Some(after) = args.get::<String>("after")? {
+        start = position(items, &cursor, &after, "after")? + 1;
+    }
+    if let Some(before) = args.get::<String>("before")? {
+        end = position(items, &cursor, &before, "before")?;
+    }
+    end = end.max(start);
+    if let Some(first) = first {
+        end = end.min(start + first);
+    }
+    if let Some(last) = last {
+        start = start.max(end.saturating_sub(last));
+    }
+    let edges: Vec<Edge> = items[start..end]
+        .iter()
+        .map(|item| Edge {
+            cursor: cursor(item),
+            node: node(item),
+        })
+        .collect();
+    let page_info = PageInfo {
+        has_next_page: end < items.len(),
+        has_previous_page: start > 0,
+        start_cursor: edges.first().map(|e| e.cursor.clone()),
+        end_cursor: edges.last().map(|e| e.cursor.clone()),
+    };
+    Ok(Resolved::Object {
+        type_name,
+        value: Arc::new(Conn {
+            type_name,
+            edges,
+            page_info,
+            total_count: items.len(),
+        }),
+    })
+}
+
+const MAX_PAGE: usize = 100;
+
+fn page_size(args: &Args, name: &str) -> Result<Option<usize>, GqlError> {
+    let Some(n) = args.get::<i64>(name)? else {
+        return Ok(None);
+    };
+    let n = usize::try_from(n).map_err(|_| {
+        GqlError::new(
+            ErrorType::Unprocessable,
+            format!("`{name}` must be a non-negative number."),
+        )
+    })?;
+    if n > MAX_PAGE {
+        return Err(GqlError::new(
+            ErrorType::ExcessivePagination,
+            format!(
+                "Requesting {n} records on the connection exceeds the `{name}` limit of {MAX_PAGE} records."
+            ),
+        ));
+    }
+    Ok(Some(n))
+}
+
+fn position<T>(
+    items: &[T],
+    cursor: &impl Fn(&T) -> String,
+    wanted: &str,
+    name: &str,
+) -> Result<usize, GqlError> {
+    items
+        .iter()
+        .position(|i| cursor(i) == wanted)
+        .ok_or_else(|| {
+            GqlError::new(
+                ErrorType::Unprocessable,
+                format!("`{name}` does not appear to be a valid cursor."),
+            )
+        })
 }
 
 /// One GraphQL request, as the server decoded it.
@@ -298,6 +529,10 @@ pub struct Response {
 /// # Errors
 ///
 /// An [`ApiError`] only for a request the executor cannot run at all.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the frozen contract takes the request by value"
+)]
 pub fn execute(
     registry: &Registry,
     store: &Store,
@@ -305,6 +540,5 @@ pub fn execute(
     actor: &Actor,
     request: Request<'_>,
 ) -> Result<Response, ApiError> {
-    let _ = (registry, store, git, actor, request);
-    Err(ApiError::not_implemented("graphql"))
+    crate::exec::execute(registry, store, git, actor, &request)
 }

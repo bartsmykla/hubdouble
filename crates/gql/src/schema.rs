@@ -1,3 +1,4 @@
+use apollo_compiler::executable::{Selection, SelectionSet};
 use apollo_compiler::schema::ExtendedType;
 use apollo_compiler::validation::Valid;
 
@@ -39,6 +40,29 @@ impl Schema {
         crate::validate::validate(self, query).map(drop)
     }
 
+    /// Every `(parent type, field)` a document selects, sorted and without duplicates; the parent
+    /// is the type of the selection set the field is written in, and meta fields are left out.
+    ///
+    /// # Errors
+    ///
+    /// The validation errors of a document that does not validate.
+    pub fn selected_fields(
+        &self,
+        query: &str,
+    ) -> Result<Vec<(String, String)>, Vec<ResponseError>> {
+        let doc = crate::validate::validate(self, query)?;
+        let mut out = Vec::new();
+        for op in doc.operations.iter() {
+            walk(&op.selection_set, &mut out);
+        }
+        for fragment in doc.fragments.values() {
+            walk(&fragment.selection_set, &mut out);
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
     #[must_use]
     pub fn type_count(&self) -> usize {
         self.inner.types.len()
@@ -46,5 +70,20 @@ impl Schema {
 
     pub(crate) fn is_object(&self, name: &str) -> bool {
         matches!(self.inner.types.get(name), Some(ExtendedType::Object(_)))
+    }
+}
+
+fn walk(set: &SelectionSet, out: &mut Vec<(String, String)>) {
+    for selection in &set.selections {
+        match selection {
+            Selection::Field(f) => {
+                if !f.name.starts_with("__") {
+                    out.push((set.ty.to_string(), f.name.to_string()));
+                }
+                walk(&f.selection_set, out);
+            }
+            Selection::InlineFragment(inline) => walk(&inline.selection_set, out),
+            Selection::FragmentSpread(_) => {}
+        }
     }
 }
