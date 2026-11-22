@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use hubdouble_model::{ApiError, Issue, Review, ReviewState, Timestamp, node_id};
+use hubdouble_model::{ApiError, FieldError, Issue, Review, ReviewState, Timestamp, node_id};
 use hubdouble_rest::{Ctx, Registry, Reply};
 use hubdouble_store::{Issues, ReviewComments, Reviews, TxMut};
 use serde::Deserialize;
@@ -10,15 +10,32 @@ use crate::{READ, WRITE, anchors, comments, events, invalid, view};
 pub fn register(registry: &mut Registry) {
     for (id, grant, handler) in [
         ("pulls/list-reviews", READ, list as fn(&mut Ctx<'_>) -> _),
-        ("pulls/create-review", WRITE, create),
+        ("pulls/create-review", WRITE, |ctx| simple(create(ctx))),
         ("pulls/get-review", READ, get),
-        ("pulls/delete-pending-review", WRITE, delete),
-        ("pulls/submit-review", WRITE, submit),
-        ("pulls/update-review", WRITE, edit),
-        ("pulls/dismiss-review", WRITE, dismiss),
+        ("pulls/delete-pending-review", WRITE, |ctx| {
+            simple(delete(ctx))
+        }),
+        ("pulls/submit-review", WRITE, |ctx| simple(submit(ctx))),
+        ("pulls/update-review", WRITE, |ctx| simple(edit(ctx))),
+        ("pulls/dismiss-review", WRITE, |ctx| simple(dismiss(ctx))),
     ] {
         registry.handle(id, grant, handler);
     }
+}
+
+fn simple(answer: Result<Reply, ApiError>) -> Result<Reply, ApiError> {
+    answer.map_err(|mut e| {
+        if e.status == 422 {
+            let text = std::mem::replace(&mut e.message, "Unprocessable Entity".to_owned());
+            e.errors = vec![FieldError {
+                resource: String::new(),
+                field: String::new(),
+                code: String::new(),
+                message: Some(text),
+            }];
+        }
+        e
+    })
 }
 
 pub fn visible(viewer: Option<i64>, review: &Review) -> bool {

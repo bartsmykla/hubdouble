@@ -200,6 +200,14 @@ fn answer(ctx: &Ctx<'_>, comment: &ReviewComment) -> Result<Reply, ApiError> {
     Reply::json(&view::rest_view(ctx)?.comment(comment, issue.number))
 }
 
+fn created(ctx: &Ctx<'_>, comment: &ReviewComment) -> Result<Reply, ApiError> {
+    let issue = issue(ctx.tx(), comment)?;
+    let rendered = view::rest_view(ctx)?.comment(comment, issue.number);
+    Reply::json(&rendered)?
+        .status(StatusCode::CREATED)
+        .header(http::header::LOCATION, &rendered.url)
+}
+
 fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?;
     let viewer = ctx.actor().account().map(|a| a.id);
@@ -295,7 +303,7 @@ fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let review_id = comment_review(tx, &post, sha.clone())?;
     let (_, comment) = open(tx, &post, review_id, &sha, request.body, place)?;
     events::comment(tx, &issue, post.sender, &comment, "created", None)?;
-    Ok(answer(ctx, &comment)?.status(StatusCode::CREATED))
+    created(ctx, &comment)
 }
 
 fn comment_review(tx: &mut TxMut<'_>, post: &Post<'_>, sha: String) -> Result<i64, ApiError> {
@@ -356,7 +364,7 @@ fn reply(ctx: &mut Ctx<'_>, issue: &Issue, parent: i64, body: String) -> Result<
         .insert(comment)
         .map_err(|e| ApiError::internal(e.to_string()))?;
     events::comment(tx, issue, post.sender, &comment, "created", None)?;
-    Ok(answer(ctx, &comment)?.status(StatusCode::CREATED))
+    created(ctx, &comment)
 }
 
 fn edit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
