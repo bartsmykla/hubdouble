@@ -12,7 +12,7 @@ use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::delivery::{Outcome, send, signature_1, signature_256};
+use crate::delivery::{Outcome, Pool, send, signature_1, signature_256};
 use crate::{HooksError, Notice, Options, QUEUE_BYTES, Stats};
 
 const OVER_BUDGET: &str = "Queue full";
@@ -137,6 +137,7 @@ pub(crate) struct Shared {
     drains: mpsc::UnboundedSender<oneshot::Sender<i64>>,
     last_id: AtomicI64,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    pool: Pool,
 }
 
 impl Shared {
@@ -164,6 +165,7 @@ impl Shared {
             drains,
             last_id: AtomicI64::new(0),
             tasks: Mutex::new(Vec::new()),
+            pool: Pool::new(options.workers.max(1)),
             options,
         });
         let mut tasks = vec![rt.spawn(publish(shared.clone(), drain_rx))];
@@ -486,6 +488,7 @@ impl Shared {
             self.options.timeout,
             send(
                 &*self.options.connector,
+                &self.pool,
                 &job.url,
                 &job.headers,
                 job.body.clone(),

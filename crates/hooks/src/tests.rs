@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use http::Uri;
@@ -51,10 +52,12 @@ fn json_of(body: &[u8]) -> Value {
 
 struct InProcess {
     hits: mpsc::UnboundedSender<Hit>,
+    connects: Arc<AtomicUsize>,
 }
 
 impl Connector for InProcess {
     fn connect(&self, _uri: &Uri) -> ConnectFuture {
+        self.connects.fetch_add(1, Ordering::SeqCst);
         let hits = self.hits.clone();
         Box::pin(async move {
             let (client, server) = tokio::io::duplex(1 << 16);
@@ -269,7 +272,10 @@ fn config() -> Config {
 fn start(store: &Store, tune: impl FnOnce(&mut Options)) -> (Handle, mpsc::UnboundedReceiver<Hit>) {
     let (hits, rx) = mpsc::unbounded_channel();
     let mut options = Options {
-        connector: Arc::new(InProcess { hits }),
+        connector: Arc::new(InProcess {
+            hits,
+            connects: Arc::default(),
+        }),
         ..Options::default()
     };
     tune(&mut options);
@@ -873,6 +879,36 @@ async fn an_earlier_reset_keeps_the_work_of_a_later_one() {
     let _bodies = answer_all(hits);
     hooks.drain().await.unwrap();
     assert_eq!(logged_ids(&store, APP_A), vec![2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn attempts_reuse_keep_alive_connections_up_to_the_worker_count() {
+    let store = world();
+    let connects = Arc::new(AtomicUsize::new(0));
+    let (hits, rx) = mpsc::unbounded_channel();
+    let options = Options {
+        workers: 2,
+        connector: Arc::new(InProcess {
+            hits,
+            connects: connects.clone(),
+        }),
+        ..Options::default()
+    };
+    let clock = Arc::new(ManualClock::new(Timestamp::SEED));
+    let hooks = Handle::start_with(store.clone(), clock, options).unwrap();
+    let mut bodies = answer_all(rx);
+    // Given two workers and a receiver that keeps its connections open
+    // When twenty events are delivered
+    for _ in 0..20 {
+        emit_one(&store, event("push", WIDGET));
+    }
+    hooks.drain().await.unwrap();
+    // Then each reached the receiver over at most one connection per worker
+    for _ in 0..20 {
+        assert!(bodies.recv().await.is_some());
+    }
+    assert!(connects.load(Ordering::SeqCst) <= 2);
+    assert_eq!(logged_ids(&store, APP_A).len(), 20);
 }
 
 #[tokio::test(start_paused = true)]

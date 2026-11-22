@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -8,7 +8,10 @@ use hmac::{Hmac, KeyInit, Mac};
 use http::header::{HOST, HeaderName, HeaderValue};
 use http::{Method, Request, Uri};
 use http_body_util::{BodyExt, Full};
+use hyper::body::Body as _;
+use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
+use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// A byte stream a webhook request is written to.
@@ -112,23 +115,72 @@ fn request(
     Some(req)
 }
 
-async fn read_capped(mut body: hyper::body::Incoming, cap: usize) -> Option<Vec<u8>> {
+async fn read_capped(mut body: hyper::body::Incoming, cap: usize) -> Option<(Vec<u8>, bool)> {
     let mut out = Vec::new();
     while out.len() < cap {
         let Some(frame) = body.frame().await else {
-            break;
+            return Some((out, true));
         };
         if let Ok(data) = frame.ok()?.into_data() {
             out.extend_from_slice(&data[..data.len().min(cap - out.len())]);
         }
     }
-    Some(out)
+    let ended = body.is_end_stream();
+    Some((out, ended))
 }
 
-/// Sends one `POST` and reads at most `cap` bytes of the answer body. The caller bounds it with
-/// the attempt timeout.
+type Sender = SendRequest<Full<Bytes>>;
+
+/// Idle keep-alive connections per webhook origin, at most `per_origin` each, so attempts reuse
+/// them as an HTTP client with a connection pool does.
+pub(crate) struct Pool {
+    idle: Mutex<HashMap<String, Vec<Sender>>>,
+    per_origin: usize,
+}
+
+impl Pool {
+    pub(crate) fn new(per_origin: usize) -> Pool {
+        Pool {
+            idle: Mutex::new(HashMap::new()),
+            per_origin,
+        }
+    }
+
+    fn take(&self, origin: &str) -> Option<Sender> {
+        let mut idle = self.idle.lock();
+        let senders = idle.get_mut(origin)?;
+        while let Some(sender) = senders.pop() {
+            if sender.is_ready() {
+                return Some(sender);
+            }
+        }
+        None
+    }
+
+    fn give(&self, origin: String, sender: Sender) {
+        let mut idle = self.idle.lock();
+        let senders = idle.entry(origin).or_default();
+        if senders.len() < self.per_origin && sender.is_ready() {
+            senders.push(sender);
+        }
+    }
+}
+
+async fn connect(connector: &dyn Connector, uri: &Uri) -> Option<Sender> {
+    let io = connector.connect(uri).await.ok()?;
+    let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io))
+        .await
+        .ok()?;
+    tokio::spawn(conn);
+    Some(sender)
+}
+
+/// Sends one `POST` on an idle pooled connection or a new one, and reads at most `cap` bytes of
+/// the answer body. A pooled connection that closed before it took the request is replaced by a
+/// new one. The caller bounds it with the attempt timeout.
 pub(crate) async fn send(
     connector: &dyn Connector,
+    pool: &Pool,
     url: &str,
     headers: &BTreeMap<String, String>,
     body: Bytes,
@@ -137,24 +189,39 @@ pub(crate) async fn send(
     let Ok(uri) = url.parse::<Uri>() else {
         return Outcome::failed("Invalid URL");
     };
-    let Some(req) = request(&uri, headers, body) else {
+    let Some(mut req) = request(&uri, headers, body) else {
         return Outcome::failed("Invalid URL");
     };
-    let Ok(io) = connector.connect(&uri).await else {
-        return Outcome::failed("Failed to connect");
-    };
-    let Ok((mut sender, conn)) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await
-    else {
-        return Outcome::failed("Failed to connect");
-    };
-    tokio::spawn(conn);
-    let Ok(resp) = sender.send_request(req).await else {
-        return Outcome::failed("Invalid HTTP Response");
+    let origin = format!(
+        "{}://{}",
+        uri.scheme_str().unwrap_or_default(),
+        uri.authority().map_or("", |a| a.as_str())
+    );
+    let mut pooled = pool.take(&origin);
+    let (mut sender, resp) = loop {
+        let reused = pooled.is_some();
+        let mut sender = match pooled.take() {
+            Some(sender) => sender,
+            None => match connect(connector, &uri).await {
+                Some(sender) => sender,
+                None => return Outcome::failed("Failed to connect"),
+            },
+        };
+        match sender.try_send_request(req).await {
+            Ok(resp) => break (sender, resp),
+            Err(mut e) => match e.take_message() {
+                Some(unsent) if reused => req = unsent,
+                _ => return Outcome::failed("Invalid HTTP Response"),
+            },
+        }
     };
     let (parts, body) = resp.into_parts();
-    let Some(body) = read_capped(body, cap).await else {
+    let Some((body, ended)) = read_capped(body, cap).await else {
         return Outcome::failed("Invalid HTTP Response");
     };
+    if ended && sender.ready().await.is_ok() {
+        pool.give(origin, sender);
+    }
     let code = parts.status.as_u16();
     Outcome {
         status_code: i64::from(code),
