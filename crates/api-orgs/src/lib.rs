@@ -1,7 +1,33 @@
-use hubdouble_admin::Registrar;
+mod admin;
+mod admin_teams;
+mod events;
+mod graphql;
+mod hierarchy;
+mod rest;
+mod view;
 
-/// Registers what T3 owns: tables, REST operations, GraphQL fields, ref subscribers, seed kinds
-/// and admin routes.
+use hubdouble_admin::Registrar;
+use hubdouble_model::{Grant, Requirement, Scope};
+
+const MEMBERS: Requirement = Requirement {
+    any_of: &[Grant::read("members")],
+    scope: Scope::Org,
+    scopes: &["read:org"],
+};
+
+const METADATA: Requirement = Requirement {
+    any_of: &[Grant::read("metadata")],
+    scope: Scope::Repo,
+    scopes: &["repo", "public_repo"],
+};
+
+const TEAM_REPOSITORY: Requirement = Requirement {
+    scopes: &[],
+    ..METADATA
+};
+
 pub fn register(r: &mut Registrar<'_>) {
-    let _ = r;
+    rest::register(r.rest);
+    graphql::register(r.gql);
+    admin::register(r.admin);
 }
