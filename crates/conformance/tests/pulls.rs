@@ -141,6 +141,44 @@ async fn list_filters_pages_and_sorts_before_render() {
 }
 
 #[tokio::test]
+async fn pull_list_ignores_a_head_without_an_owner_separator() {
+    let server = fixture().entry(seeded("main", false)).start().await;
+    let client = writer(&server);
+    let answer = client.get(&format!("{PULLS}?head=trunk")).await;
+    let pulls = checked("pulls/list", StatusCode::OK, &answer);
+    assert_eq!(pulls[0]["head"]["ref"], "feature");
+}
+
+#[tokio::test]
+async fn pull_list_uses_open_for_an_unknown_state() {
+    let server = fixture()
+        .entry(seeded("main", false))
+        .entry(seeded("develop", false))
+        .start()
+        .await;
+    let client = writer(&server);
+    edit(&client, NUM, json!({"state": "closed"})).await;
+    let answer = client.get(&format!("{PULLS}?state=bogus")).await;
+    let pulls = checked("pulls/list", StatusCode::OK, &answer);
+    assert_eq!(pulls.as_array().unwrap().len(), 1);
+    assert_eq!(pulls[0]["number"], 2);
+}
+
+#[tokio::test]
+async fn pull_list_sorts_oldest_first_for_an_unknown_sort() {
+    let server = fixture()
+        .entry(seeded("main", false))
+        .entry(seeded("develop", false))
+        .start()
+        .await;
+    let client = writer(&server);
+    let answer = client.get(&format!("{PULLS}?sort=bogus")).await;
+    let pulls = checked("pulls/list", StatusCode::OK, &answer);
+    assert_eq!(pulls[0]["number"], 1);
+    assert_eq!(pulls[1]["number"], 2);
+}
+
+#[tokio::test]
 async fn fork_commits_and_files_preserve_head_and_base_identity() {
     // Given go-github v93 github/pulls.go:216,243,313,428,454.
     let server = fixture().entry(json!({

@@ -43,32 +43,27 @@ struct ListFilter<'a> {
 impl<'a> ListFilter<'a> {
     fn parse(ctx: &'a Ctx<'_>) -> Result<Self, ApiError> {
         let query = ctx.query();
-        let state = query.get("state").unwrap_or("open");
-        let sort = query.get("sort").unwrap_or("created");
+        let state = query
+            .get("state")
+            .filter(|&state| matches!(state, "closed" | "all"))
+            .unwrap_or("open");
+        let sort = query.get("sort").filter(|sort| !sort.is_empty());
         let direction =
             query
                 .get("direction")
-                .unwrap_or(if sort == "created" { "desc" } else { "asc" });
+                .unwrap_or(if sort.is_some() { "asc" } else { "desc" });
         let head = query
             .get("head")
-            .map(|value| {
-                value
-                    .split_once(':')
-                    .filter(|(owner, branch)| !owner.is_empty() && !branch.is_empty())
-                    .ok_or_else(|| ApiError::unprocessable("The head filter must be owner:branch"))
-            })
-            .transpose()?;
-        if !matches!(state, "open" | "closed" | "all")
-            || !matches!(sort, "created" | "updated" | "popularity" | "long-running")
-            || !matches!(direction, "asc" | "desc")
-        {
+            .and_then(|value| value.split_once(':'))
+            .filter(|(_, branch)| !branch.is_empty());
+        if !matches!(direction, "asc" | "desc") {
             return Err(ApiError::unprocessable("Invalid pull request filter"));
         }
         Ok(Self {
             state,
             head,
             base: query.get("base"),
-            sort,
+            sort: sort.unwrap_or("created"),
             ascending: direction == "asc",
         })
     }
