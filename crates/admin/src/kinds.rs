@@ -8,7 +8,9 @@ use hubdouble_model::{
     MembershipState, OrgRole, Repo, RepoRole, RepositorySelection, Timestamp, Token, TokenKind,
     Visibility, Webhook,
 };
-use hubdouble_store::{Accounts, Apps, Counters, Installations, Memberships, Repos, Tokens, Tx};
+use hubdouble_store::{
+    Accounts, Apps, Counters, Installations, Memberships, Repos, Tokens, Tx, TxMut,
+};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -388,6 +390,33 @@ pub(crate) fn apply_repository(
         Some(login) => user(&ctx.tx, login)?.id,
         None => owner,
     };
+    let id = write_repository(ctx, vcs, owner, s)?;
+    announce_created(&mut ctx.tx, id, sender);
+    Ok(())
+}
+
+fn announce_created(tx: &mut TxMut<'_>, repo_id: i64, sender_id: i64) {
+    hubdouble_hooks::emit(
+        tx,
+        Event {
+            name: "repository",
+            action: Some("created"),
+            repo_id: Some(repo_id),
+            org_id: None,
+            sender_id,
+            app_id: None,
+            installation_id: None,
+            payload: serde_json::Map::new(),
+        },
+    );
+}
+
+fn write_repository(
+    ctx: &mut SeedCtx<'_>,
+    vcs: &impl Vcs,
+    owner: i64,
+    s: RepoSeed,
+) -> Result<i64, ApiError> {
     let visibility = match (s.visibility.as_deref(), s.private) {
         (Some(v), _) => Visibility::from_rest(v).ok_or_else(|| {
             ApiError::unprocessable(format!("visibility {v} is not public, private or internal"))
@@ -478,20 +507,7 @@ pub(crate) fn apply_repository(
             ..repo
         })?;
     }
-    hubdouble_hooks::emit(
-        &mut ctx.tx,
-        Event {
-            name: "repository",
-            action: Some("created"),
-            repo_id: Some(id),
-            org_id: None,
-            sender_id: sender,
-            app_id: None,
-            installation_id: None,
-            payload: serde_json::Map::new(),
-        },
-    );
-    Ok(())
+    Ok(id)
 }
 
 fn read_dir(
