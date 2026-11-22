@@ -10,7 +10,7 @@ use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hubdouble_admin::{Admin, Fault, FaultQuery, LogEntry, Services};
 use hubdouble_auth::Target;
-use hubdouble_model::{Account, ApiError, FieldError, Repo};
+use hubdouble_model::{Account, AccountKind, ApiError, FieldError, Repo};
 use hubdouble_render::Urls;
 use hubdouble_rest::{Access, Ctx, Entry, Params, Parts, Query, Reply};
 use hubdouble_store::{Accounts, Repos, Tx};
@@ -120,6 +120,11 @@ impl Inner {
         urls: &Urls,
         version: &'static str,
     ) -> HttpResponse {
+        let canonical = match self.canonical_path(api_path) {
+            Ok(canonical) => canonical,
+            Err(e) => return self.finish(error_call(parts, "", "core", version, e)),
+        };
+        let api_path = canonical.as_deref().unwrap_or(api_path);
         let Some(route) = self.rest.route(&parts.method, api_path) else {
             return self.finish(error_call(
                 parts,
@@ -168,6 +173,43 @@ impl Inner {
         })
     }
 
+    fn canonical_path(&self, api_path: &str) -> Result<Option<String>, ApiError> {
+        let (alias, rest) = if let Some(rest) = api_path.strip_prefix("/repositories/") {
+            (Alias::Repo, rest)
+        } else if let Some(rest) = api_path.strip_prefix("/organizations/") {
+            (Alias::Org, rest)
+        } else {
+            return Ok(None);
+        };
+        let Some((id, tail)) = rest.split_once('/') else {
+            return Ok(None);
+        };
+        let id: i64 = id.parse().map_err(|_| ApiError::not_found())?;
+        self.services.store.view(|tx| {
+            let accounts = tx.table::<Accounts>();
+            let path = match alias {
+                Alias::Repo => {
+                    let repo = tx
+                        .table::<Repos>()
+                        .get(id)
+                        .ok_or_else(ApiError::not_found)?;
+                    let owner = accounts
+                        .get(repo.owner_id)
+                        .ok_or_else(ApiError::not_found)?;
+                    format!("/repos/{}/{}/{tail}", owner.login, repo.name)
+                }
+                Alias::Org => {
+                    let org = accounts
+                        .get(id)
+                        .filter(|a| a.kind == AccountKind::Organization)
+                        .ok_or_else(ApiError::not_found)?;
+                    format!("/orgs/{}/{tail}", org.login)
+                }
+            };
+            Ok(Some(path))
+        })
+    }
+
     fn run(
         &self,
         r: &RestRequest<'_>,
@@ -193,9 +235,10 @@ impl Inner {
             Resolved::None => (Target::None, None),
         };
         hubdouble_auth::authorize(tx, &actor, &r.entry.requirement, target)?;
+        let link_path = link_path(r.api_path, &resolved);
         let mut ctx = Ctx::new(Parts {
             operation_id: r.entry.operation_id,
-            path: r.api_path,
+            path: link_path.as_deref().unwrap_or(r.api_path),
             params: r.params,
             query: r.query,
             headers: r.headers,
@@ -498,6 +541,24 @@ fn resolve_target(tx: &Tx, params: &Params) -> Result<Resolved, ApiError> {
         return Ok(Resolved::Org(org.clone()));
     }
     Ok(Resolved::None)
+}
+
+enum Alias {
+    Repo,
+    Org,
+}
+
+fn link_path(api_path: &str, resolved: &Resolved) -> Option<String> {
+    let (prefix, skip, alias, id) = match resolved {
+        Resolved::Repo(repo) => ("/repos/", 2, "/repositories/", repo.id),
+        Resolved::Org(org) => ("/orgs/", 1, "/organizations/", org.id),
+        Resolved::None => return None,
+    };
+    let rest = api_path.strip_prefix(prefix)?;
+    Some(match rest.splitn(skip + 1, '/').nth(skip) {
+        Some(tail) => format!("{alias}{id}/{tail}"),
+        None => format!("{alias}{id}"),
+    })
 }
 
 fn split_prefix(path: &str) -> (bool, &str) {
