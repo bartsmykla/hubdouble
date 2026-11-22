@@ -204,6 +204,15 @@ fn flatten(
     Ok(())
 }
 
+fn holds(leaves: &Leaves, path: &str) -> bool {
+    let below = format!("{path}/");
+    leaves.contains_key(path)
+        || leaves
+            .range(below.clone()..)
+            .next()
+            .is_some_and(|(p, _)| p.starts_with(&below))
+}
+
 fn clear(leaves: &mut Leaves, path: &str) {
     let below = format!("{path}/");
     leaves.retain(|p, _| p != path && !p.starts_with(&below));
@@ -273,7 +282,12 @@ pub(crate) fn create_tree(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         }
         match (e.sha, e.content) {
             (Some(Some(_)), Some(_)) => return Err(bad("content")),
-            (Some(None), _) => clear(&mut leaves, &e.path),
+            (Some(None), _) => {
+                if !holds(&leaves, &e.path) {
+                    return Err(bad("sha"));
+                }
+                clear(&mut leaves, &e.path);
+            }
             (None, Some(content)) => {
                 let id = git.write_blob(tx, repo, content.as_bytes())?;
                 clear(&mut leaves, &e.path);

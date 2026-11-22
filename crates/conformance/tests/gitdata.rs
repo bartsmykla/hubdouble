@@ -303,6 +303,14 @@ async fn a_tree_on_a_base_adds_nested_paths_and_deletes_null_shas() {
             &json!({"tree": [{"path": "a", "mode": "100644", "type": "blob", "sha": ZERO_OID}]}),
         )
         .await;
+    let delete_absent = client
+        .post(
+            "repos/acme/public/git/trees",
+            &json!({"base_tree": base, "tree": [
+                {"path": "src/absent.txt", "mode": "100644", "type": "blob", "sha": null}
+            ]}),
+        )
+        .await;
     let tree = made.json()["sha"].as_str().unwrap().to_owned();
     let flat = client
         .get(&format!("repos/acme/public/git/trees/{tree}"))
@@ -317,6 +325,7 @@ async fn a_tree_on_a_base_adds_nested_paths_and_deletes_null_shas() {
     assert_eq!(made.status, StatusCode::CREATED);
     valid("git/create-tree", &made);
     assert_eq!(missing_blob.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(delete_absent.status, StatusCode::UNPROCESSABLE_ENTITY);
     let paths = |a: &Answer| -> Vec<String> {
         valid("git/get-tree", a)["tree"]
             .as_array()
