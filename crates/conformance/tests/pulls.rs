@@ -407,6 +407,7 @@ fn resolve_ref(cx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlErro
         value: Arc::new(RefNode {
             repo_id,
             name,
+            prefix: "refs/heads/".to_owned(),
             target,
         }),
     })

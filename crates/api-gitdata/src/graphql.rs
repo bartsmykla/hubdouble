@@ -75,15 +75,28 @@ fn load_object(ctx: &Ctx<'_>, repo_id: i64, id: ObjectId) -> Result<Resolved, Gq
     }
 }
 
-fn ref_resolved(repo_id: i64, name: String, target: ObjectId) -> Resolved {
+fn standard_prefix(name: &str) -> &'static str {
+    ["refs/heads/", "refs/tags/", "refs/"]
+        .into_iter()
+        .find(|p| name.starts_with(p))
+        .unwrap_or("")
+}
+
+fn ref_resolved(repo_id: i64, name: String, prefix: String, target: ObjectId) -> Resolved {
     Resolved::Object {
         type_name: "Ref",
         value: Arc::new(RefNode {
             repo_id,
             name,
+            prefix,
             target,
         }),
     }
+}
+
+fn qualified_ref(repo_id: i64, name: String, target: ObjectId) -> Resolved {
+    let prefix = standard_prefix(&name).to_owned();
+    ref_resolved(repo_id, name, prefix, target)
 }
 
 pub(crate) fn repository_object(
@@ -122,7 +135,7 @@ pub(crate) fn repository_ref(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Re
     };
     for full in candidates {
         if let Ok(target) = ctx.git.resolve_ref(ctx.tx, repo.id, &full) {
-            return Ok(ref_resolved(repo.id, full, target));
+            return Ok(qualified_ref(repo.id, full, target));
         }
     }
     Ok(Resolved::Null)
@@ -136,7 +149,7 @@ pub(crate) fn repository_default_branch_ref(
     let repo = obj.get::<Repo>()?;
     let full = format!("refs/heads/{}", repo.default_branch);
     Ok(match ctx.git.resolve_ref(ctx.tx, repo.id, &full) {
-        Ok(target) => ref_resolved(repo.id, full, target),
+        Ok(target) => qualified_ref(repo.id, full, target),
         Err(_) => Resolved::Null,
     })
 }
@@ -208,16 +221,13 @@ pub(crate) fn repository_refs(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<R
         &refs,
         args,
         |r| r.name.clone(),
-        |r| ref_resolved(repo.id, r.name.clone(), r.target),
+        |r| ref_resolved(repo.id, r.name.clone(), prefix.clone(), r.target),
     )
 }
 
 pub(crate) fn ref_name(_: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {
     let r = obj.get::<RefNode>()?;
-    let short = ["refs/heads/", "refs/tags/", "refs/"]
-        .iter()
-        .find_map(|p| r.name.strip_prefix(p))
-        .unwrap_or(&r.name);
+    let short = r.name.strip_prefix(r.prefix.as_str()).unwrap_or(&r.name);
     Ok(Resolved::Leaf(json!(short)))
 }
 

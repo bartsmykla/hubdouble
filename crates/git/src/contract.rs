@@ -312,7 +312,11 @@ impl From<GitError> for ApiError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefNode {
     pub repo_id: i64,
+    /// The full name, such as `refs/tags/agent/v5.0.0`.
     pub name: String,
+    /// The part of `name` that GraphQL `Ref.name` leaves out: the `refPrefix` a
+    /// `refs` listing asked for, else `refs/heads/`, `refs/tags/` or `refs/`.
+    pub prefix: String,
     pub target: ObjectId,
 }
 
@@ -716,7 +720,13 @@ impl Git {
         Ok(id)
     }
 
-    fn sign(&self, commit: &mut Commit) -> Result<(), GitError> {
+    /// Replaces `commit`'s signature with one from the web-flow key, as GitHub signs a commit
+    /// it writes for a bot.
+    ///
+    /// # Errors
+    ///
+    /// The key's load or signing error.
+    pub fn sign(&self, commit: &mut Commit) -> Result<(), GitError> {
         let key = self.inner.web_flow.as_ref().map_err(Clone::clone)?;
         commit.gpg_signature = None;
         let payload = crate::encode::commit_bytes(commit)?;

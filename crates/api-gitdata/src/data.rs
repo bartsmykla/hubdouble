@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use http::StatusCode;
+use hubdouble_auth::Actor;
 use hubdouble_git::{
     Commit, EntryMode, Git, GitError, ObjectData, ObjectId, ObjectKind, Ref, Tag, TreeEntry,
 };
@@ -518,19 +519,27 @@ pub(crate) fn create_git_commit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     };
     let given_author = person(body.author.as_ref(), "author")?;
     let given_committer = person(body.committer.as_ref(), "committer")?;
+    let signature = body.signature.filter(|s| !s.is_empty());
+    let web_flow = matches!(ctx.actor(), Actor::Installation { .. })
+        && given_author.is_none()
+        && given_committer.is_none()
+        && signature.is_none();
     let author = match given_author {
         Some(a) => a,
         None => signature_of(sender(ctx.actor())?, now),
     };
     let committer = given_committer.unwrap_or_else(|| author.clone());
-    let commit = Commit {
+    let mut commit = Commit {
         tree,
         parents,
         author,
         committer,
         message: body.message,
-        gpg_signature: body.signature.filter(|s| !s.is_empty()),
+        gpg_signature: signature,
     };
+    if web_flow {
+        git.sign(&mut commit)?;
+    }
     let id = git.write_commit(tx, repo, &commit)?;
     let links = Links::of(ctx)?;
     Reply::json(&GitCommit::new(git, repo, &links, id, &commit))

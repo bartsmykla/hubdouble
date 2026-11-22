@@ -3,15 +3,19 @@
     reason = "a test helper fails loudly on a broken fixture"
 )]
 
+use std::collections::BTreeMap;
+
 use http::{Method, StatusCode};
 use hubdouble_admin::Registrar;
 use hubdouble_git::{EntryMode, FileChange, ObjectData, ObjectId, ObjectKind, Signature, Tag};
 use hubdouble_model::{
-    Enforcement, Repo, Ruleset, RulesetSource, RulesetTarget, Timestamp, node_id,
+    Access, Clock, Enforcement, Repo, Ruleset, RulesetSource, RulesetTarget, Timestamp, Token,
+    TokenKind, node_id,
 };
-use hubdouble_store::{Repos, Rulesets};
+use hubdouble_store::{Installations, Repos, Rulesets, Tokens};
 use hubdouble_testkit::fixture::{
-    ALICE_ID, ALICE_TOKEN, BOB, BOB_ID, BOB_TOKEN, CAROL_TOKEN, PUBLIC_REPO_ID,
+    ALICE_ID, ALICE_TOKEN, APP_ID, BOB, BOB_ID, BOB_TOKEN, CAROL_TOKEN, INSTALLATION_ID,
+    PUBLIC_REPO_ID,
 };
 use hubdouble_testkit::validate::openapi_response;
 use hubdouble_testkit::{
@@ -22,6 +26,7 @@ use serde_json::{Value, json};
 const SHA_ACCEPT: &str = "application/vnd.github.v3.sha";
 const RAW_ACCEPT: &str = "application/vnd.github.v3.raw";
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
+const APP_TOKEN: &str = "ghs_fixture_gitdata_contents_write";
 
 fn repository_type(r: &mut Registrar<'_>) {
     r.gql.object::<Repo>("Repository");
@@ -385,6 +390,70 @@ async fn a_commit_and_a_ref_made_through_the_git_data_api_read_back() {
     assert_eq!(deleted.status, StatusCode::NO_CONTENT);
     assert_eq!(gone.status, StatusCode::NOT_FOUND);
     assert_eq!(deleted_again.status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn a_commit_the_app_makes_without_an_author_is_web_flow_signed() {
+    // Given
+    let s = server().await;
+    s.server
+        .services()
+        .store
+        .update(|tx| {
+            let mut installation =
+                (**tx.table::<Installations>().get(INSTALLATION_ID).unwrap()).clone();
+            installation
+                .permissions
+                .insert("contents".to_owned(), Access::Write);
+            tx.table_mut::<Installations>().replace(installation)?;
+            let id = tx.next_id();
+            tx.table_mut::<Tokens>().insert(Token {
+                id,
+                token: APP_TOKEN.into(),
+                kind: TokenKind::Installation,
+                app_id: Some(APP_ID),
+                installation_id: Some(INSTALLATION_ID),
+                user_id: None,
+                repo_ids: None,
+                permissions: BTreeMap::from([("contents".to_owned(), Access::Write)]),
+                scopes: vec![],
+                expires_at: None,
+                revoked: false,
+                owner_seeded: false,
+                created_at: s.clock.now(),
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    let app = GoGithub::new(&s).with_token(APP_TOKEN);
+    let commit = json!({
+        "message": "m",
+        "tree": at(&s, "main:").id.to_string(),
+        "parents": [head(&s, "refs/heads/main").to_string()],
+    });
+    let mut authored = commit.clone();
+    authored["author"] = json!({"name": "A", "email": "a@example.com"});
+    // When
+    let by_app = app.post("repos/acme/public/git/commits", &commit).await;
+    let by_app_as_author = app.post("repos/acme/public/git/commits", &authored).await;
+    let by_user = alice(&s)
+        .post("repos/acme/public/git/commits", &commit)
+        .await;
+    // Then
+    let signed = valid("git/create-commit", &by_app);
+    assert_eq!(signed["verification"]["verified"], true);
+    assert_eq!(signed["verification"]["reason"], "valid");
+    let fetched = app
+        .get(&format!(
+            "repos/acme/public/git/commits/{}",
+            signed["sha"].as_str().unwrap()
+        ))
+        .await;
+    assert_eq!(fetched.json()["verification"]["verified"], true);
+    for unsigned in [&by_app_as_author, &by_user] {
+        let body = valid("git/create-commit", unsigned);
+        assert_eq!(body["verification"]["reason"], "unsigned");
+    }
 }
 
 #[tokio::test]
@@ -844,6 +913,8 @@ async fn tags_and_the_releases_probe_list_refs_under_a_prefix_and_peel_tags() {
     assert_eq!(t["pageInfo"]["hasNextPage"], false);
     let nodes = t["nodes"].as_array().unwrap();
     assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0]["name"], "v5.0.0");
+    assert_eq!(nodes[1]["name"], "v5.1.0");
     assert_eq!(nodes[0]["target"]["target"]["oid"], main.to_string());
     assert_eq!(nodes[1]["target"]["oid"], tag);
     assert_eq!(nodes[1]["target"]["target"]["oid"], feature.to_string());
