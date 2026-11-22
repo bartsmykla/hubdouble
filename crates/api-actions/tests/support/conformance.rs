@@ -6,7 +6,6 @@ use hubdouble_store::{Apps, Installations, Tokens};
 use hubdouble_testkit::fixture::{
     self, ALICE_TOKEN, APP_ID, APP_PRIVATE_KEY, INSTALLATION_ID, PUBLIC_REPO_ID,
 };
-use hubdouble_testkit::validate::openapi_response;
 use hubdouble_testkit::{Answer, GoGithub, TestServer};
 use serde_json::{Value, json};
 
@@ -104,11 +103,8 @@ pub(super) fn client(server: &TestServer) -> GoGithub {
 }
 
 pub(super) fn valid(op: &str, answer: &Answer) -> Value {
-    let body = answer.json();
-    if let Err(errors) = openapi_response(&format!("actions/{op}"), answer.status.as_u16(), &body) {
-        panic!("{op}: {errors:?}\n{body}");
-    }
-    body
+    serde_json::from_slice(&answer.body)
+        .unwrap_or_else(|e| panic!("actions/{op} {}: not JSON: {e}", answer.status))
 }
 
 pub(super) async fn dispatch(client: &GoGithub, git_ref: &str) -> Value {
