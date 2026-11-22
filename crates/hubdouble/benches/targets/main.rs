@@ -44,6 +44,12 @@ const SLOW_WRITES_PER_WRITER: usize = 1_500;
 const SLOW_DELAY: Duration = Duration::from_secs(2);
 const ENQUEUE_EVENTS: usize = 5_000;
 const START_RUNS: usize = 5;
+const IDLE_RSS_MB: f64 = 40.0;
+const MEMORY_LIMIT_MIB: f64 = 128.0;
+const MIB: f64 = 1024.0 * 1024.0;
+const RSS_GROWTH_MIB: f64 = MEMORY_LIMIT_MIB - IDLE_RSS_MB * 1e6 / MIB;
+const FAST_EVENTS: usize = 50_000;
+const FAST_BATCH: usize = 1_000;
 const TEAMS: usize = 100;
 
 fn micros(d: Duration) -> f64 {
@@ -897,8 +903,60 @@ fn in_process(dir: &Path, rows: &mut Vec<Row>) {
     drop(receiver);
     running.runtime.shutdown_background();
 
-    slow_receiver(dir, &client_runtime, rows);
     client_runtime.shutdown_background();
+    for load in ["slow", "fast"] {
+        memory_rows(load, rows);
+    }
+}
+
+const MEMORY_ROWS: &str = "--memory-rows";
+
+fn memory_rows(load: &str, rows: &mut Vec<Row>) {
+    let measured = (|| {
+        let dir = TempDir::new_in(TMP).map_err(|e| e.to_string())?;
+        let file = dir.path().join("rows.json");
+        let status = Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+            .arg(MEMORY_ROWS)
+            .arg(load)
+            .arg(&file)
+            .status()
+            .map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(format!("the {load} receiver process ended with {status}"));
+        }
+        let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+        let value: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        value["rows"]
+            .as_array()
+            .and_then(|r| r.iter().map(Row::from_json).collect::<Option<Vec<_>>>())
+            .ok_or_else(|| format!("unreadable rows in {text}"))
+    })();
+    match measured {
+        Ok(measured) => rows.extend(measured),
+        Err(e) => {
+            rows.push(
+                Row::new(format!("{load} receiver rows"), None, "", Goal::Below(0.0)).note(e),
+            );
+        }
+    }
+}
+
+fn memory_rows_child(load: &str, file: &Path) -> ExitCode {
+    std::fs::create_dir_all(TMP).unwrap_or_else(|e| fail("make the temporary directory", e));
+    let dir = TempDir::new_in(TMP).unwrap_or_else(|e| fail("make a temporary directory", e));
+    let client_runtime = runtime(4);
+    let mut rows = Vec::new();
+    if load == "slow" {
+        slow_receiver(dir.path(), &client_runtime, &mut rows);
+    } else {
+        fast_receiver(dir.path(), &client_runtime, &mut rows);
+    }
+    client_runtime.shutdown_background();
+    let json = json!({"rows": rows.iter().map(Row::json).collect::<Vec<_>>()});
+    match std::fs::write(file, json.to_string()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail("write the memory rows", e),
+    }
 }
 
 fn mixed(
@@ -1049,7 +1107,7 @@ fn slow_receiver(dir: &Path, client_runtime: &Runtime, rows: &mut Vec<Row>) {
             .unwrap_or_default()
     });
     let hooks = running.server.services().hooks.clone();
-    let rss_before = rss_kib(std::process::id()).unwrap_or_default();
+    let rss_before = rss_kib(std::process::id());
     let (mut latencies, peak_waiting, peak_rss, failures) = client_runtime.block_on(async {
         let mut clients = Vec::new();
         for _ in 0..SLOW_WRITERS {
@@ -1059,10 +1117,10 @@ fn slow_receiver(dir: &Path, client_runtime: &Runtime, rows: &mut Vec<Row>) {
         let monitor = {
             let (done, hooks) = (done.clone(), hooks.clone());
             tokio::spawn(async move {
-                let (mut waiting, mut rss) = (0usize, 0u64);
+                let (mut waiting, mut rss) = (0usize, Some(0u64));
                 while done.load(Ordering::Relaxed) < SLOW_WRITERS {
                     waiting = waiting.max(hooks.stats().waiting_bytes);
-                    rss = rss.max(rss_kib(std::process::id()).unwrap_or_default());
+                    rss = rss.zip(rss_kib(std::process::id())).map(|(a, b)| a.max(b));
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
                 (waiting, rss)
@@ -1100,7 +1158,7 @@ fn slow_receiver(dir: &Path, client_runtime: &Runtime, rows: &mut Vec<Row>) {
                 failures += f;
             }
         }
-        let (waiting, rss) = monitor.await.unwrap_or_default();
+        let (waiting, rss) = monitor.await.unwrap_or((0, None));
         (all, waiting, rss, failures)
     });
     latencies.sort();
@@ -1110,7 +1168,9 @@ fn slow_receiver(dir: &Path, client_runtime: &Runtime, rows: &mut Vec<Row>) {
         max_queued: hooks.stats().max_queued,
         waiting: float(peak_waiting),
         payload: float(receiver.payload_bytes.load(Ordering::Relaxed)),
-        growth_kib: peak_rss.saturating_sub(rss_before),
+        growth_kib: peak_rss
+            .zip(rss_before)
+            .map(|(peak, before)| peak.saturating_sub(before)),
     };
     run.rows(rows);
     running.runtime.shutdown_background();
@@ -1123,7 +1183,27 @@ struct SlowRun {
     max_queued: usize,
     waiting: f64,
     payload: f64,
-    growth_kib: u64,
+    growth_kib: Option<u64>,
+}
+
+fn mib_of_kib(kib: u64) -> f64 {
+    f64::from(u32::try_from(kib).unwrap_or(u32::MAX)) / 1024.0
+}
+
+fn rss_row(measure: &str, growth_kib: Option<u64>) -> Row {
+    let row = Row::new(
+        measure,
+        growth_kib.map(mib_of_kib),
+        "MiB",
+        Goal::Below(RSS_GROWTH_MIB),
+    );
+    if growth_kib.is_some() {
+        row.note(format!(
+            "idle RSS under {IDLE_RSS_MB:.0} MB plus this growth fits the {MEMORY_LIMIT_MIB:.0} Mi limit"
+        ))
+    } else {
+        row.note("the process RSS could not be read")
+    }
 }
 
 impl SlowRun {
@@ -1136,7 +1216,7 @@ impl SlowRun {
             payload,
             growth_kib,
         } = self;
-        let mib = 1024.0 * 1024.0;
+        let mib = MIB;
         let note = if failures == 0 {
             String::new()
         } else {
@@ -1172,13 +1252,94 @@ impl SlowRun {
             )
             .note(format!("{payload:.0} B per payload")),
         );
-        rows.push(Row::new(
-            "Slow receiver: process RSS growth",
-            Some(f64::from(u32::try_from(growth_kib).unwrap_or(u32::MAX)) / 1024.0),
-            "MiB",
-            Goal::Below(256.0),
-        ));
+        rows.push(rss_row("Slow receiver: process RSS growth", growth_kib));
     }
+}
+
+fn fast_receiver(dir: &Path, client_runtime: &Runtime, rows: &mut Vec<Row>) {
+    let receiver = Receiver::start(Duration::ZERO);
+    let running = start_server(&bench_seed(), &receiver.url, dir, "fast-seed.json");
+    let addr = running.addr;
+    let services = running.server.services();
+    let (store, hooks) = (services.store.clone(), services.hooks.clone());
+    let drain = |hooks: &hubdouble_hooks::Handle| {
+        client_runtime
+            .block_on(hooks.drain())
+            .unwrap_or_else(|e| fail("drain the webhooks", e));
+    };
+    client_runtime.block_on(async {
+        let mut client = Client::connect(addr, fixture::ALICE_TOKEN).await;
+        let issue = create_issue(&mut client, json!({"title": "Fast receiver"})).await;
+        client
+            .ok(
+                Method::POST,
+                &format!("/repos/acme/public/issues/{issue}/comments"),
+                Some(json!({"body": lines("comment", 20)})),
+            )
+            .await;
+    });
+    drain(&hooks);
+    let payload: Map<String, Value> = store
+        .view(|tx| {
+            Ok(tx
+                .table::<hubdouble_store::Deliveries>()
+                .iter()
+                .rev()
+                .find(|d| d.event == "issue_comment")
+                .and_then(|d| serde_json::from_slice(&d.request.payload).ok()))
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| fail("read an issue_comment delivery", "none was logged"));
+    let size = serde_json::to_vec(&payload).map_or(0, |b| b.len());
+    let rss_before = rss_kib(std::process::id());
+    for _ in 0..FAST_EVENTS / FAST_BATCH {
+        for _ in 0..FAST_BATCH {
+            store
+                .update(|tx| {
+                    hubdouble_hooks::emit(
+                        tx,
+                        Event {
+                            name: "issue_comment",
+                            action: Some("created"),
+                            repo_id: Some(fixture::PUBLIC_REPO_ID),
+                            org_id: None,
+                            sender_id: fixture::ALICE_ID,
+                            app_id: None,
+                            installation_id: None,
+                            payload: payload.clone(),
+                        },
+                    );
+                    Ok(())
+                })
+                .unwrap_or_else(|e| fail("emit", e));
+        }
+        drain(&hooks);
+    }
+    let growth_kib = rss_kib(std::process::id())
+        .zip(rss_before)
+        .map(|(after, before)| after.saturating_sub(before));
+    let held = float(hooks.stats().log_bytes) / MIB;
+    let answered = store
+        .view(|tx| {
+            Ok(tx
+                .table::<hubdouble_store::Deliveries>()
+                .iter()
+                .filter(|d| d.status_code == 200)
+                .count())
+        })
+        .unwrap_or_default();
+    rows.push(
+        rss_row(
+            "Fast receiver: process RSS growth, full delivery log",
+            growth_kib,
+        )
+        .note(format!(
+            "{FAST_EVENTS} deliveries of {size} B, {answered} answered 200, {held:.1} MiB of requests and responses kept"
+        )),
+    );
+    running.runtime.shutdown_background();
+    receiver.runtime.shutdown_background();
 }
 
 fn docker(args: &[&str]) -> Result<String, String> {
@@ -1436,7 +1597,15 @@ fn container_rows(dir: &Path, rows: &mut Vec<Row>) {
         Ok(v) => (Some(v), String::new()),
         Err(e) => (None, e),
     };
-    rows.push(Row::new("Idle RSS, client v5 seed", value, "MB", Goal::Below(40.0)).note(note));
+    rows.push(
+        Row::new(
+            "Idle RSS, client v5 seed",
+            value,
+            "MB",
+            Goal::Below(IDLE_RSS_MB),
+        )
+        .note(note),
+    );
     if built {
         let _ = docker(&["image", "rm", &image]);
     }
@@ -1476,6 +1645,12 @@ fn main() -> ExitCode {
     let target = Path::new(TMP).parent().unwrap_or(Path::new(TMP));
     let out = std::env::var_os("HUBDOUBLE_BENCH_OUT")
         .map_or_else(|| target.join("bench-targets.json"), PathBuf::from);
+    let args: Vec<String> = std::env::args().collect();
+    if let [_, flag, load, file] = args.as_slice()
+        && flag == MEMORY_ROWS
+    {
+        return memory_rows_child(load, Path::new(file));
+    }
     if std::env::args().any(|a| a == "--gate") {
         let baseline = std::env::var_os("HUBDOUBLE_BENCH_BASELINE").map(PathBuf::from);
         return gate::run(target, &out, baseline.as_deref());

@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 
+const UNITS: [&str; 8] = ["", "µs", "ms", "MB", "MiB", "conns", "events", "req/s"];
+
 #[derive(Clone, Copy)]
 pub(crate) enum Goal {
     Below(f64),
@@ -60,7 +62,19 @@ impl Row {
             Goal::Report => ("report", None),
         };
         json!({"measure": self.measure, "value": self.value, "unit": self.unit,
-               "goal": goal, "target": target, "met": self.met()})
+               "goal": goal, "target": target, "met": self.met(), "note": self.note})
+    }
+
+    pub(crate) fn from_json(v: &Value) -> Option<Row> {
+        let unit = UNITS.into_iter().find(|u| v["unit"] == *u)?;
+        let goal = match (v["goal"].as_str()?, v["target"].as_f64()) {
+            ("below", Some(t)) => Goal::Below(t),
+            ("above", Some(t)) => Goal::Above(t),
+            ("report", _) => Goal::Report,
+            _ => return None,
+        };
+        let row = Row::new(v["measure"].as_str()?, v["value"].as_f64(), unit, goal);
+        Some(row.note(v["note"].as_str().unwrap_or_default()))
     }
 }
 

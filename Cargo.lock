@@ -1948,6 +1948,7 @@ dependencies = [
  "hubdouble-model",
  "hubdouble-rest",
  "hubdouble-server",
+ "hubdouble-store",
  "hubdouble-testkit",
  "hyper",
  "hyper-util",
