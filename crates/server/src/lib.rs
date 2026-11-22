@@ -51,6 +51,7 @@ impl Registries {
     pub fn new(register: fn(&mut Registrar<'_>)) -> Registries {
         let mut store = StoreBuilder::new();
         let git = GitBuilder::new(&mut store);
+        hubdouble_auth::register_tables(&mut store);
         let mut r = Registries {
             store,
             rest: hubdouble_rest::Registry::new(),
