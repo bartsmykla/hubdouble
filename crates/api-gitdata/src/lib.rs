@@ -4,7 +4,12 @@ mod graphql;
 mod repos;
 
 use hubdouble_admin::Registrar;
+use hubdouble_git::{
+    BlobNode, CommitNode, RefNode, SignatureNode, TagNode, TreeEntryNode, TreeNode,
+};
 use hubdouble_model::{Grant, Requirement, Scope};
+
+pub use common::{decode_base64, wrapped_base64};
 
 pub(crate) const READ_CONTENTS: Requirement = Requirement {
     any_of: &[Grant::read("contents")],
@@ -45,8 +50,15 @@ pub fn register(r: &mut Registrar<'_>) {
     rest.handle("repos/get-branch", READ_CONTENTS, repos::get_branch);
 
     let gql = &mut *r.gql;
-    gql.object::<graphql::CommitPayload>("CreateCommitOnBranchPayload");
-    gql.object::<graphql::RefsPayload>("UpdateRefsPayload");
+    gql.object_resolved::<RefNode>("Ref");
+    gql.object_resolved::<CommitNode>("Commit");
+    gql.object_resolved::<TreeNode>("Tree");
+    gql.object_resolved::<TreeEntryNode>("TreeEntry");
+    gql.object_resolved::<BlobNode>("Blob");
+    gql.object_resolved::<TagNode>("Tag");
+    gql.object_resolved::<SignatureNode>("GpgSignature");
+    gql.object_resolved::<graphql::CommitPayload>("CreateCommitOnBranchPayload");
+    gql.object_resolved::<graphql::RefsPayload>("UpdateRefsPayload");
     gql.field("Repository", "object", graphql::repository_object);
     gql.field("Repository", "ref", graphql::repository_ref);
     gql.field("Repository", "refs", graphql::repository_refs);
@@ -76,6 +88,11 @@ pub fn register(r: &mut Registrar<'_>) {
         graphql::payload_commit,
     );
     gql.field(
+        "CreateCommitOnBranchPayload",
+        "clientMutationId",
+        graphql::commit_payload_client_mutation_id,
+    );
+    gql.field(
         "UpdateRefsPayload",
         "clientMutationId",
         graphql::payload_client_mutation_id,
@@ -83,6 +100,3 @@ pub fn register(r: &mut Registrar<'_>) {
     gql.mutation("createCommitOnBranch", graphql::create_commit_on_branch);
     gql.mutation("updateRefs", graphql::update_refs);
 }
-
-#[cfg(test)]
-mod tests;

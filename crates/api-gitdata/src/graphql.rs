@@ -7,7 +7,7 @@ use hubdouble_git::{
 };
 use hubdouble_gql::{Args, Ctx, ErrorType, GqlError, MutCtx, Obj, Resolved, Target, connection};
 use hubdouble_model::{Repo, node_id};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::WRITE_CONTENTS;
@@ -37,7 +37,6 @@ fn oid(id: ObjectId) -> Resolved {
     Resolved::Leaf(json!(id.to_string()))
 }
 
-/// The GraphQL object behind a git object of `repo_id`.
 pub(crate) fn object_resolved(repo_id: i64, object: Object) -> Resolved {
     let id = object.id;
     match object.data {
@@ -87,7 +86,6 @@ fn ref_resolved(repo_id: i64, name: String, target: ObjectId) -> Resolved {
     }
 }
 
-/// `Repository.object(expression:, oid:)`; `null` when nothing matches, as GitHub answers.
 pub(crate) fn repository_object(
     ctx: &Ctx<'_>,
     obj: &Obj,
@@ -110,7 +108,6 @@ pub(crate) fn repository_object(
     }
 }
 
-/// `Repository.ref(qualifiedName:)`: a full name first, then `refs/tags/` and `refs/heads/`.
 pub(crate) fn repository_ref(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
     let repo = obj.get::<Repo>()?;
     let name: String = required(args, "qualifiedName")?;
@@ -164,8 +161,6 @@ struct RefOrder {
     direction: Direction,
 }
 
-/// `Repository.refs(refPrefix:, query:, orderBy:, direction:)`, a connection paged by
-/// `first`, `last`, `after` and `before`.
 pub(crate) fn repository_refs(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
     let repo = obj.get::<Repo>()?;
     let prefix: String = required(args, "refPrefix")?;
@@ -217,7 +212,6 @@ pub(crate) fn repository_refs(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<R
     )
 }
 
-/// The name GitHub shows for a ref: without `refs/heads/` or `refs/tags/`.
 pub(crate) fn ref_name(_: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {
     let r = obj.get::<RefNode>()?;
     let short = ["refs/heads/", "refs/tags/", "refs/"]
@@ -297,7 +291,6 @@ pub(crate) fn tree_entry_name(_: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolv
     )))
 }
 
-/// The mode as GraphQL's `Int`: the octal mode read as a number (`100644` is `33188`).
 pub(crate) fn tree_entry_mode(_: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {
     let mode = obj.get::<TreeEntryNode>()?.entry.mode;
     let value = i64::from_str_radix(mode.as_str(), 8)
@@ -318,18 +311,11 @@ pub(crate) fn blob_is_truncated(_: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Reso
     Ok(Resolved::Leaf(json!(false)))
 }
 
-/// The value behind `CreateCommitOnBranchPayload`.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct CommitPayload {
     pub client_mutation_id: Option<String>,
-    #[serde(skip)]
     pub commit: CommitNode,
 }
 
-/// The value behind `UpdateRefsPayload`.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct RefsPayload {
     pub client_mutation_id: Option<String>,
 }
@@ -340,6 +326,16 @@ pub(crate) fn payload_commit(_: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolve
         type_name: "Commit",
         value: Arc::new(p.commit.clone()),
     })
+}
+
+pub(crate) fn commit_payload_client_mutation_id(
+    _: &Ctx<'_>,
+    obj: &Obj,
+    _: &Args,
+) -> Result<Resolved, GqlError> {
+    Ok(Resolved::Leaf(json!(
+        obj.get::<CommitPayload>()?.client_mutation_id
+    )))
 }
 
 pub(crate) fn payload_client_mutation_id(
@@ -412,8 +408,6 @@ fn loaded_repo(r: Resolved) -> Result<Arc<Repo>, GqlError> {
     }
 }
 
-/// `createCommitOnBranch`: a web-flow signed commit authored by the actor, written only when
-/// the branch still points at `expectedHeadOid`.
 pub(crate) fn create_commit_on_branch(
     m: &mut MutCtx<'_>,
     args: &Args,
@@ -532,8 +526,6 @@ fn optional_oid(text: &str) -> Result<Option<ObjectId>, GqlError> {
     Ok((id != ObjectId::NULL).then_some(id))
 }
 
-/// `updateRefs`: every update or none. A zero `afterOid` deletes the ref; a zero `beforeOid`
-/// requires that it does not exist; without `beforeOid` the ref moves from where it is.
 pub(crate) fn update_refs(m: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, GqlError> {
     let input: UpdateRefsInput = required(args, "input")?;
     let repo_id =

@@ -197,7 +197,6 @@ fn render_tree(
     })
 }
 
-/// The tree a tree ID, commit ID, tag or ref names.
 pub(crate) fn tree_of(
     git: &Git,
     tx: &Tx,

@@ -375,7 +375,11 @@ fn added_patch(data: &[u8]) -> (u64, Option<String>) {
     }
     let lines: Vec<&str> = text.lines().collect();
     let count = u64::try_from(lines.len()).unwrap_or(u64::MAX);
-    let mut patch = format!("@@ -0,0 +1,{count} @@");
+    let mut patch = if count == 1 {
+        "@@ -0,0 +1 @@".to_owned()
+    } else {
+        format!("@@ -0,0 +1,{count} @@")
+    };
     for l in &lines {
         patch.push_str("\n+");
         patch.push_str(l);
@@ -633,7 +637,6 @@ struct Branch {
     protection_url: String,
 }
 
-/// `fnmatch` as rulesets use it: `*` within a path segment, `**` across segments.
 fn glob(pattern: &[u8], name: &[u8]) -> bool {
     match pattern {
         [] => name.is_empty(),
@@ -658,7 +661,6 @@ fn ref_matches(patterns: Option<&serde_json::Value>, full: &str, default: &str) 
         })
 }
 
-/// Whether an active branch ruleset of the repository or its owner covers `branch`.
 fn protected(tx: &Tx, repo: &Repo, branch: &str) -> bool {
     let full = format!("refs/heads/{branch}");
     let default = format!("refs/heads/{}", repo.default_branch);
@@ -734,7 +736,7 @@ mod tests {
             added_patch(b"a"),
             (
                 1,
-                Some("@@ -0,0 +1,1 @@\n+a\n\\ No newline at end of file".to_owned())
+                Some("@@ -0,0 +1 @@\n+a\n\\ No newline at end of file".to_owned())
             )
         );
         assert_eq!(added_patch(b"\0bin"), (0, None));

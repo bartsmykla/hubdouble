@@ -14,7 +14,6 @@ use serde::Serialize;
 const BASE64_LINE: usize = 60;
 const MAX_FORK_DEPTH: usize = 64;
 
-/// The API and web roots of one repository: `<api>/repos/<owner>/<name>` and `<web>/<owner>/<name>`.
 pub(crate) struct Links {
     pub api: String,
     pub web: String,
@@ -66,7 +65,6 @@ fn object_prefix(kind: ObjectKind) -> &'static str {
     }
 }
 
-/// The node ID of a git object in one repository.
 pub(crate) fn object_node_id(kind: ObjectKind, repo_id: i64, id: ObjectId) -> String {
     node_id::encode(
         object_prefix(kind),
@@ -81,8 +79,10 @@ pub(crate) fn ref_node_id(repo_id: i64, name: &str) -> String {
     )
 }
 
-/// Base64 in lines of 60 characters, each ending in a newline, as GitHub writes file contents.
-pub(crate) fn wrapped_base64(data: &[u8]) -> String {
+/// Base64 in lines of 60 characters, each ending in a newline, as GitHub writes the `content`
+/// of a blob or a file.
+#[must_use]
+pub fn wrapped_base64(data: &[u8]) -> String {
     let encoded = STANDARD.encode(data);
     let mut out = String::with_capacity(encoded.len() + encoded.len() / BASE64_LINE + 1);
     for line in encoded.as_bytes().chunks(BASE64_LINE) {
@@ -92,13 +92,14 @@ pub(crate) fn wrapped_base64(data: &[u8]) -> String {
     out
 }
 
-/// Decodes base64 that may hold line breaks.
-pub(crate) fn decode_base64(text: &str) -> Option<Vec<u8>> {
+/// Decodes base64 that may hold whitespace and line breaks, as a client sends a blob or file;
+/// `None` when it is not base64.
+#[must_use]
+pub fn decode_base64(text: &str) -> Option<Vec<u8>> {
     let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     STANDARD.decode(compact).ok()
 }
 
-/// Whether `Accept` asks for `application/vnd.github.<name>` (or `.v3.<name>`, or `+json`).
 pub(crate) fn accepts(ctx: &Ctx<'_>, name: &str) -> bool {
     ctx.header("accept").is_some_and(|accept| {
         accept
@@ -123,14 +124,12 @@ pub(crate) fn parse_oid(text: &str) -> Option<ObjectId> {
     text.parse().ok()
 }
 
-/// The account the writes of `actor` name: the user, or the App's bot.
 pub(crate) fn sender(actor: &Actor) -> Result<&Arc<Account>, ApiError> {
     actor
         .account()
         .ok_or_else(|| ApiError::forbidden("Resource not accessible by integration"))
 }
 
-/// A person in a commit made for `account` at `time`: its name and public or noreply email.
 pub(crate) fn signature_of(account: &Account, time: Timestamp) -> Signature {
     Signature {
         name: account
@@ -145,7 +144,6 @@ pub(crate) fn signature_of(account: &Account, time: Timestamp) -> Signature {
     }
 }
 
-/// The account a commit email belongs to: its public email or its noreply address.
 pub(crate) fn account_by_email<'t>(tx: &'t Tx, email: &str) -> Option<&'t Arc<Account>> {
     let local = email.strip_suffix("@users.noreply.github.com");
     let login = local.map(|l| l.split_once('+').map_or(l, |(_, login)| login));
@@ -169,7 +167,6 @@ fn network_root(tx: &Tx, repo: i64) -> i64 {
     id
 }
 
-/// The repository of the fork network of `repo` that `owner` holds, for `owner:ref` heads.
 pub(crate) fn network_repo<'t>(tx: &'t Tx, repo: &Repo, owner: &str) -> Option<&'t Arc<Repo>> {
     let account = tx.table::<Accounts>().by_login(owner)?;
     let root = network_root(tx, repo.id);
@@ -178,7 +175,6 @@ pub(crate) fn network_repo<'t>(tx: &'t Tx, repo: &Repo, owner: &str) -> Option<&
         .find(|r| r.owner_id == account.id && network_root(tx, r.id) == root)
 }
 
-/// Resolves a branch, tag or object ID and peels it to a commit.
 pub(crate) fn commit_at(
     git: &Git,
     tx: &Tx,
