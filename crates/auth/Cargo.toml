@@ -9,9 +9,25 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
 http.workspace = true
 hubdouble-model.workspace = true
 hubdouble-store.workspace = true
+jsonwebtoken.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+hubdouble-admin.workspace = true
+hubdouble-api.workspace = true
+hubdouble-rest.workspace = true
+hubdouble-server.workspace = true
+
+[[bench]]
+name = "auth"
+harness = false
 
 [lints]
 workspace = true

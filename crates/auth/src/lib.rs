@@ -1,3 +1,20 @@
+mod admin;
+mod check;
 mod contract;
+mod credential;
+mod error;
+mod narrow;
+mod requirement;
+mod sso;
 
+pub use admin::authenticate_admin;
+pub use check::repo_role;
 pub use contract::*;
+pub use credential::{
+    INSTALLATION_TOKEN_TTL, JWT_IAT_SKEW, JWT_MAX_LIFETIME, REFRESH_TOKEN_TTL, USER_TOKEN_TTL,
+    verify_app_jwt,
+};
+pub use error::AuthError;
+pub use narrow::{MAX_TOKEN_REPOSITORIES, NarrowRequest, Narrowed, narrow};
+pub use requirement::{APP_PERMISSIONS, check_requirement};
+pub use sso::{SsoSession, SsoSessions, has_sso, record_sso, register_tables};

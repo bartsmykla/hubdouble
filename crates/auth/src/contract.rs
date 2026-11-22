@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use http::HeaderMap;
-use hubdouble_model::{
-    Account, ApiError, App, Clock, Installation, Repo, Requirement, Scope, Token,
-};
+use hubdouble_model::{Account, ApiError, App, Clock, Installation, Repo, Requirement, Token};
 use hubdouble_store::Tx;
 
 /// Who a request acts as, resolved once per request from its `Authorization` header.
@@ -70,16 +68,16 @@ pub enum Target<'a> {
 ///
 /// # Errors
 ///
-/// `401` for a bad, expired or revoked credential.
+/// `401` for a bad, expired or revoked credential, a refresh token, or an App JWT that breaks
+/// a rule of [`crate::verify_app_jwt`]; `403` for a token of a suspended installation. No
+/// `Authorization` header is [`Actor::Anonymous`]. The schemes `Bearer` and `token` are accepted.
 pub fn authenticate(tx: &Tx, clock: &dyn Clock, headers: &HeaderMap) -> Result<Actor, ApiError> {
-    let _ = (tx, clock);
-    if headers.contains_key(http::header::AUTHORIZATION) {
-        return Err(ApiError::not_implemented("auth/authenticate"));
-    }
-    Ok(Actor::Anonymous)
+    crate::credential::authenticate(tx, clock.now(), headers)
 }
 
 /// The choke point: checks `req` against the actor's grant and the target.
+///
+/// The `X-GitHub-SSO` link is relative here; [`authorize_at`] names the origin.
 ///
 /// # Errors
 ///
@@ -91,16 +89,29 @@ pub fn authorize(
     req: &Requirement,
     target: Target<'_>,
 ) -> Result<(), ApiError> {
-    let _ = (tx, actor, target);
-    if req.scope == Scope::Public && req.any_of.is_empty() {
-        return Ok(());
-    }
-    Err(ApiError::not_implemented("auth/authorize"))
+    authorize_at(tx, actor, req, target, "")
 }
 
-/// Whether the actor can see the repository, for GraphQL's per-object check.
+/// As [`authorize`], with `base_url` (`HUBDOUBLE_BASE_URL`, no trailing `/`) as the origin of
+/// the `X-GitHub-SSO` link `required; url=<base_url>/orgs/<org>/sso`.
+///
+/// # Errors
+///
+/// As [`authorize`].
+pub fn authorize_at(
+    tx: &Tx,
+    actor: &Actor,
+    req: &Requirement,
+    target: Target<'_>,
+    base_url: &str,
+) -> Result<(), ApiError> {
+    crate::check::authorize(tx, actor, req, target, base_url)
+}
+
+/// Whether the actor can see the repository, for GraphQL's per-object check. A public
+/// repository is visible to everyone; a private or internal one to an installation that covers
+/// it and to a user with a role on it whose token reaches it.
 #[must_use]
 pub fn can_see(tx: &Tx, actor: &Actor, repo: &Repo) -> bool {
-    let _ = (tx, actor, repo);
-    false
+    crate::check::can_see(tx, actor, repo)
 }
