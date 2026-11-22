@@ -183,6 +183,125 @@ async fn a_by_id_alias_answers_as_the_named_route_with_the_same_access_checks() 
     assert_eq!(user_as_org.status, StatusCode::NOT_FOUND);
 }
 
+fn rel_queries(client: &GoGithub, answer: &Answer) -> Vec<(String, String)> {
+    let issues = format!("{}repositories/{PUBLIC_REPO_ID}/issues?", client.base());
+    answer
+        .header("link")
+        .split(", ")
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let (url, rel) = l.split_once("; rel=").unwrap();
+            let query = url.trim_matches(['<', '>']).strip_prefix(&issues).unwrap();
+            (rel.trim_matches('"').to_owned(), query.to_owned())
+        })
+        .collect()
+}
+
+fn shape(query: &str) -> String {
+    query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((name @ ("after" | "before"), cursor)) => {
+                assert!(cursor.starts_with("Y3Vyc29yOnYyOpL"), "{cursor}");
+                format!("{name}=*")
+            }
+            _ => pair.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn shapes(client: &GoGithub, answer: &Answer) -> Vec<(String, String)> {
+    rel_queries(client, answer)
+        .into_iter()
+        .map(|(rel, q)| (rel, shape(&q)))
+        .collect()
+}
+
+fn numbers(answer: &Answer) -> Vec<i64> {
+    answer
+        .json()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["number"].as_i64().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_issue_list_pages_with_githubs_after_and_before_cursors() {
+    // Given five open issues on acme/public
+    let (_server, alice) = repo_with_labels(1).await;
+    for n in 0..5 {
+        let made = alice
+            .post(
+                "repos/acme/public/issues",
+                &json!({"title": format!("issue {n}")}),
+            )
+            .await;
+        assert_eq!(made.status, StatusCode::CREATED);
+    }
+    let every = numbers(&alice.get("repos/acme/public/issues?per_page=100").await);
+    assert_eq!(every.len(), 5);
+
+    // When the client follows each next link from the first page, as live GitHub writes it
+    let first = alice.get("repos/acme/public/issues?per_page=2").await;
+    let mut pages = vec![first];
+    while let Some(next) = next_link(&alice, pages.last().unwrap()) {
+        pages.push(alice.get(&next).await);
+    }
+    let by_page = alice
+        .get("repos/acme/public/issues?per_page=2&page=2")
+        .await;
+    let back = rel_queries(&alice, &pages[2])
+        .into_iter()
+        .find(|(rel, _)| rel == "prev")
+        .unwrap()
+        .1;
+    let before = alice
+        .get(&format!("repositories/{PUBLIC_REPO_ID}/issues?{back}"))
+        .await;
+    let past_the_end = alice
+        .get("repos/acme/public/issues?per_page=2&page=9")
+        .await;
+    let bogus = alice.get("repos/acme/public/issues?after=bogus").await;
+
+    // Then the pages hold every issue once, in order, with live GitHub's links
+    assert_eq!(pages.len(), 3);
+    assert_eq!(pages.iter().flat_map(numbers).collect::<Vec<_>>(), every);
+    let s = |rel: &str, q: &str| (rel.to_owned(), q.to_owned());
+    assert_eq!(
+        shapes(&alice, &pages[0]),
+        [s("next", "per_page=2&after=*&page=2")]
+    );
+    assert_eq!(
+        shapes(&alice, &pages[1]),
+        [
+            s("next", "per_page=2&after=*&page=3"),
+            s("prev", "per_page=2&page=1&before=*"),
+        ]
+    );
+    assert_eq!(
+        shapes(&alice, &pages[2]),
+        [s("prev", "per_page=2&page=2&before=*")]
+    );
+    assert_eq!(numbers(&by_page), every[2..4]);
+    assert_eq!(
+        shapes(&alice, &by_page),
+        [
+            s("next", "per_page=2&page=3&after=*"),
+            s("prev", "per_page=2&page=1&before=*"),
+        ]
+    );
+    assert_eq!(numbers(&before), every[2..4]);
+    assert_eq!(past_the_end.status, StatusCode::OK);
+    assert_eq!(numbers(&past_the_end), Vec::<i64>::new());
+    assert_eq!(past_the_end.header("link"), "");
+    assert_eq!(bogus.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(bogus.json()["errors"][0]["field"], "after");
+    assert_eq!(bogus.json()["errors"][0]["code"], "invalid");
+}
+
 #[tokio::test]
 async fn an_unknown_media_type_still_answers_json_and_names_the_type_asked_for() {
     // Given
