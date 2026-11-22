@@ -223,9 +223,6 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let comments = tx.table::<IssueComments>();
     let ascending = q.get("direction") == Some("asc");
     let sort = q.get("sort").unwrap_or("created");
-    if !matches!(sort, "updated" | "comments" | "created") {
-        return Err(invalid("Issue", "sort", "invalid"));
-    }
     let millis = |t: Timestamp| u64::try_from(t.unix()).unwrap_or(0).saturating_mul(1000);
     let mut keyed: Vec<Keyed<Arc<Issue>>> = issues
         .into_iter()

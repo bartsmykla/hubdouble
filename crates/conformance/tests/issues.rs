@@ -473,6 +473,20 @@ async fn issues_list_by_state_and_label_with_pages_as_findings_reads_them() {
 }
 
 #[tokio::test]
+async fn issue_list_uses_newest_first_for_an_unknown_sort() {
+    let server = start().await;
+    let alice = as_alice(&server);
+    let first = open_issue(&alice, &json!({"title": "first"})).await;
+    server.clock.advance(1);
+    let last = open_issue(&alice, &json!({"title": "last"})).await;
+    let answer = alice.get(&format!("{REPO}/issues?sort=bogus")).await;
+    assert_eq!(answer.status, StatusCode::OK);
+    let issues = answer.json();
+    assert_eq!(issues[0]["id"], last["id"]);
+    assert_eq!(issues[1]["id"], first["id"]);
+}
+
+#[tokio::test]
 async fn a_writer_labels_a_new_issue_and_a_reader_gets_the_labels_dropped() {
     // Given
     let server = start().await;
