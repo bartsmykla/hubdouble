@@ -301,6 +301,44 @@ async fn an_asset_asked_for_as_octet_stream_redirects_to_its_bytes() {
     assert_eq!(statuses, vec![&json!(200), &json!(302)]);
 }
 
+#[tokio::test]
+async fn a_private_asset_reaches_its_bytes_only_through_the_checked_redirect() {
+    // Given
+    let mut seed = release_seed();
+    seed["repository"] = json!("acme/private");
+    let server = start(vec![seed]).await;
+    let path = "repos/acme/private/releases/assets/7101";
+    // When
+    let redirect = alice(&server)
+        .call_headers(
+            Method::GET,
+            path,
+            HeaderMap::from_iter([(ACCEPT, HeaderValue::from_static(OCTET_STREAM))]),
+        )
+        .await;
+    let landed = redirect
+        .header("location")
+        .strip_prefix(&server.base)
+        .unwrap()
+        .to_owned();
+    let anonymous = GoGithub::new(&server);
+    let checked = anonymous.get(&landed).await;
+    let guessed = anonymous.get("/_blobs/release-asset-7101").await;
+    let unchecked = anonymous
+        .call_headers(
+            Method::GET,
+            path,
+            HeaderMap::from_iter([(ACCEPT, HeaderValue::from_static(OCTET_STREAM))]),
+        )
+        .await;
+    // Then
+    assert_eq!(redirect.status, StatusCode::FOUND);
+    assert_eq!(&checked.body[..], b"the asset bytes");
+    assert!(!landed.contains("7101"), "landed on {landed}");
+    assert_eq!(guessed.status, StatusCode::NOT_FOUND);
+    assert_eq!(unchecked.status, StatusCode::NOT_FOUND);
+}
+
 fn ruleset(id: i64, include: &[&str], rule: &str, enforcement: &str) -> Value {
     json!({"kind": "ruleset", "id": id, "repository": "acme/public", "name": format!("r{id}"),
            "target": "branch", "enforcement": enforcement,

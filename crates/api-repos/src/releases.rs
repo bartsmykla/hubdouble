@@ -253,7 +253,7 @@ fn release_kind(ctx: &mut SeedCtx<'_>, v: Value) -> Result<(), ApiError> {
         let asset_id = a.id.unwrap_or_else(|| ctx.tx.next_id());
         let data = Bytes::from(a.content.into_bytes());
         let content_type = a.content_type.unwrap_or_else(|| OCTET_STREAM.to_owned());
-        let blob_id = format!("release-asset-{asset_id}");
+        let blob_id = uuid::Uuid::new_v4().to_string();
         ctx.tx.table_mut::<Blobs>().insert(
             blob_id.clone(),
             Blob {
