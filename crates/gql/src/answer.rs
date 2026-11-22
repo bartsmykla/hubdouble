@@ -74,23 +74,28 @@ impl Schema {
                 "a resource limit error",
             );
         }
-        let data = data.ok_or_else(|| invalid(&[], "data or request errors"))?;
         for error in &errors {
             demand(
-                !error.path.is_empty() && check.trace(&root, &ty, Some(data), error.path, false),
+                !error.path.is_empty() && check.trace(&root, &ty, data, error.path, false),
                 error.path,
                 "a selected field or list item that resolved to null",
             )?;
         }
-        if data.is_null() {
-            demand(
-                check.bubbled(&root, &ty, &[]),
-                &[],
-                "a non-null field error",
-            )?;
-            return Ok(());
+        if let Some(data) = data.filter(|v| !v.is_null()) {
+            return check.selected(&root, &ty, data, &[]);
         }
-        check.selected(&root, &ty, data, &[])
+        if operation.operation_type.is_query() && check.root_search_cursor_error(&root, &ty) {
+            return demand(
+                data.is_none(),
+                &[],
+                "a root search cursor error without data",
+            );
+        }
+        demand(
+            data.is_some() && check.bubbled(&root, &ty, &[]),
+            &[],
+            "null data from a non-null field error",
+        )
     }
 }
 
@@ -238,6 +243,20 @@ struct Check<'a> {
 }
 
 impl<'a> Check<'a> {
+    fn root_search_cursor_error(&self, root: &[&'a SelectionSet], ty: &Type) -> bool {
+        let fields = self.fields(root, ty.inner_named_type());
+        self.errors.iter().any(|error| {
+            error.kind == Some("INVALID_CURSOR_ARGUMENTS")
+                && error
+                    .path
+                    .first()
+                    .and_then(Value::as_str)
+                    .and_then(|key| fields.get(key))
+                    .is_some_and(|group| group[0].name == "search")
+                && self.trace(root, ty, None, error.path, true)
+        })
+    }
+
     fn selected(
         &self,
         sets: &[&'a SelectionSet],

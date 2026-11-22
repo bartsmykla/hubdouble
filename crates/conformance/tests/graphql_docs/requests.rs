@@ -193,27 +193,27 @@ async fn zero_page_sizes_keep_counts_and_return_empty_pages() {
 }
 
 #[tokio::test]
-async fn only_connections_that_select_page_items_require_a_size() {
+async fn connections_without_page_fields_do_not_require_a_size() {
     let server = server().await;
     let api = Graphql::new(client(&server, fixture::ALICE_TOKEN));
     let doc = r#"{
         repository(owner:"acme",name:"docs") {
             count:refs(refPrefix:"refs/heads/prompts/") {totalCount}
-            meta:refs(refPrefix:"refs/heads/prompts/") {
-                pageInfo {hasNextPage hasPreviousPage startCursor endCursor}
-            }
+            kind:refs(refPrefix:"refs/heads/prompts/") {__typename}
         }
     }"#;
     let data = success(&api, doc, Value::Null).await;
     assert_eq!(
         data["repository"],
         json!({
-            "count":{"totalCount":2},"meta":{"pageInfo":{
-                "hasNextPage":false,"hasPreviousPage":false,"startCursor":null,"endCursor":null
-            }}
+            "count":{"totalCount":2},"kind":{"__typename":"RefConnection"}
         })
     );
-    for selection in ["items:nodes {name}", "items:edges {cursor}"] {
+    for selection in [
+        "items:nodes {name}",
+        "items:edges {cursor}",
+        "meta:pageInfo {__typename}",
+    ] {
         let doc = format!(
             r#"{{
             repository(owner:"acme",name:"docs") {{
@@ -233,6 +233,31 @@ async fn only_connections_that_select_page_items_require_a_size() {
         assert_eq!(body["errors"][0]["type"], "MISSING_PAGINATION_BOUNDARIES");
         assert_eq!(body["errors"][0]["path"], json!(["repository", "page"]));
     }
+}
+
+#[tokio::test]
+async fn a_root_search_cursor_error_omits_data_when_it_reaches_the_root() {
+    let server = server().await;
+    let api = Graphql::new(client(&server, fixture::ALICE_TOKEN));
+    let doc = r#"{
+        broken:search(type:ISSUE,query:"repo:acme/docs is:pr",first:1,after:"bogus") {
+            issueCount pageInfo{startCursor more:hasNextPage}
+        }
+        healthy:search(type:ISSUE,query:"repo:acme/docs is:pr",first:1) {__typename}
+    }"#;
+    let response = api.query(doc, &Value::Null).await;
+    assert_eq!(response.status, StatusCode::OK);
+    let body = response.json();
+    assert!(body.get("data").is_none(), "{body}");
+    let errors = body["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 2);
+    assert_eq!(errors[0]["type"], "INVALID_CURSOR_ARGUMENTS");
+    assert_eq!(
+        errors[0]["path"],
+        json!(["broken", "pageInfo", "startCursor"])
+    );
+    assert_eq!(errors[1]["type"], "INVALID_CURSOR_ARGUMENTS");
+    assert_eq!(errors[1]["path"], json!(["broken", "pageInfo", "more"]));
 }
 
 #[tokio::test]

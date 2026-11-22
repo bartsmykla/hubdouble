@@ -134,7 +134,7 @@ impl<'r> Exec<'r> {
             let mut visited = HashSet::new();
             if fields
                 .iter()
-                .any(|f| self.selects_page_items(&f.selection_set, &mut visited))
+                .any(|f| self.selects_page_fields(&f.selection_set, &mut visited))
             {
                 self.field_error(GqlError::new(
                     ErrorType::MissingPaginationBoundaries,
@@ -152,11 +152,13 @@ impl<'r> Exec<'r> {
             .map(Value::Object)
     }
 
-    fn selects_page_items(&self, set: &'r SelectionSet, visited: &mut HashSet<&'r str>) -> bool {
+    fn selects_page_fields(&self, set: &'r SelectionSet, visited: &mut HashSet<&'r str>) -> bool {
         set.selections.iter().any(|part| match part {
-            Selection::Field(field) => matches!(field.name.as_str(), "nodes" | "edges"),
+            Selection::Field(field) => {
+                matches!(field.name.as_str(), "nodes" | "edges" | "pageInfo")
+            }
             Selection::InlineFragment(fragment) => {
-                self.selects_page_items(&fragment.selection_set, visited)
+                self.selects_page_fields(&fragment.selection_set, visited)
             }
             Selection::FragmentSpread(spread) => {
                 visited.insert(spread.fragment_name.as_str())
@@ -165,7 +167,7 @@ impl<'r> Exec<'r> {
                         .fragments
                         .get(&spread.fragment_name)
                         .is_some_and(|fragment| {
-                            self.selects_page_items(&fragment.selection_set, visited)
+                            self.selects_page_fields(&fragment.selection_set, visited)
                         })
             }
         })

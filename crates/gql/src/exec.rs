@@ -86,6 +86,7 @@ struct Exec<'r> {
     vars: &'r Map<String, Value>,
     errors: Vec<ResponseError>,
     warnings: Vec<Value>,
+    omit_data: bool,
 }
 
 impl<'r> Exec<'r> {
@@ -252,12 +253,24 @@ impl<'r> Exec<'r> {
                 parent: path,
                 seg: Seg::Key(key),
             };
+            let errors_before = self.errors.len();
             match self.field(cx, parent, type_name, fields, &path, &mut serde) {
                 Ok(v) => {
                     map.insert((*key).to_owned(), v);
                 }
                 Err(Null) if matches!(parent, Parent::InvalidPageInfo(_)) => return Err(Null),
-                Err(Null) => nulled = true,
+                Err(Null) => {
+                    nulled = true;
+                    if path.parent.is_none()
+                        && type_name == QUERY
+                        && fields[0].name == "search"
+                        && self.errors[errors_before..]
+                            .iter()
+                            .any(|error| error.kind == ErrorType::InvalidCursorArguments)
+                    {
+                        self.omit_data = true;
+                    }
+                }
             }
         }
         if nulled { Err(Null) } else { Ok(map) }

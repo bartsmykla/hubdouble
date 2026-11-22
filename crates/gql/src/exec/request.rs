@@ -41,6 +41,7 @@ pub(crate) fn execute(
         vars: &vars,
         errors: Vec::new(),
         warnings: Vec::new(),
+        omit_data: false,
     };
     let data = match op.operation_type {
         OperationType::Query => store.view(|tx| {
@@ -75,7 +76,7 @@ pub(crate) fn execute(
         m
     });
     Ok(Response {
-        data: Some(data.map_or(Value::Null, Value::Object)),
+        data: (!ex.omit_data).then(|| data.map_or(Value::Null, Value::Object)),
         errors: ex.errors,
         extensions,
     })
