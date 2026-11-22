@@ -1,0 +1,18 @@
+[package]
+name = "hubdouble-render"
+description = "GitHub's REST shapes for every frozen entity, used in answers and webhook payloads"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+hubdouble-model.workspace = true
+percent-encoding.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
