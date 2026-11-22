@@ -137,5 +137,5 @@ fn redeliver(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let app_id = app(ctx)?.id;
     let id = ctx.param_i64("delivery_id")?;
     hubdouble_hooks::redeliver(ctx.tx_mut()?, app_id, id)?;
-    Ok(Reply::empty().status(StatusCode::ACCEPTED))
+    Ok(Reply::json(&serde_json::json!({}))?.status(StatusCode::ACCEPTED))
 }
