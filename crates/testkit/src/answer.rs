@@ -200,6 +200,7 @@ pub fn api_path(path: &str) -> &str {
 ///   (<https://docs.github.com/en/rest/using-the-rest-api/getting-started-with-the-rest-api#about-the-response-code-and-headers>,
 ///   <https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#checking-the-status-of-your-rate-limit>,
 ///   plan section 4.7), and `Location` where the operation documents it.
+///   `X-GitHub-Api-Version-Selected` names the selected version unless GitHub rejects the version.
 /// - A non-JSON body answers only a documented media type or the one `Accept` asked for.
 /// - Routes outside the bundle are checked against their own docs: `/_blobs/{id}` (plan
 ///   sections 4.1 and 4.8), the Actions OIDC discovery (`OpenID` Connect Discovery 1.0 section
@@ -319,6 +320,9 @@ fn check_operation(
             errors.push(format!("{}: no {name} header", op.id));
         }
     }
+    if let Some(error) = version_error(x, op.id) {
+        errors.push(error);
+    }
     if header(x.headers, "x-ratelimit-remaining") == "0" {
         errors.push(format!("{}: x-ratelimit-remaining is 0", op.id));
     }
@@ -352,6 +356,23 @@ fn check_operation(
         Ok(x.status)
     } else {
         Err(errors)
+    }
+}
+
+fn version_error(x: &Exchange<'_>, id: &str) -> Option<String> {
+    const SELECTED: &str = "x-github-api-version-selected";
+    let requested = x.request_headers.get("x-github-api-version");
+    let version = requested.map_or(Some("2022-11-28"), |v| v.to_str().ok());
+    let selected = header(x.headers, SELECTED);
+    match version {
+        Some(version @ ("2022-11-28" | "2026-03-10")) if selected == version => None,
+        Some(version @ ("2022-11-28" | "2026-03-10")) => Some(format!(
+            "{id}: expected {SELECTED} {version}, got {selected:?}"
+        )),
+        _ if x.status == 400 && !x.headers.contains_key(SELECTED) => None,
+        _ => Some(format!(
+            "{id}: unsupported API version requires 400 without {SELECTED}"
+        )),
     }
 }
 
@@ -709,6 +730,7 @@ mod tests {
         for (n, v) in [
             ("x-github-request-id", "0000:0001:000001:000001:00000000"),
             ("x-github-media-type", "github.v3; format=json"),
+            ("x-github-api-version-selected", "2022-11-28"),
             ("x-ratelimit-limit", "5000"),
             ("x-ratelimit-remaining", "4999"),
             ("x-ratelimit-reset", "1"),
@@ -801,6 +823,37 @@ mod tests {
         let empty = HeaderMap::new();
         let unknown = exchange("GET", "/repos/o/r/nope", 404, &empty, b"");
         assert!(check(&unknown, &yes).is_err());
+    }
+
+    #[test]
+    fn an_answer_has_the_selected_rest_api_version() {
+        let mut headers = github_headers();
+        let yes = |_: &str| true;
+        headers.remove("x-github-api-version-selected");
+        let missing = exchange("GET", "/repos/o/r/labels", 200, &headers, b"[]");
+        assert!(check(&missing, &yes).is_err());
+        headers.insert(
+            "x-github-api-version-selected",
+            "2022-11-28".parse().unwrap(),
+        );
+        let request_headers = HeaderMap::from_iter([(
+            http::HeaderName::from_static("x-github-api-version"),
+            "2026-03-10".parse().unwrap(),
+        )]);
+        let wrong = Exchange {
+            request_headers: &request_headers,
+            ..exchange("GET", "/repos/o/r/labels", 200, &headers, b"[]")
+        };
+        assert!(check(&wrong, &yes).is_err());
+        headers.insert(
+            "x-github-api-version-selected",
+            "2026-03-10".parse().unwrap(),
+        );
+        let right = Exchange {
+            request_headers: &request_headers,
+            ..exchange("GET", "/repos/o/r/labels", 200, &headers, b"[]")
+        };
+        assert!(check(&right, &yes).is_ok());
     }
 
     #[test]
