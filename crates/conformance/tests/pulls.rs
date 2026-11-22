@@ -503,7 +503,7 @@ async fn graphql_links_nodes_refs_commits_reviews_and_draft_transitions() {
         "baseRefOid": draft["base"]["sha"], "headRefOid": draft["head"]["sha"], "headRefName": "feature",
         "baseRepository": {"nameWithOwner": "acme/public"}, "headRepository": {"nameWithOwner": "acme/public"},
         "title": "Feature against main", "body": "original", "url": draft["html_url"],
-        "updatedAt": draft["updated_at"], "mergedAt": null, "mergeCommit": null, "reviewDecision": "APPROVED",
+        "updatedAt": draft["updated_at"], "mergedAt": null, "mergeCommit": null, "reviewDecision": null,
         "commits": {"nodes": [{"commit": {"oid": draft["head"]["sha"]}}]}});
     assert_eq!(*pull, expected);
     assert_eq!(
@@ -512,7 +512,7 @@ async fn graphql_links_nodes_refs_commits_reviews_and_draft_transitions() {
     );
     assert_eq!(
         repo["all"]["associatedPullRequests"]["nodes"][0]["reviewDecision"],
-        "REVIEW_REQUIRED"
+        Value::Null
     );
     edit(
         &client,

@@ -2127,6 +2127,7 @@ dependencies = [
  "criterion",
  "http",
  "hubdouble-admin",
+ "hubdouble-api-repos",
  "hubdouble-auth",
  "hubdouble-git",
  "hubdouble-gql",
