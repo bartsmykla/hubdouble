@@ -17,5 +17,20 @@ hubdouble-server.workspace = true
 mimalloc.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+base64.workspace = true
+bytes.workspace = true
+http-body-util.workspace = true
+hubdouble-hooks.workspace = true
+hubdouble-testkit.workspace = true
+hyper = { workspace = true, features = ["client"] }
+hyper-util.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[[bench]]
+name = "targets"
+harness = false
+
 [lints]
 workspace = true

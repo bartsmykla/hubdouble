@@ -1,0 +1,47 @@
+name: bench
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+        with:
+          version: 2026.11.12
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: benchmarks on main
+        run: |
+          echo "HEAD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git checkout --detach origin/main
+          rm -rf target/criterion target/bench-targets.json
+          cargo bench --workspace --locked --no-fail-fast -- --save-baseline main || true
+          if [ -f target/bench-targets.json ]; then
+            mv target/bench-targets.json "$RUNNER_TEMP/main-targets.json"
+          fi
+      - name: benchmarks on the pull request and the gate against main
+        run: |
+          git checkout --detach "$HEAD_SHA"
+          status=0
+          cargo bench --workspace --locked --no-fail-fast -- --baseline-lenient main || status=1
+          if [ -f "$RUNNER_TEMP/main-targets.json" ]; then
+            export HUBDOUBLE_BENCH_BASELINE="$RUNNER_TEMP/main-targets.json"
+          fi
+          mise run bench:gate || status=1
+          exit "$status"

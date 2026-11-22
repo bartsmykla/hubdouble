@@ -26,8 +26,16 @@ description = "Build the release binary"
 run = "cargo build --release --locked -p hubdouble"
 
 [bench]
-description = "Run the criterion benchmarks"
+description = "Run the criterion benchmarks and measure every target of plan section 9"
 run = "cargo bench --workspace --locked"
+
+["bench:targets"]
+description = "Measure every row of plan section 9 on the release profile on one CPU; fails on a miss"
+run = "cargo bench --locked -p hubdouble --bench targets"
+
+["bench:gate"]
+description = "Compare the last benchmark run with HUBDOUBLE_BENCH_BASELINE and criterion's main baseline; fails on a regression over 20 %"
+run = "cargo bench --locked -p hubdouble --bench targets -- --gate"
 
 [gen]
 description = "Generate crates/spec/src/ops_gen.rs from the pinned OpenAPI bundle"
