@@ -112,12 +112,27 @@ fn request(
     Some(req)
 }
 
-/// Sends one `POST` and reads the whole answer. The caller bounds it with the attempt timeout.
+async fn read_capped(mut body: hyper::body::Incoming, cap: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    while out.len() < cap {
+        let Some(frame) = body.frame().await else {
+            break;
+        };
+        if let Ok(data) = frame.ok()?.into_data() {
+            out.extend_from_slice(&data[..data.len().min(cap - out.len())]);
+        }
+    }
+    Some(out)
+}
+
+/// Sends one `POST` and reads at most `cap` bytes of the answer body. The caller bounds it with
+/// the attempt timeout.
 pub(crate) async fn send(
     connector: &dyn Connector,
     url: &str,
     headers: &BTreeMap<String, String>,
     body: Bytes,
+    cap: usize,
 ) -> Outcome {
     let Ok(uri) = url.parse::<Uri>() else {
         return Outcome::failed("Invalid URL");
@@ -137,11 +152,7 @@ pub(crate) async fn send(
         return Outcome::failed("Invalid HTTP Response");
     };
     let (parts, body) = resp.into_parts();
-    let Ok(body) = body
-        .collect()
-        .await
-        .map(http_body_util::Collected::to_bytes)
-    else {
+    let Some(body) = read_capped(body, cap).await else {
         return Outcome::failed("Invalid HTTP Response");
     };
     let code = parts.status.as_u16();

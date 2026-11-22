@@ -664,6 +664,24 @@ async fn reset_stops_queued_and_in_flight_attempts_of_the_old_epoch() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_log_keeps_only_the_first_response_bytes_of_a_long_answer() {
+    let store = world();
+    // Given a cap shorter than the receiver's 8-byte answer "received"
+    let (hooks, hits) = start(&store, |o| o.response_bytes = 3);
+    let _bodies = answer_all(hits);
+    // When an event is delivered
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    // Then the attempt succeeds and the log keeps only the capped prefix
+    let d = store
+        .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.status_code, 200);
+    assert_eq!(d.response.payload.as_deref(), Some("rec"));
+}
+
+#[tokio::test(start_paused = true)]
 async fn reset_keeps_a_job_the_new_epoch_queued_before_it_took_the_queue() {
     let store = world();
     let snapshot = store.snapshot();

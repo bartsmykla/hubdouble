@@ -433,6 +433,7 @@ impl Shared {
                 &job.url,
                 &job.headers,
                 job.body.clone(),
+                self.options.response_bytes,
             ),
         )
         .await

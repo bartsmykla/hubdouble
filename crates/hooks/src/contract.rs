@@ -72,8 +72,13 @@ pub struct Options {
     pub timeout: Duration,
     /// The delivery log ring size per App.
     pub log_capacity: usize,
+    /// The most bytes of a receiver's answer body that are read and logged; the rest is dropped.
+    pub response_bytes: usize,
     pub connector: Arc<dyn Connector>,
 }
+
+/// The default of [`Options::response_bytes`].
+pub const RESPONSE_BYTES: usize = 4 * 1024;
 
 impl Default for Options {
     fn default() -> Options {
@@ -83,6 +88,7 @@ impl Default for Options {
             queue_bytes: QUEUE_BYTES,
             timeout: Duration::from_secs(10),
             log_capacity: 50_000,
+            response_bytes: RESPONSE_BYTES,
             connector: Arc::new(TcpConnector),
         }
     }
