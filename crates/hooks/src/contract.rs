@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hubdouble_model::{ApiError, Clock, Config, Event};
+use hubdouble_model::{ApiError, Clock, Event};
 use hubdouble_store::{Snapshot, Store, TxMut};
 
 use crate::delivery::{Connector, TcpConnector};
@@ -103,12 +103,7 @@ impl Handle {
     /// # Errors
     ///
     /// [`HooksError`] when the workers cannot start.
-    pub fn start(
-        store: Store,
-        clock: Arc<dyn Clock>,
-        config: Arc<Config>,
-    ) -> Result<Handle, HooksError> {
-        drop(config);
+    pub fn start(store: Store, clock: Arc<dyn Clock>) -> Result<Handle, HooksError> {
         Handle::start_with(store, clock, Options::default())
     }
 
