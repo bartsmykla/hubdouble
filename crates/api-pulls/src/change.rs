@@ -461,5 +461,6 @@ fn validation(field: &str, code: &str) -> ApiError {
         field: field.into(),
         code: code.into(),
         message: None,
+        value: None,
     })
 }

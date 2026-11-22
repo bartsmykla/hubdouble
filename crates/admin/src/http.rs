@@ -245,6 +245,7 @@ impl Admin {
                         field: "id".to_owned(),
                         code: "invalid".to_owned(),
                         message: Some(format!("{id} is taken or at or below the ID sequence")),
+                        value: None,
                     }),
                 );
             }

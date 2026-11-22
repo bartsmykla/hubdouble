@@ -46,6 +46,7 @@ pub(crate) fn invalid(resource: &str, field: &str, code: &str) -> ApiError {
         field: field.to_owned(),
         code: code.to_owned(),
         message: None,
+        value: None,
     })
 }
 

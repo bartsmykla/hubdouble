@@ -300,6 +300,7 @@ async fn the_issue_list_pages_with_githubs_after_and_before_cursors() {
     assert_eq!(bogus.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(bogus.json()["errors"][0]["field"], "after");
     assert_eq!(bogus.json()["errors"][0]["code"], "invalid");
+    assert_eq!(bogus.json()["errors"][0]["value"], "bogus");
 }
 
 #[tokio::test]

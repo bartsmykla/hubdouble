@@ -35,5 +35,6 @@ fn invalid(resource: &str, field: &str, message: &str) -> ApiError {
         field: field.to_owned(),
         code: "invalid".to_owned(),
         message: None,
+        value: None,
     })
 }

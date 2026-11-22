@@ -10,6 +10,9 @@ pub struct FieldError {
     pub code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The rejected input, which GitHub echoes for some fields (an invalid list cursor).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
 }
 
 /// An error at the HTTP edge, written as GitHub's `{"message", "documentation_url", "status"}`.

@@ -81,7 +81,15 @@ pub(crate) fn page<T, R: Serialize>(
     let per_page = ctx.page_params().per_page;
     let cursor = |field: &str| {
         q.get(field)
-            .map(|c| decode(c).ok_or_else(|| invalid("Issue", field, "invalid")))
+            .map(|c| {
+                decode(c).ok_or_else(|| {
+                    let mut e = invalid("Issue", field, "invalid");
+                    if let Some(error) = e.errors.first_mut() {
+                        error.value = Some(c.into());
+                    }
+                    e
+                })
+            })
             .transpose()
     };
     let (after, before) = (cursor("after")?, cursor("before")?);

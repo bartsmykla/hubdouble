@@ -32,6 +32,7 @@ fn simple(answer: Result<Reply, ApiError>) -> Result<Reply, ApiError> {
                 field: String::new(),
                 code: String::new(),
                 message: Some(text),
+                value: None,
             }];
         }
         e

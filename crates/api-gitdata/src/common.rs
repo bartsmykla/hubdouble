@@ -117,6 +117,7 @@ pub(crate) fn unprocessable(resource: &str, field: &str, message: &str) -> ApiEr
         field: field.to_owned(),
         code: "invalid".to_owned(),
         message: Some(message.to_owned()),
+        value: None,
     })
 }
 

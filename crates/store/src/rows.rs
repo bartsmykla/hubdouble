@@ -54,6 +54,7 @@ impl From<Taken> for ApiError {
             field: t.what.to_owned(),
             code: "already_exists".to_owned(),
             message: None,
+            value: None,
         })
     }
 }
