@@ -40,6 +40,7 @@ apollo-compiler = "=1.33.1"
 base64 = "=0.23.1"
 bytes = "=1.12.2"
 criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+gix-actor = "=0.44.1"
 gix-hash = "=0.28.1"
 gix-object = "=0.66.1"
 hmac = "=0.13.0"
@@ -53,6 +54,7 @@ jsonwebtoken = { version = "=12.0.0", default-features = false, features = ["rus
 mimalloc = "=0.1.52"
 parking_lot = "=0.13.0"
 percent-encoding = "=2.3.2"
+rand = "=0.8.8"
 pgp = "=0.21.1"
 reqwest = { version = "=0.13.5", default-features = false, features = ["http2", "json", "rustls"] }
 rsa = "=0.10.0"

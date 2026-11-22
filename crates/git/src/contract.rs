@@ -1,10 +1,16 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use hubdouble_model::{ApiError, Timestamp};
+use hubdouble_model::{ApiError, Clock, SystemClock, Timestamp};
 use hubdouble_store::{StoreBuilder, Tx, TxMut};
+use parking_lot::RwLock;
 use serde::{Serialize, Serializer};
+
+use crate::odb::Odb;
+use crate::sign::WebFlow;
+use crate::{diff, events, history, merge, refs, tree};
 
 /// A SHA-1 git object ID.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -100,6 +106,30 @@ pub struct Signature {
     pub offset_minutes: i32,
 }
 
+impl Signature {
+    /// The fixed identity and time of seeded commits and tags (plan 4.6).
+    #[must_use]
+    pub fn seed() -> Signature {
+        Signature {
+            name: "hubdouble".to_owned(),
+            email: "seed@hubdouble.invalid".to_owned(),
+            time: Timestamp::SEED,
+            offset_minutes: 0,
+        }
+    }
+
+    /// `GitHub <noreply@github.com>`, the committer of every commit GitHub writes itself.
+    #[must_use]
+    pub fn web_flow(time: Timestamp) -> Signature {
+        Signature {
+            name: "GitHub".to_owned(),
+            email: "noreply@github.com".to_owned(),
+            time,
+            offset_minutes: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeEntry {
     pub name: String,
@@ -136,6 +166,18 @@ pub enum ObjectData {
     Tag(Arc<Tag>),
 }
 
+impl ObjectData {
+    #[must_use]
+    pub fn kind(&self) -> ObjectKind {
+        match self {
+            ObjectData::Blob(_) => ObjectKind::Blob,
+            ObjectData::Tree(_) => ObjectKind::Tree,
+            ObjectData::Commit(_) => ObjectKind::Commit,
+            ObjectData::Tag(_) => ObjectKind::Tag,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Object {
     pub id: ObjectId,
@@ -156,6 +198,7 @@ pub struct RefChange {
     pub name: String,
     pub old: Option<ObjectId>,
     pub new: Option<ObjectId>,
+    /// The update was not a fast-forward, as the `push` payload's `forced`.
     pub forced: bool,
 }
 
@@ -202,7 +245,8 @@ pub struct FileDiff {
     pub blob: ObjectId,
     pub additions: u64,
     pub deletions: u64,
-    /// The unified diff hunks; `None` for a binary file.
+    /// The unified diff hunks without a trailing newline, as GitHub's `patch`; `None` for a
+    /// binary file and for a file whose content did not change (a pure rename or mode change).
     pub patch: Option<String>,
 }
 
@@ -243,6 +287,9 @@ pub enum GitError {
     Conflict { paths: Vec<String> },
     #[error("invalid: {0}")]
     Invalid(String),
+    /// A ref subscriber refused the update; the transaction rolls back with its error.
+    #[error("a ref subscriber refused the update: {}", .0.message)]
+    Rejected(ApiError),
 }
 
 impl From<GitError> for ApiError {
@@ -253,6 +300,7 @@ impl From<GitError> for ApiError {
             GitError::Conflict { .. } => ApiError::conflict("Merge conflict"),
             GitError::RefExists => ApiError::unprocessable("Reference already exists"),
             GitError::NotFastForward => ApiError::unprocessable("Update is not a fast forward"),
+            GitError::Rejected(e) => e,
             other => ApiError::unprocessable(other.to_string()),
         }
     }
@@ -346,15 +394,19 @@ pub type RefSubscriber = fn(&mut TxMut<'_>, &Git, &RefChange) -> Result<(), ApiE
 /// Collects ref subscribers at start; [`GitBuilder::build`] freezes them.
 pub struct GitBuilder {
     subscribers: Vec<RefSubscriber>,
+    clock: Arc<dyn Clock>,
+    web_url: String,
 }
 
 impl GitBuilder {
     /// Registers git's tables (the refs) on the store builder.
     #[must_use]
     pub fn new(store: &mut StoreBuilder) -> GitBuilder {
-        let _ = store;
+        store.register_table::<refs::Refs>();
         GitBuilder {
             subscribers: Vec::new(),
+            clock: Arc::new(SystemClock),
+            web_url: hubdouble_model::Config::default().web_url,
         }
     }
 
@@ -363,29 +415,43 @@ impl GitBuilder {
         self.subscribers.push(f);
     }
 
+    /// The clock of merge commits; the system clock by default.
+    pub fn clock(&mut self, clock: Arc<dyn Clock>) {
+        self.clock = clock;
+    }
+
+    /// The origin of the links in `push` payloads (`HUBDOUBLE_WEB_URL`), without a trailing `/`.
+    pub fn web_url(&mut self, url: &str) {
+        url.trim_end_matches('/').clone_into(&mut self.web_url);
+    }
+
     #[must_use]
     pub fn build(self) -> Git {
         Git {
             inner: Arc::new(Inner {
                 subscribers: self.subscribers,
+                networks: RwLock::new(HashMap::new()),
+                web_flow: WebFlow::new(),
+                clock: self.clock,
+                web_url: self.web_url,
             }),
         }
     }
 }
 
-struct Inner {
+pub(crate) struct Inner {
     subscribers: Vec<RefSubscriber>,
+    networks: RwLock<HashMap<i64, Arc<Odb>>>,
+    web_flow: Result<WebFlow, GitError>,
+    clock: Arc<dyn Clock>,
+    pub(crate) web_url: String,
 }
 
 /// One per server: objects shared per fork network outside the store lock, refs per repository
 /// in a store table. Cloning is cheap and shares the state.
 #[derive(Clone)]
 pub struct Git {
-    inner: Arc<Inner>,
-}
-
-fn todo(what: &'static str) -> GitError {
-    GitError::NotImplemented(what)
+    pub(crate) inner: Arc<Inner>,
 }
 
 impl Git {
@@ -395,21 +461,35 @@ impl Git {
         self.inner.subscribers.len()
     }
 
+    pub(crate) fn odb(&self, tx: &Tx, repo: i64) -> Arc<Odb> {
+        let root = refs::network_root(tx, repo);
+        if let Some(odb) = self.inner.networks.read().get(&root) {
+            return odb.clone();
+        }
+        self.inner.networks.write().entry(root).or_default().clone()
+    }
+
+    /// The ref's own target, not peeled. Takes a full name (`refs/heads/main`), a short one
+    /// (`heads/main`, `main`, `v1.0`, tags before branches as git does) or `HEAD` for the
+    /// default branch.
+    ///
     /// # Errors
     ///
     /// [`GitError::NotFound`] for a missing ref.
     pub fn resolve_ref(&self, tx: &Tx, repo: i64, name: &str) -> Result<ObjectId, GitError> {
-        let _ = (tx, repo, name);
-        Err(todo("git/resolve_ref"))
+        refs::resolve(tx, repo, name).ok_or(GitError::NotFound)
     }
 
+    /// The refs whose full name starts with `prefix`, sorted by name; a prefix without `refs/`
+    /// gets it added, and an empty prefix lists every ref.
     #[must_use]
     pub fn refs(&self, tx: &Tx, repo: i64, prefix: &str) -> Vec<Ref> {
-        let _ = (tx, repo, prefix);
-        Vec::new()
+        refs::list(tx, repo, prefix)
     }
 
     /// Every ref change goes through here, and runs the subscribers in the same transaction.
+    /// `old` is the value the caller expects, `None` meaning the ref must not exist; `new`
+    /// `None` deletes the ref. Setting a ref to its current value changes nothing.
     ///
     /// # Errors
     ///
@@ -423,36 +503,129 @@ impl Git {
         new: Option<ObjectId>,
         force: bool,
     ) -> Result<(), GitError> {
-        let _ = (tx, repo, name, old, new, force);
-        Err(todo("git/update_ref"))
+        if !refs::valid_name(name) {
+            return Err(GitError::Invalid(format!("{name} is not a valid ref name")));
+        }
+        let current = refs::get(tx, repo, name);
+        match old {
+            None if current.is_some() => return Err(GitError::RefExists),
+            Some(o) if current != Some(o) => return Err(GitError::Stale),
+            _ => {}
+        }
+        if current == new {
+            return match new {
+                Some(_) => Ok(()),
+                None => Err(GitError::NotFound),
+            };
+        }
+        let odb = self.odb(tx, repo);
+        if let Some(n) = new {
+            let data = odb.get(n)?;
+            if name.starts_with("refs/heads/") && !matches!(data, ObjectData::Commit(_)) {
+                return Err(GitError::WrongKind);
+            }
+        }
+        let forced = match (current, new) {
+            (Some(o), Some(n)) => !history::fast_forward(&odb, o, n)?,
+            _ => false,
+        };
+        if forced && !force {
+            return Err(GitError::NotFastForward);
+        }
+        refs::set(tx, repo, name, new);
+        let change = RefChange {
+            repo_id: repo,
+            name: name.to_owned(),
+            old: current,
+            new,
+            forced,
+        };
+        for event in events::for_change(tx, self, &odb, &change)? {
+            hubdouble_hooks::emit(tx, event);
+        }
+        for subscriber in &self.inner.subscribers {
+            subscriber(tx, self, &change).map_err(GitError::Rejected)?;
+        }
+        Ok(())
     }
 
     /// # Errors
     ///
     /// [`GitError::NotFound`] when the repository's fork network lacks the object.
     pub fn object(&self, tx: &Tx, repo: i64, id: ObjectId) -> Result<Object, GitError> {
-        let _ = (tx, repo, id);
-        Err(todo("git/object"))
+        let data = self.odb(tx, repo).get(id)?;
+        Ok(Object { id, data })
     }
 
-    /// Resolves `main:docs/a.md`, `HEAD:`, a ref or an object ID.
+    /// Resolves `main:docs/a.md`, `HEAD:`, a ref or an object ID. A ref or ID alone answers the
+    /// object itself (an annotated tag stays a tag); with `:` it peels to the commit's tree.
     ///
     /// # Errors
     ///
     /// [`GitError::NotFound`] when the expression names nothing.
     pub fn expression(&self, tx: &Tx, repo: i64, expr: &str) -> Result<Object, GitError> {
-        let _ = (tx, repo, expr);
-        Err(todo("git/expression"))
+        let odb = self.odb(tx, repo);
+        let Some((rev, path)) = expr.split_once(':') else {
+            let id = self.rev(tx, repo, &odb, expr)?;
+            return Ok(Object {
+                id,
+                data: odb.get(id)?,
+            });
+        };
+        let (_, commit) = odb.peel_commit(self.rev(tx, repo, &odb, rev)?)?;
+        let id = tree::lookup(&odb, commit.tree, path)?;
+        Ok(Object {
+            id,
+            data: odb.get(id)?,
+        })
+    }
+
+    fn rev(&self, tx: &Tx, repo: i64, odb: &Odb, rev: &str) -> Result<ObjectId, GitError> {
+        if let Ok(id) = rev.parse::<ObjectId>()
+            && odb.contains(id)
+        {
+            return Ok(id);
+        }
+        self.resolve_ref(tx, repo, rev)
+    }
+
+    /// Peels tags until a commit and answers its ID.
+    ///
+    /// # Errors
+    ///
+    /// [`GitError::NotFound`] for a missing object, [`GitError::WrongKind`] when it does not peel to a commit.
+    pub fn peel_to_commit(&self, tx: &Tx, repo: i64, id: ObjectId) -> Result<ObjectId, GitError> {
+        Ok(self.odb(tx, repo).peel_commit(id)?.0)
+    }
+
+    /// The history from `head`, newest first: by committer time like `git log`, or along first
+    /// parents only; at most `limit` commits.
+    ///
+    /// # Errors
+    ///
+    /// [`GitError::NotFound`] when a commit is missing.
+    pub fn log(
+        &self,
+        tx: &Tx,
+        repo: i64,
+        head: ObjectId,
+        first_parent: bool,
+        limit: usize,
+    ) -> Result<Vec<(ObjectId, Arc<Commit>)>, GitError> {
+        let odb = self.odb(tx, repo);
+        let (head, _) = odb.peel_commit(head)?;
+        history::log(&odb, head, first_parent, limit)
     }
 
     /// # Errors
     ///
     /// [`GitError`] when the write fails.
     pub fn write_blob(&self, tx: &Tx, repo: i64, data: &[u8]) -> Result<ObjectId, GitError> {
-        let _ = (tx, repo, data);
-        Err(todo("git/write_blob"))
+        self.odb(tx, repo).put(ObjectData::Blob(data.into()))
     }
 
+    /// Sorts `entries` in git's order before it writes them.
+    ///
     /// # Errors
     ///
     /// [`GitError::NotFound`] when an entry names a missing object.
@@ -462,24 +635,31 @@ impl Git {
         repo: i64,
         entries: &[TreeEntry],
     ) -> Result<ObjectId, GitError> {
-        let _ = (tx, repo, entries);
-        Err(todo("git/write_tree"))
+        let odb = self.odb(tx, repo);
+        tree::write_entries(&odb, entries.to_vec())
     }
 
     /// # Errors
     ///
     /// [`GitError::NotFound`] when the tree or a parent is missing.
     pub fn write_commit(&self, tx: &Tx, repo: i64, commit: &Commit) -> Result<ObjectId, GitError> {
-        let _ = (tx, repo, commit);
-        Err(todo("git/write_commit"))
+        let odb = self.odb(tx, repo);
+        odb.tree(commit.tree)?;
+        for parent in &commit.parents {
+            odb.commit(*parent)?;
+        }
+        odb.put(ObjectData::Commit(Arc::new(commit.clone())))
     }
 
     /// # Errors
     ///
     /// [`GitError::NotFound`] when the target is missing.
     pub fn write_tag(&self, tx: &Tx, repo: i64, tag: &Tag) -> Result<ObjectId, GitError> {
-        let _ = (tx, repo, tag);
-        Err(todo("git/write_tag"))
+        let odb = self.odb(tx, repo);
+        if odb.get(tag.target)?.kind() != tag.target_kind {
+            return Err(GitError::WrongKind);
+        }
+        odb.put(ObjectData::Tag(Arc::new(tag.clone())))
     }
 
     /// Writes a commit of `changes` on `parent` and moves `branch` to it; `sign` signs it with the web-flow key.
@@ -502,11 +682,116 @@ impl Git {
         committer: &Signature,
         sign: bool,
     ) -> Result<ObjectId, GitError> {
-        let _ = (tx, repo, branch, parent, changes, author, committer, sign);
-        Err(todo("git/commit"))
+        self.commit_with_message(
+            tx, repo, branch, parent, changes, "", author, committer, sign,
+        )
     }
 
-    /// The merge base, ahead and behind counts, commits and files with patches.
+    /// [`Git::commit`] with a commit message. `branch` is a branch name or a full ref name.
+    ///
+    /// # Errors
+    ///
+    /// [`GitError::Stale`] when `branch` is not at `parent`, [`GitError::Invalid`] for a bad path.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the frozen contract of plan section 6.4 plus the message"
+    )]
+    pub fn commit_with_message(
+        &self,
+        tx: &mut TxMut<'_>,
+        repo: i64,
+        branch: &str,
+        parent: Option<ObjectId>,
+        changes: &[FileChange],
+        message: &str,
+        author: &Signature,
+        committer: &Signature,
+        sign: bool,
+    ) -> Result<ObjectId, GitError> {
+        let name = refs::branch_ref(branch);
+        if refs::get(tx, repo, &name) != parent {
+            return Err(GitError::Stale);
+        }
+        let odb = self.odb(tx, repo);
+        let base = match parent {
+            Some(p) => Some(odb.commit(p)?.tree),
+            None => None,
+        };
+        let mut commit = Commit {
+            tree: tree::apply(&odb, base, changes)?,
+            parents: parent.into_iter().collect(),
+            author: author.clone(),
+            committer: committer.clone(),
+            message: message.to_owned(),
+            gpg_signature: None,
+        };
+        if sign {
+            self.sign(&mut commit)?;
+        }
+        let id = odb.put(ObjectData::Commit(Arc::new(commit)))?;
+        self.update_ref(tx, repo, &name, parent, Some(id), false)?;
+        Ok(id)
+    }
+
+    fn sign(&self, commit: &mut Commit) -> Result<(), GitError> {
+        let key = self.inner.web_flow.as_ref().map_err(Clone::clone)?;
+        commit.gpg_signature = None;
+        let payload = crate::encode::commit_bytes(commit)?;
+        commit.gpg_signature = Some(key.sign(&payload, commit.committer.time)?);
+        Ok(())
+    }
+
+    /// GitHub's verification state of `commit`'s signature against the web-flow key.
+    #[must_use]
+    pub fn verification(&self, commit: &Commit) -> SignatureState {
+        let Some(signature) = &commit.gpg_signature else {
+            return SignatureState::Unsigned;
+        };
+        let Ok(key) = &self.inner.web_flow else {
+            return SignatureState::UnknownKey;
+        };
+        let unsigned = Commit {
+            gpg_signature: None,
+            ..commit.clone()
+        };
+        match crate::encode::commit_bytes(&unsigned) {
+            Ok(payload) => key.verify(signature, &payload),
+            Err(_) => SignatureState::Invalid,
+        }
+    }
+
+    /// The GraphQL `GitSignature` of a signed commit; `None` for an unsigned one.
+    #[must_use]
+    pub fn signature(&self, repo: i64, id: ObjectId, commit: &Commit) -> Option<SignatureNode> {
+        let signature = commit.gpg_signature.clone()?;
+        let state = self.verification(commit);
+        let unsigned = Commit {
+            gpg_signature: None,
+            ..commit.clone()
+        };
+        let payload = crate::encode::commit_bytes(&unsigned).ok()?;
+        Some(SignatureNode {
+            repo_id: repo,
+            commit: id,
+            state,
+            signature,
+            payload: String::from_utf8_lossy(&payload).into_owned(),
+            was_signed_by_github: state == SignatureState::Valid,
+        })
+    }
+
+    /// The armored public web-flow key, as `GET /users/web-flow/gpg_keys` lists it.
+    ///
+    /// # Errors
+    ///
+    /// [`GitError::Invalid`] when the key could not be made.
+    pub fn web_flow_public_key(&self) -> Result<String, GitError> {
+        self.inner.web_flow.as_ref().map_err(Clone::clone)?.public()
+    }
+
+    /// The merge base, ahead and behind counts, commits and files with patches. Tags peel to
+    /// their commits. Files compare the merge base with head, as GitHub's three-dot compare;
+    /// without a merge base they compare base with head.
     ///
     /// # Errors
     ///
@@ -518,11 +803,28 @@ impl Git {
         base: ObjectId,
         head: ObjectId,
     ) -> Result<Comparison, GitError> {
-        let _ = (tx, repo, base, head);
-        Err(todo("git/compare"))
+        let odb = self.odb(tx, repo);
+        let (base, base_commit) = odb.peel_commit(base)?;
+        let (head, head_commit) = odb.peel_commit(head)?;
+        let behind_set = history::ancestors(&odb, base)?;
+        let ahead_set = history::ancestors(&odb, head)?;
+        let merge_base = history::best_common(&odb, &behind_set, &ahead_set)?;
+        let from = match merge_base {
+            Some(m) => odb.commit(m)?.tree,
+            None => base_commit.tree,
+        };
+        let changes = diff::tree_changes(&odb, Some(from), Some(head_commit.tree))?;
+        Ok(Comparison {
+            merge_base,
+            ahead_by: count(ahead_set.difference(&behind_set).count()),
+            behind_by: count(behind_set.difference(&ahead_set).count()),
+            commits: history::topo(&odb, head, &behind_set)?,
+            files: diff::file_diffs(&odb, &changes)?,
+        })
     }
 
-    /// Merges `head` into the branch `base` with a web-flow signed merge commit.
+    /// Merges `head` (a branch, ref or commit ID) into the branch `base` with a web-flow signed
+    /// merge commit whose first parent is base, then moves base through [`Git::update_ref`].
     ///
     /// # Errors
     ///
@@ -535,10 +837,47 @@ impl Git {
         head: &str,
         msg: &str,
     ) -> Result<MergeResult, GitError> {
-        let _ = (tx, repo, base, head, msg);
-        Err(todo("git/merge"))
+        let name = refs::branch_ref(base);
+        let base_ref = refs::get(tx, repo, &name).ok_or(GitError::NotFound)?;
+        let odb = self.odb(tx, repo);
+        let (base_id, base_commit) = odb.peel_commit(base_ref)?;
+        let (head_id, head_commit) = odb.peel_commit(self.rev(tx, repo, &odb, head)?)?;
+        if history::is_ancestor(&odb, head_id, base_id)? {
+            return Err(GitError::NothingToMerge);
+        }
+        let merge_base = history::merge_base(&odb, base_id, head_id)?;
+        let origin = match merge_base {
+            Some(m) => Some(odb.commit(m)?.tree),
+            None => None,
+        };
+        let tree = merge::trees(
+            &odb,
+            origin,
+            Some(base_commit.tree),
+            Some(head_commit.tree),
+            true,
+        )?;
+        let tree = match tree {
+            Some(t) => t,
+            None => tree::empty(&odb)?,
+        };
+        let github = Signature::web_flow(self.inner.clock.now());
+        let mut commit = Commit {
+            tree,
+            parents: vec![base_id, head_id],
+            author: github.clone(),
+            committer: github,
+            message: msg.to_owned(),
+            gpg_signature: None,
+        };
+        self.sign(&mut commit)?;
+        let id = odb.put(ObjectData::Commit(Arc::new(commit)))?;
+        self.update_ref(tx, repo, &name, Some(base_ref), Some(id), false)?;
+        Ok(MergeResult { commit: id })
     }
 
+    /// Whether merging `head` into `base` has no conflict; `true` when base already holds head.
+    ///
     /// # Errors
     ///
     /// [`GitError::NotFound`] when either commit is missing.
@@ -549,21 +888,30 @@ impl Git {
         base: ObjectId,
         head: ObjectId,
     ) -> Result<bool, GitError> {
-        let _ = (tx, repo, base, head);
-        Err(todo("git/mergeable"))
+        let odb = self.odb(tx, repo);
+        let (base, base_commit) = odb.peel_commit(base)?;
+        let (head, head_commit) = odb.peel_commit(head)?;
+        if history::is_ancestor(&odb, head, base)? {
+            return Ok(true);
+        }
+        let origin = match history::merge_base(&odb, base, head)? {
+            Some(m) => Some(odb.commit(m)?.tree),
+            None => None,
+        };
+        match merge::trees(
+            &odb,
+            origin,
+            Some(base_commit.tree),
+            Some(head_commit.tree),
+            false,
+        ) {
+            Ok(_) => Ok(true),
+            Err(GitError::Conflict { .. }) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn object_ids_round_trip_as_lowercase_hex() {
-        let text = "0123456789abcdef0123456789ABCDEF01234567";
-        let id: ObjectId = text.parse().unwrap();
-        assert_eq!(id.to_string(), text.to_ascii_lowercase());
-        assert!("0123".parse::<ObjectId>().is_err());
-        assert!("g".repeat(40).parse::<ObjectId>().is_err());
-    }
+fn count(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
 }
