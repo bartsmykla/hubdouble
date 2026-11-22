@@ -1,0 +1,1 @@
+query($owner: String!, $name: String!, $before: String!, $after: String!) { repository(owner: $owner, name: $name) { before: object(expression: $before) { oid } after: object(expression: $after) { oid } } }

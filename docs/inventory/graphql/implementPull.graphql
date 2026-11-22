@@ -1,0 +1,22 @@
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      state mergeable baseRefName baseRefOid headRefOid
+      baseRepository { nameWithOwner }
+      headRepository { nameWithOwner }
+      reviewThreads(first: 50, after: $after) {
+        nodes {
+          id isResolved isOutdated path line
+          comments(first: 1) {
+            nodes { databaseId author { login __typename } body lastEditedAt pullRequestReview { databaseId } }
+          }
+          recent: comments(last: 30) {
+            totalCount
+            nodes { databaseId author { login __typename } body lastEditedAt replyTo { databaseId } pullRequestReview { databaseId } }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}

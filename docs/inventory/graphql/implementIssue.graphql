@@ -1,0 +1,13 @@
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { name target { oid } }
+    t0: object(expression: "HEAD:.github/pull_request_template.md") { ... on Blob { text isTruncated } }
+    t1: object(expression: "HEAD:docs/PULL_REQUEST_TEMPLATE.md") { ... on Blob { text isTruncated } }
+    issue(number: $number) {
+      state title body
+      closedByPullRequestsReferences(first: 20, includeClosedPrs: false) {
+        nodes { number state headRefName headRepository { nameWithOwner } }
+      }
+    }
+  }
+}

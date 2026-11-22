@@ -1,0 +1,10 @@
+query($thread: ID!, $after: String) {
+  node(id: $thread) {
+    ... on PullRequestReviewThread {
+      comments(first: 50, after: $after) {
+        nodes { databaseId author { login __typename } body lastEditedAt replyTo { databaseId } pullRequestReview { databaseId } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}

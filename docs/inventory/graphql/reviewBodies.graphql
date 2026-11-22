@@ -1,0 +1,10 @@
+query ($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviews(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { databaseId author { login __typename } body submittedAt lastEditedAt }
+      }
+    }
+  }
+}

@@ -1,0 +1,1 @@
+query($owner: String!, $name: String!, $r0: String!) { repository(owner: $owner, name: $name) { r0: ref(qualifiedName: $r0) { target { oid ... on Tag { target { oid } } } } } }

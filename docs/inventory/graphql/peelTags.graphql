@@ -1,0 +1,1 @@
+query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { t0: object(oid: "0123456789abcdef0123456789abcdef01234567") { oid __typename ... on Tag { target { oid __typename } } } } }

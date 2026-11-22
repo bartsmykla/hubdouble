@@ -1,0 +1,8 @@
+query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    refs(refPrefix: "refs/tags/agent/", first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes { name target { oid ... on Tag { target { oid } } } }
+    }
+  }
+}

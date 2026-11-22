@@ -1,0 +1,5 @@
+mutation($review: ID!, $path: String!, $body: String!) {
+  addPullRequestReviewThread(input: {pullRequestReviewId: $review, path: $path, body: $body, subjectType: FILE}) {
+    thread { id }
+  }
+}

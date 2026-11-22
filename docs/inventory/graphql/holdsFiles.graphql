@@ -1,0 +1,1 @@
+query($owner: String!, $name: String!, $e0: String!, $e1: String!) { repository(owner: $owner, name: $name) { t0: object(expression: $e0) { ... on Tree { entries { name mode } } } t1: object(expression: $e1) { ... on Tree { entries { name mode } } } } }

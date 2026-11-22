@@ -1,0 +1,19 @@
+query($owner: String!, $name: String!, $number: Int!, $after: String, $first: Int!, $recent: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: $first, after: $after) {
+        edges { cursor node {
+          id isResolved isOutdated path line originalLine subjectType
+          comments(first: 1) {
+            nodes { url body createdAt author { login } originalCommit { oid } }
+          }
+          recent: comments(last: $recent) {
+            nodes { url body createdAt author { login } }
+            pageInfo { hasPreviousPage }
+          }
+        } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}

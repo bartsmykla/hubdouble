@@ -1,0 +1,1 @@
+query ($ids: [ID!]!) { nodes(ids: $ids) { ... on Comment { id lastEditedAt } } }

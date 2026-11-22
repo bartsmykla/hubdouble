@@ -1,0 +1,16 @@
+query($id: ID!) {
+  node(id: $id) {
+    ... on IssueComment {
+      __typename id databaseId body createdAt lastEditedAt
+      author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+      issue { number repository { nameWithOwner } }
+      pullRequest { number repository { nameWithOwner } }
+    }
+    ... on PullRequestReviewComment {
+      __typename id databaseId body createdAt lastEditedAt
+      author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+      pullRequest { number repository { nameWithOwner } }
+      replyTo { databaseId }
+    }
+  }
+}

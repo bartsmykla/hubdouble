@@ -1,0 +1,1 @@
+query($owner: String!, $login: String!, $n0: String!, $n1: String!) { r0: repository(owner: $owner, name: $n0) { collaborators(login: $login, first: 1) { edges { permission node { databaseId } } } } r1: repository(owner: $owner, name: $n1) { collaborators(login: $login, first: 1) { edges { permission node { databaseId } } } } }
