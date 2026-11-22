@@ -133,6 +133,9 @@ fn inventory_report(rest: &Registry, text: &str) -> Result<(String, usize), Stri
             .parse::<http::Method>()
             .map_err(|e| format!("{line:?}: {e}"))?;
         total += 1;
+        if method == http::Method::POST && template.trim() == "/graphql" {
+            continue;
+        }
         let route = rest.route(&method, &sample_path(template.trim()));
         match route {
             Some(r) if r.entry.is_some() => {}
@@ -178,4 +181,35 @@ fn write_out(text: &str) -> Result<(), String> {
         .lock()
         .write_all(text.as_bytes())
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_shipped_inventory_is_fully_served() {
+        // Given
+        let registries = Registries::new(hubdouble_api::register_all);
+        let inventory = include_str!("../../../docs/inventory/rest-routes.txt");
+
+        // When
+        let (report, missing) = inventory_report(&registries.rest, inventory).unwrap();
+
+        // Then
+        assert_eq!(missing, 0, "{report}");
+    }
+
+    #[test]
+    fn an_unregistered_route_is_missing() {
+        // Given
+        let registries = Registries::new(hubdouble_api::register_all);
+
+        // When
+        let (_, missing) =
+            inventory_report(&registries.rest, "GET /rate_limit\nPOST /graphql\n").unwrap();
+
+        // Then
+        assert_eq!(missing, 1);
+    }
 }
