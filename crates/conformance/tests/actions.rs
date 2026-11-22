@@ -204,6 +204,19 @@ async fn workflow_run_filters_apply_together_before_pagination() {
 }
 
 #[tokio::test]
+async fn workflow_run_list_returns_no_matches_for_an_invalid_created_filter() {
+    let server = server("none").await;
+    let client = client(&server);
+    dispatch(&client, "main").await;
+    let answer = client.get(&format!("{ACTIONS}/runs?created=bogus")).await;
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(
+        answer.json(),
+        json!({"total_count": 0, "workflow_runs": []})
+    );
+}
+
+#[tokio::test]
 async fn lifecycle_preserves_attempts_and_serves_ranged_job_logs() {
     let server = server("none").await;
     let client = client(&server);

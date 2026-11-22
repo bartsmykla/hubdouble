@@ -1,4 +1,4 @@
-use std::ops::Bound;
+use std::ops::{Bound, RangeBounds as _};
 use std::sync::Arc;
 
 use http::StatusCode;
@@ -154,6 +154,9 @@ fn list_workflow(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 
 fn list_runs(ctx: &Ctx<'_>, workflow: Option<i64>) -> Result<Reply, ApiError> {
     let filters = Filters::new(ctx.tx(), ctx.query())?;
+    let Some(created) = filters.created else {
+        return crate::page::<hubdouble_render::WorkflowRun>(ctx, "workflow_runs", 0, &[]);
+    };
     let (start, limit) = crate::window(ctx);
     let repo = ctx.repo()?.id;
     let table = ctx.tx().table::<WorkflowRuns>();
@@ -163,7 +166,7 @@ fn list_runs(ctx: &Ctx<'_>, workflow: Option<i64>) -> Result<Reply, ApiError> {
     };
     let mut count = 0;
     let mut page = Vec::new();
-    for run in runs.filter(|run| filters.matches(run)) {
+    for run in runs.filter(|run| filters.matches(run) && created.contains(&run.created_at)) {
         if count >= start && page.len() < limit {
             page.push(render(ctx, run)?);
         }
@@ -179,7 +182,7 @@ struct Filters<'a> {
     status: Option<&'a str>,
     actor: ActorFilter,
     suite: Option<i64>,
-    created: (Bound<Timestamp>, Bound<Timestamp>),
+    created: Option<(Bound<Timestamp>, Bound<Timestamp>)>,
 }
 
 enum ActorFilter {
@@ -207,11 +210,9 @@ impl<'a> Filters<'a> {
                 })
             })
             .transpose()?;
-        let created = match query.get("created") {
-            Some(value) => created_range(value)
-                .ok_or_else(|| crate::invalid("WorkflowRun", "created", "Invalid date range"))?,
-            None => (Bound::Unbounded, Bound::Unbounded),
-        };
+        let created = query
+            .get("created")
+            .map_or(Some((Bound::Unbounded, Bound::Unbounded)), created_range);
         Ok(Self {
             event: query.get("event"),
             branch: query.get("branch"),
@@ -224,7 +225,6 @@ impl<'a> Filters<'a> {
     }
 
     fn matches(&self, run: &WorkflowRun) -> bool {
-        use std::ops::RangeBounds as _;
         self.event.is_none_or(|event| event == run.event)
             && self
                 .branch
@@ -240,7 +240,6 @@ impl<'a> Filters<'a> {
                 ActorFilter::Unknown => false,
             }
             && self.suite.is_none_or(|id| Some(id) == run.check_suite_id)
-            && self.created.contains(&run.created_at)
     }
 }
 
