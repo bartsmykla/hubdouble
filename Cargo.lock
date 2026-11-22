@@ -2006,6 +2006,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hubdouble-conformance"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "hubdouble-testkit",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "hubdouble-git"
 version = "0.1.0"
 dependencies = [
