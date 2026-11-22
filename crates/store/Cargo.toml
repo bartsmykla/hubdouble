@@ -1,0 +1,27 @@
+[package]
+name = "hubdouble-store"
+description = "The in-memory store: typed tables, transactions with an undo log, snapshots and the webhook outbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+hubdouble-model.workspace = true
+parking_lot.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "store"
+harness = false
+
+[lints]
+workspace = true
