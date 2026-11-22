@@ -1284,6 +1284,29 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+fn docker_logs(id: &str, timestamps: bool) -> Result<String, String> {
+    let mut command = Command::new("docker");
+    command.arg("logs");
+    if timestamps {
+        command.arg("-t");
+    }
+    let out = command
+        .arg(id)
+        .output()
+        .map_err(|e| format!("docker logs: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "docker logs: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
 fn rfc3339(text: &str) -> Option<(i64, f64)> {
     let (date, time) = text.trim().split_once('T')?;
     let time = time.strip_suffix('Z')?;
@@ -1346,13 +1369,13 @@ fn run_container(
     };
     let deadline = Instant::now() + Duration::from_secs(60);
     let line = loop {
-        let logs = docker(&["logs", "-t", &container.id])?;
+        let logs = docker_logs(&container.id, true)?;
         if let Some(line) = logs.lines().find(|l| l.contains("listening on")) {
             break line.to_owned();
         }
         let running = docker(&["inspect", "-f", "{{.State.Running}}", &container.id])?;
         if running.trim() != "true" {
-            let all = docker(&["logs", &container.id]).unwrap_or_default();
+            let all = docker_logs(&container.id, false).unwrap_or_default();
             return Err(format!(
                 "the container stopped before it was ready: {}",
                 all.trim()
