@@ -135,10 +135,9 @@ fn cursor_position(items: &[&Arc<Activity>], cursor: &str) -> Result<usize, ApiE
 
 fn link(ctx: &Ctx<'_>, rel: &str, name: &str, cursor: i64) -> Result<String, ApiError> {
     let mut url = format!(
-        "{}/repos/{}/{}/activity?",
+        "{}/repositories/{}/activity?",
         ctx.urls().api,
-        escape(ctx.param("owner")?),
-        escape(ctx.param("repo")?)
+        ctx.repo()?.id
     );
     for (k, v) in ctx
         .query()
