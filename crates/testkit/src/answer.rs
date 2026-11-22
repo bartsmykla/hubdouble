@@ -102,6 +102,17 @@ pub struct Operation {
     op: &'static Value,
 }
 
+impl Operation {
+    /// Whether the pinned description lists `status` among the operation's responses.
+    #[must_use]
+    pub fn documents(&self, status: u16) -> bool {
+        self.op
+            .get("responses")
+            .and_then(|r| r.get(status.to_string()))
+            .is_some()
+    }
+}
+
 /// The operation `method` and the escaped API `path` (no `/api/v3` prefix, no query) resolve
 /// to: among the templates that match and take the method, the one with a literal segment
 /// where the others have a parameter, earliest first, and the longest on a tie.

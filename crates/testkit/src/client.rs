@@ -6,9 +6,12 @@ use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode};
 use serde_json::Value;
 
+use hubdouble_admin::Services;
+use hubdouble_store::{Accounts, Repos};
+
 use crate::TestServer;
-use crate::answer::{self, Exchange};
-use crate::coverage::Recorder;
+use crate::answer::{self, Checked, Exchange};
+use crate::coverage::{Case, Recorder};
 
 /// go-github v93's `User-Agent` (`github/github.go:47`, `Version` at `:33`).
 pub const USER_AGENT: &str = "go-github/v93.0.0";
@@ -76,12 +79,17 @@ pub(crate) async fn send(request: reqwest::RequestBuilder) -> Answer {
 ///
 /// When the answer differs from GitHub's docs.
 pub fn check_answer(x: &Exchange<'_>, registered: &dyn Fn(&str) -> bool) {
-    checked(x, registered, &Recorder::from_process_env());
+    checked(x, registered, &Recorder::from_process_env(), None);
 }
 
-fn checked(x: &Exchange<'_>, registered: &dyn Fn(&str) -> bool, recorder: &Recorder) {
+fn checked(
+    x: &Exchange<'_>,
+    registered: &dyn Fn(&str) -> bool,
+    recorder: &Recorder,
+    services: Option<&Services>,
+) {
     match answer::check(x, registered) {
-        Ok(c) => recorder.record(&c),
+        Ok(c) => recorder.record(&c, case(x, &c, services)),
         Err(errors) => panic!(
             "{} {} answered {}, which differs from GitHub's docs:\n  {}\nbody: {}",
             x.method,
@@ -91,6 +99,55 @@ fn checked(x: &Exchange<'_>, registered: &dyn Fn(&str) -> bool, recorder: &Recor
             String::from_utf8_lossy(x.body)
         ),
     }
+}
+
+fn case(x: &Exchange<'_>, c: &Checked, services: Option<&Services>) -> Case {
+    match x.status {
+        200..=399 => Case::Success,
+        403 if x.headers.contains_key("x-accepted-github-permissions") => Case::MissingPermission,
+        422 => Case::Invalid,
+        404 if services.is_some_and(|s| names_absent_repository(s, &c.route, x.path)) => {
+            Case::UnseenRepository
+        }
+        _ => Case::Other,
+    }
+}
+
+fn names_absent_repository(services: &Services, route: &str, path: &str) -> bool {
+    let parts: Vec<&str> = answer::api_path(path)
+        .trim_start_matches('/')
+        .split('/')
+        .collect();
+    let absent = |f: &dyn Fn(&hubdouble_store::Tx) -> bool| {
+        services.store.view(|tx| Ok(f(tx))).unwrap_or(false)
+    };
+    if parts.first() == Some(&"repositories") {
+        return parts
+            .get(1)
+            .and_then(|id| id.parse::<i64>().ok())
+            .is_some_and(|id| absent(&|tx| tx.table::<Repos>().get(id).is_none()));
+    }
+    let template: Vec<&str> = route
+        .split_once(' ')
+        .map_or("", |(_, t)| t)
+        .trim_start_matches('/')
+        .split('/')
+        .collect();
+    let at = |name: &str| {
+        template
+            .iter()
+            .position(|s| *s == name)
+            .and_then(|i| parts.get(i).copied())
+    };
+    let (Some(owner), Some(repo)) = (at("{owner}"), at("{repo}")) else {
+        return false;
+    };
+    absent(&|tx| {
+        tx.table::<Accounts>()
+            .by_login(owner)
+            .and_then(|o| tx.table::<Repos>().by_name(o.id, repo))
+            .is_none()
+    })
 }
 
 /// A client that sends what go-github v93's `Client.NewRequest` sends: `Accept`, `User-Agent`,
@@ -107,6 +164,7 @@ pub struct GoGithub {
     token: Option<String>,
     registered: Arc<HashSet<&'static str>>,
     recorder: Recorder,
+    services: Arc<Services>,
 }
 
 impl GoGithub {
@@ -126,6 +184,7 @@ impl GoGithub {
             token: None,
             registered: server.registered.clone(),
             recorder: server.recorder.clone(),
+            services: server.server.services().clone(),
         }
     }
 
@@ -184,6 +243,7 @@ impl GoGithub {
             },
             &|id| self.registered.contains(id),
             &self.recorder,
+            Some(&self.services),
         );
         answer
     }
