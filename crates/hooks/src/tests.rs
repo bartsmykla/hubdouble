@@ -727,6 +727,33 @@ async fn reset_keeps_a_job_the_new_epoch_queued_before_it_took_the_queue() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_earlier_reset_keeps_the_work_of_a_later_one() {
+    let store = world();
+    let snapshot = store.snapshot();
+    let (hooks, mut hits) = start(&store, |o| o.workers = 1);
+    emit_one(&store, event("push", WIDGET));
+    let in_flight = hits.recv().await.unwrap();
+    // Given a first reset that moved to an epoch and a second reset that moved past it
+    store.restore(&snapshot);
+    let first = store.epoch();
+    store.restore(&snapshot);
+    // And an event of the second reset's epoch waits in the queue
+    emit_one(&store, event("push", WIDGET));
+    hooks.shared.wait_stats(|s| s.queued == 1).await;
+    // When the first reset forgets the epochs before its own
+    let forget = tokio::spawn({
+        let hooks = hooks.clone();
+        async move { hooks.shared.forget_older(first).await }
+    });
+    in_flight.reply.send(200).unwrap();
+    forget.await.unwrap().unwrap();
+    // Then the later epoch's event is still delivered and logged
+    let _bodies = answer_all(hits);
+    hooks.drain().await.unwrap();
+    assert_eq!(logged_ids(&store, APP_A), vec![2]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_delivery_log_is_a_ring_per_app() {
     let store = world();
     let (hooks, hits) = start(&store, |o| o.log_capacity = 2);

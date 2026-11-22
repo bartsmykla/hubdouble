@@ -165,7 +165,7 @@ impl Shared {
         {
             let mut st = self.state.lock();
             let (dropped, kept): (Vec<Job>, Vec<Job>) =
-                st.queue.drain(..).partition(|job| job.epoch != epoch);
+                st.queue.drain(..).partition(|job| job.epoch < epoch);
             st.queue.extend(kept);
             self.space.add_permits(dropped.len());
             for job in dropped {
@@ -178,7 +178,7 @@ impl Shared {
                 .flat_map(|(app, log)| {
                     log.ready
                         .iter()
-                        .filter(|(_, (e, _))| *e != epoch)
+                        .filter(|(_, (e, _))| *e < epoch)
                         .map(|(id, _)| (*app, *id))
                 })
                 .collect();
