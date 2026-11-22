@@ -935,7 +935,7 @@ async fn an_attempt_after_the_idle_limit_opens_a_new_connection() {
     hooks.drain().await.unwrap();
     assert!(bodies.recv().await.is_some());
     // When the next attempt starts just inside and then just past the idle limit
-    tokio::time::advance(crate::delivery::IDLE_REUSE - Duration::from_secs(1)).await;
+    tokio::time::advance(crate::delivery::IDLE_REUSE.saturating_sub(Duration::from_secs(1))).await;
     emit_one(&store, event("push", WIDGET));
     hooks.drain().await.unwrap();
     assert!(bodies.recv().await.is_some());
