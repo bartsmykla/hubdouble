@@ -1,11 +1,12 @@
 #![expect(clippy::unwrap_used, reason = "a broken test fixture must fail")]
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use http::StatusCode;
-use hubdouble_git::{Commit, ObjectData, Signature};
+use hubdouble_git::{Commit, EntryMode, FileChange, ObjectData, Signature};
 use hubdouble_model::Timestamp;
-use hubdouble_testkit::fixture::{ALICE_TOKEN, PUBLIC_REPO_ID};
+use hubdouble_testkit::fixture::{ALICE_ID, ALICE_TOKEN, PUBLIC_REPO_ID};
 use hubdouble_testkit::{GoGithub, TestServer};
 use serde_json::{Value, json};
 
@@ -134,4 +135,80 @@ async fn get_commit_pages_up_to_300_files_and_keeps_the_whole_commit_stats() {
             assert!(!link.contains("rel=\"next\""), "{link}");
         }
     }
+}
+
+fn write(path: &str, data: impl Into<Arc<[u8]>>, mode: EntryMode) -> FileChange {
+    FileChange::Write {
+        path: path.to_owned(),
+        data: data.into(),
+        mode,
+    }
+}
+
+fn commit_files(s: &TestServer, changes: &[FileChange]) {
+    let services = s.server.services();
+    let git = &services.git;
+    let repo = PUBLIC_REPO_ID;
+    services
+        .store
+        .update(|tx| {
+            let parent = git.resolve_ref(tx, repo, "main")?;
+            let signature = Signature::seed();
+            git.commit(
+                tx,
+                repo,
+                ALICE_ID,
+                "main",
+                Some(parent),
+                changes,
+                "write contents fixture",
+                &signature,
+                &signature,
+                false,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn file_symlinks_keep_the_link_sha_and_read_the_target_bytes() {
+    let s = server().await;
+    let target = b"../config/real.json";
+    commit_files(
+        &s,
+        &[
+            write("config/real.json", b"{}\n".as_slice(), EntryMode::File),
+            write("docs/preset.json", target.as_slice(), EntryMode::Symlink),
+            write("docs/dir-link", b"../config".as_slice(), EntryMode::Symlink),
+        ],
+    );
+    let services = s.server.services();
+    let sha = services
+        .store
+        .view(|tx| {
+            Ok(services
+                .git
+                .expression(tx, PUBLIC_REPO_ID, "main:docs/preset.json")?
+                .id
+                .to_string())
+        })
+        .unwrap();
+    let client = GoGithub::new(&s).with_token(ALICE_TOKEN);
+    let path = "repos/acme/public/contents/docs";
+    let listed = client.get(path).await.json();
+    let direct = client.get(&format!("{path}/preset.json")).await.json();
+
+    assert_eq!(listed[0]["name"], "dir-link");
+    assert_eq!(listed[0]["type"], "symlink");
+    assert_eq!(listed[1]["name"], "preset.json");
+    assert_eq!(
+        (&listed[1]["type"], &listed[1]["sha"], &direct["sha"]),
+        (&json!("file"), &json!(sha), &json!(sha))
+    );
+    assert_eq!(listed[1]["size"], target.len());
+    assert_eq!(direct["type"], "file");
+    assert_eq!(direct["size"], 3);
+    assert_eq!(direct["content"], "e30K\n");
+    assert_eq!(direct["git_url"], listed[1]["git_url"]);
 }

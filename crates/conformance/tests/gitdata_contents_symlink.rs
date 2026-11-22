@@ -62,7 +62,7 @@ async fn contents_resolves_symlinks_at_the_requested_ref() {
             .store
             .view(|tx| Ok(services
                 .git
-                .expression(tx, PUBLIC_REPO_ID, "main:README.md")?
+                .expression(tx, PUBLIC_REPO_ID, &format!("{commit}:docs/link"))?
                 .id))
             .unwrap()
             .to_string()

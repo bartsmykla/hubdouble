@@ -88,15 +88,6 @@ impl At<'_> {
     }
 }
 
-fn listing_kind(mode: EntryMode) -> &'static str {
-    match mode {
-        EntryMode::Tree => "dir",
-        EntryMode::Submodule => "submodule",
-        EntryMode::Symlink => "symlink",
-        EntryMode::File | EntryMode::Executable => "file",
-    }
-}
-
 #[derive(Serialize)]
 struct Symlink {
     #[serde(flatten)]
@@ -128,7 +119,7 @@ impl ContentTree<'_> {
         Some(found)
     }
 
-    fn file_target(&self, link: &str, target: &[u8]) -> Option<(ObjectId, Arc<[u8]>)> {
+    fn file_target(&self, link: &str, target: &[u8]) -> Option<Arc<[u8]>> {
         let mut path = target_path(link, target)?;
         for _ in 0..MAX_SYMLINKS {
             let (mode, id) = self.entry(&path)?;
@@ -142,7 +133,7 @@ impl ContentTree<'_> {
                 return None;
             };
             if mode != EntryMode::Symlink {
-                return Some((id, data));
+                return Some(data);
             }
             path = target_path(&path, &data)?;
         }
@@ -198,8 +189,8 @@ pub(crate) fn get_content(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     };
     match data {
         ObjectData::Blob(data) if mode == EntryMode::Symlink => {
-            if let Some((target_id, target)) = tree.file_target(path, &data) {
-                return file(ctx, &at, path, target_id, &target);
+            if let Some(target) = tree.file_target(path, &data) {
+                return file(ctx, &at, path, id, &target);
             }
             Reply::json(&Symlink {
                 content: at.content("symlink", path, id, ObjectKind::Blob, data.len(), None),
@@ -210,7 +201,7 @@ pub(crate) fn get_content(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         ObjectData::Tree(entries) => {
             let listing = entries
                 .iter()
-                .map(|e| entry_content(git, tx, repo.id, &at, path, e))
+                .map(|e| entry_content(&tree, &at, path, e))
                 .collect::<Result<Vec<_>, _>>()?;
             if accepts(ctx, "object") {
                 let content = at.content("dir", path, id, ObjectKind::Tree, 0, None);
@@ -255,9 +246,7 @@ fn file(
 }
 
 fn entry_content(
-    git: &Git,
-    tx: &Tx,
-    repo: i64,
+    tree: &ContentTree<'_>,
     at: &At<'_>,
     dir: &str,
     e: &TreeEntry,
@@ -267,14 +256,20 @@ fn entry_content(
     } else {
         format!("{dir}/{}", e.name)
     };
-    let kind = listing_kind(e.mode);
-    let (object, size) = match e.mode {
-        EntryMode::Tree => (ObjectKind::Tree, 0),
-        EntryMode::Submodule => (ObjectKind::Commit, 0),
-        _ => match git.object(tx, repo, e.id)?.data {
-            ObjectData::Blob(d) => (ObjectKind::Blob, d.len()),
-            _ => (ObjectKind::Blob, 0),
-        },
+    let (kind, object, size) = match e.mode {
+        EntryMode::Tree => ("dir", ObjectKind::Tree, 0),
+        EntryMode::Submodule => ("submodule", ObjectKind::Commit, 0),
+        _ => {
+            let ObjectData::Blob(data) = tree.git.object(tree.tx, tree.repo, e.id)?.data else {
+                return Err(ApiError::internal("a file entry is not a blob"));
+            };
+            let kind = if e.mode == EntryMode::Symlink && tree.file_target(&path, &data).is_none() {
+                "symlink"
+            } else {
+                "file"
+            };
+            (kind, ObjectKind::Blob, data.len())
+        }
     };
     Ok(at.content(kind, &path, e.id, object, size, None))
 }
