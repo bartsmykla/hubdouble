@@ -529,6 +529,59 @@ async fn contents_answer_a_file_a_directory_the_root_and_raw_bytes_at_a_ref() {
 }
 
 #[tokio::test]
+async fn contents_object_media_wraps_directory_entries() {
+    let s = server().await;
+    let client = alice(&s);
+    for (path, reference, name, entry) in [
+        ("", "main", "", "README.md"),
+        ("src", "feature", "src", "feature.txt"),
+    ] {
+        let answer = get_with(
+            &client,
+            &format!("repos/acme/public/contents/{path}?ref={reference}"),
+            &[("accept", "application/vnd.github.object+json")],
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::OK);
+        assert_eq!(
+            answer.header("content-type"),
+            "application/json; charset=utf-8"
+        );
+        let directory = answer.json();
+        assert_eq!(directory["type"], "dir");
+        assert_eq!(directory["size"], 0);
+        assert_eq!(directory["name"], name);
+        assert_eq!(directory["path"], path);
+        assert_eq!(directory["entries"][0]["name"], entry);
+        assert_eq!(directory["download_url"], Value::Null);
+    }
+}
+
+#[tokio::test]
+async fn contents_raw_json_media_preserves_the_type_and_bytes() {
+    let s = server().await;
+    let client = alice(&s);
+    for media in [
+        "application/vnd.github.raw+json",
+        "application/vnd.github.v3.raw+json",
+        "application/vnd.github.v3.raw",
+    ] {
+        let answer = get_with(
+            &client,
+            "repos/acme/public/contents/README.md",
+            &[("accept", media)],
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::OK);
+        assert_eq!(
+            answer.header("content-type"),
+            format!("{media}; charset=utf-8")
+        );
+        assert_eq!(answer.body.as_ref(), b"# public\n");
+    }
+}
+
+#[tokio::test]
 async fn commits_list_by_branch_and_by_path_with_pages() {
     // Given
     let s = server().await;

@@ -152,10 +152,17 @@ fn header<'h>(headers: &'h HeaderMap, name: &str) -> &'h str {
         .unwrap_or("")
 }
 
-fn is_json(headers: &HeaderMap) -> bool {
-    let ct = header(headers, "content-type");
-    let media = ct.split(';').next().unwrap_or("").trim();
+fn media_type(value: &str) -> &str {
+    value.split(';').next().unwrap_or("").trim()
+}
+
+fn is_json(media: &str) -> bool {
     media == "application/json" || media.ends_with("+json")
+}
+
+fn github_media_variant(media: &str) -> Option<&str> {
+    let media = media.strip_prefix("application/vnd.github.")?;
+    Some(media.strip_prefix("v3.").unwrap_or(media))
 }
 
 /// The API path: the URL path without the `/api/v3` prefix of an enterprise base URL.
@@ -374,6 +381,22 @@ fn documented_answer(x: &Exchange<'_>, id: &str, response: &Value) -> Vec<String
     if x.method == "HEAD" {
         return errors;
     }
+    let answered = header(x.headers, "content-type");
+    let media = media_type(answered);
+    let asked = header(x.request_headers, "accept");
+    let accepts = |variant| {
+        asked
+            .split(',')
+            .any(|range| github_media_variant(media_type(range)) == Some(variant))
+    };
+    let content_success = id == "repos/get-content" && x.status == 200;
+    let raw_json = content_success && github_media_variant(media) == Some("raw+json");
+    let is_json = !raw_json && is_json(media);
+    let schema_type = if content_success && (accepts("object") || accepts("object+json")) {
+        "application/vnd.github.object"
+    } else {
+        "application/json"
+    };
     let content = response.get("content").and_then(Value::as_object);
     match content {
         None if x.status >= 400 => errors.extend(error_body(x, id)),
@@ -385,7 +408,7 @@ fn documented_answer(x: &Exchange<'_>, id: &str, response: &Value) -> Vec<String
                 ));
             }
         }
-        Some(content) if is_json(x.headers) => match content.get("application/json") {
+        Some(content) if is_json => match content.get(schema_type) {
             Some(media) => match serde_json::from_slice::<Value>(x.body) {
                 Ok(body) => {
                     if let Some(schema) = media.get("schema")
@@ -402,14 +425,13 @@ fn documented_answer(x: &Exchange<'_>, id: &str, response: &Value) -> Vec<String
             None => errors.push(format!("{id} {}: JSON where the docs give none", x.status)),
         },
         Some(content) => {
-            let answered = header(x.headers, "content-type");
-            let media = answered.split(';').next().unwrap_or("").trim();
-            let asked = header(x.request_headers, "accept");
             let documented = content.contains_key(media);
-            let bare = |m: &str| m.replacen("vnd.github.v3.", "vnd.github.", 1);
             let custom = asked.split(',').any(|a| {
-                let a = a.split(';').next().unwrap_or("").trim();
-                bare(a) == bare(media) && !a.ends_with("json")
+                let a = media_type(a);
+                let same = a == media
+                    || github_media_variant(a)
+                        .is_some_and(|v| Some(v) == github_media_variant(media));
+                same && (raw_json || !a.ends_with("json"))
             });
             if !documented && !custom {
                 errors.push(format!(
@@ -462,7 +484,7 @@ fn error_body_with(x: &Exchange<'_>, id: &str, schema_checked: bool) -> Vec<Stri
 }
 
 fn obj(x: &Exchange<'_>) -> Result<Value, Vec<String>> {
-    if is_json(x.headers) {
+    if is_json(media_type(header(x.headers, "content-type"))) {
         serde_json::from_slice::<Value>(x.body).map_err(|e| vec![format!("not JSON: {e}")])
     } else {
         let text = String::from_utf8_lossy(x.body);

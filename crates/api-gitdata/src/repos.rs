@@ -13,8 +13,8 @@ use hubdouble_store::{Rulesets, Tx};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    GitPerson, Links, ObjectLink, ParentLink, Verification, accepts, commit_at, network_repo,
-    object_node_id, sender, unprocessable, user_of, wrapped_base64,
+    GitPerson, Links, ObjectLink, ParentLink, Verification, accepted_media, accepts, commit_at,
+    network_repo, object_node_id, sender, unprocessable, user_of, wrapped_base64,
 };
 use crate::data::RAW;
 
@@ -48,6 +48,13 @@ struct Content {
     download_url: Option<String>,
     #[serde(rename = "_links")]
     links: ContentLinks,
+}
+
+#[derive(Serialize)]
+struct Directory {
+    #[serde(flatten)]
+    content: Content,
+    entries: Vec<Content>,
 }
 
 struct At<'a> {
@@ -123,8 +130,20 @@ pub(crate) fn get_content(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     };
     match object.data {
         ObjectData::Blob(data) => {
-            if accepts(ctx, "raw") {
-                return Ok(Reply::raw(RAW, data.to_vec()));
+            if let Some(media) = accepted_media(ctx, "raw") {
+                let content_type = match media {
+                    "application/vnd.github.raw+json" => {
+                        "application/vnd.github.raw+json; charset=utf-8"
+                    }
+                    "application/vnd.github.v3.raw" => {
+                        "application/vnd.github.v3.raw; charset=utf-8"
+                    }
+                    "application/vnd.github.v3.raw+json" => {
+                        "application/vnd.github.v3.raw+json; charset=utf-8"
+                    }
+                    _ => RAW,
+                };
+                return Ok(Reply::raw(content_type, data.to_vec()));
             }
             Reply::json(&at.content(
                 "file",
@@ -140,7 +159,15 @@ pub(crate) fn get_content(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
                 .iter()
                 .map(|e| entry_content(git, tx, repo.id, &at, &path, e))
                 .collect::<Result<Vec<_>, _>>()?;
-            Reply::json(&listing)
+            if accepts(ctx, "object") {
+                let content = at.content("dir", &path, object.id, ObjectKind::Tree, 0, None);
+                Reply::json(&Directory {
+                    content,
+                    entries: listing,
+                })
+            } else {
+                Reply::json(&listing)
+            }
         }
         ObjectData::Commit(_) | ObjectData::Tag(_) => Err(ApiError::not_found()),
     }

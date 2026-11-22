@@ -101,13 +101,15 @@ pub fn decode_base64(text: &str) -> Option<Vec<u8>> {
 }
 
 pub(crate) fn accepts(ctx: &Ctx<'_>, name: &str) -> bool {
-    ctx.header("accept").is_some_and(|accept| {
-        accept
-            .split(',')
-            .filter_map(|r| r.split(';').next())
-            .map(|r| r.trim().trim_end_matches("+json"))
-            .filter_map(|r| r.strip_prefix("application/vnd.github."))
-            .any(|r| r == name || r.strip_prefix("v3.") == Some(name))
+    accepted_media(ctx, name).is_some()
+}
+
+pub(crate) fn accepted_media<'a>(ctx: &'a Ctx<'_>, name: &str) -> Option<&'a str> {
+    ctx.header("accept")?.split(',').find_map(|range| {
+        let media = range.split(';').next()?.trim();
+        let kind = media.strip_prefix("application/vnd.github.")?;
+        let kind = kind.strip_prefix("v3.").unwrap_or(kind);
+        (kind.strip_suffix("+json").unwrap_or(kind) == name).then_some(media)
     })
 }
 
