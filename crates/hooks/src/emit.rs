@@ -15,8 +15,6 @@ const ALWAYS_DELIVERED: [&str; 4] = [
     "github_app_authorization",
 ];
 
-pub(crate) const REDELIVERY_KEY: &str = "_hubdouble_redelivery";
-
 const ZEN: &str = "Keep it logically awesome.";
 
 fn payload_urls(tx: &Tx) -> Urls {
@@ -189,22 +187,14 @@ pub(crate) fn redeliver(
         .filter(|d| d.app_id == app_id)
         .cloned()
         .ok_or(HooksError::UnknownDelivery(delivery_id))?;
-    let mut payload = match &d.request.payload {
-        Value::Object(o) => o.clone(),
-        _ => Map::new(),
-    };
-    payload.insert(
-        REDELIVERY_KEY.to_owned(),
-        json!({ "guid": d.guid, "event": d.event, "action": d.action }),
-    );
     tx.push_outbox(OutboxEntry {
         app_id,
         installation_id: d.installation_id,
         repo_id: d.repo_id,
         event: "",
         action: None,
-        payload: Value::Object(payload),
-        redelivery_of: None,
+        payload: d.request.payload.clone(),
+        redelivery_of: Some(d.guid.clone()),
     });
     Ok(())
 }

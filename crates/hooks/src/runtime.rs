@@ -4,9 +4,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use bytes::Bytes;
 use hubdouble_model::{App, Clock, Delivery, DeliveryRequest, DeliveryResponse};
-use hubdouble_store::{
-    Apps, Committed, Counters, Deliveries, OutboxEntry, Sequence, Snapshot, Store,
-};
+use hubdouble_store::{Apps, Committed, Counters, Deliveries, Sequence, Snapshot, Store};
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
@@ -14,7 +12,6 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::delivery::{Outcome, send, signature_1, signature_256};
-use crate::emit::REDELIVERY_KEY;
 use crate::{HooksError, Options, Stats};
 
 pub(crate) struct Job {
@@ -31,6 +28,13 @@ pub(crate) struct Job {
     headers: BTreeMap<String, String>,
     body: Bytes,
     payload: Value,
+}
+
+struct Assigned {
+    id: i64,
+    app: Arc<App>,
+    committed: Committed,
+    name: (String, Option<String>),
 }
 
 #[derive(Default)]
@@ -178,7 +182,7 @@ impl Shared {
         self.notify();
     }
 
-    fn assign(&self, batch: Vec<Committed>) -> Vec<(i64, Arc<App>, Committed)> {
+    fn assign(&self, batch: Vec<Committed>) -> Vec<Assigned> {
         self.store
             .update(|tx| {
                 let epoch = self.store.epoch();
@@ -193,34 +197,47 @@ impl Shared {
                     if !app.webhook.as_ref().is_some_and(|w| w.active) {
                         continue;
                     }
+                    let name = match &c.entry.redelivery_of {
+                        None => (c.entry.event.to_owned(), c.entry.action.map(str::to_owned)),
+                        Some(guid) => {
+                            let Some(original) = tx
+                                .table::<Deliveries>()
+                                .children(app.id)
+                                .rev()
+                                .find(|d| d.guid == *guid)
+                            else {
+                                continue;
+                            };
+                            (original.event.clone(), original.action.clone())
+                        }
+                    };
                     let id = tx.table_mut::<Counters>().next(Sequence::Delivery);
-                    out.push((id, app, c));
+                    out.push(Assigned {
+                        id,
+                        app,
+                        committed: c,
+                        name,
+                    });
                 }
                 Ok(out)
             })
             .unwrap_or_default()
     }
 
-    fn job(id: i64, epoch: u64, app: &App, entry: OutboxEntry) -> Option<Job> {
+    fn job(a: Assigned) -> Option<Job> {
+        let Assigned {
+            id,
+            app,
+            committed,
+            name: (event, action),
+        } = a;
+        let epoch = committed.epoch;
+        let entry = committed.entry;
         let hook = app.webhook.as_ref()?;
-        let mut payload = entry.payload;
-        let marker = payload
-            .as_object_mut()
-            .and_then(|o| o.remove(REDELIVERY_KEY));
-        let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
-        let (guid, redelivery, event, action) = match marker {
-            Some(m) => (
-                text(&m, "guid")?,
-                true,
-                text(&m, "event")?,
-                text(&m, "action"),
-            ),
-            None => (
-                uuid::Uuid::new_v4().to_string(),
-                false,
-                entry.event.to_owned(),
-                entry.action.map(str::to_owned),
-            ),
+        let payload = entry.payload;
+        let (guid, redelivery) = match entry.redelivery_of {
+            Some(guid) => (guid, true),
+            None => (uuid::Uuid::new_v4().to_string(), false),
         };
         let body = Bytes::from(serde_json::to_vec(&payload).ok()?);
         let app_id = app.id.to_string();
@@ -269,15 +286,15 @@ impl Shared {
 
     async fn enqueue(&self, batch: Vec<Committed>) -> Result<(), HooksError> {
         let assigned = self.assign(batch);
-        let Some((last, _, _)) = assigned.last() else {
+        let Some(last) = assigned.last() else {
             return Ok(());
         };
-        self.last_id.store(*last, Ordering::SeqCst);
+        self.last_id.store(last.id, Ordering::SeqCst);
         let jobs: Vec<Result<Job, (i64, i64)>> = assigned
             .into_iter()
-            .map(|(id, app, c)| {
-                let app_id = app.id;
-                Shared::job(id, c.epoch, &app, c.entry).ok_or((app_id, id))
+            .map(|a| {
+                let pair = (a.app.id, a.id);
+                Shared::job(a).ok_or(pair)
             })
             .collect();
         {
