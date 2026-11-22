@@ -757,6 +757,51 @@ async fn release_admin_writes_deliver_published_and_edited() {
 }
 
 #[tokio::test]
+async fn the_request_log_lists_the_event_and_its_delivery() {
+    // Given
+    let server = start(watcher().to_vec()).await;
+    // When an admin write emits repository.created and its delivery is logged
+    let create = server
+        .admin(
+            Method::POST,
+            "repository",
+            Some(&json!({"owner": "acme", "name": "fresh", "sender": "alice"})),
+        )
+        .await;
+    deliveries(&server, 1).await;
+    server.admin(Method::POST, "hooks/drain", None).await;
+    let log = server.admin(Method::GET, "log", None).await.json();
+    // Then the log has the event and the delivery after the request
+    assert!(create.status.is_success(), "{:?}", create.body);
+    let entries = log["entries"].as_array().unwrap();
+    let event = entries
+        .iter()
+        .find(|e| e["kind"] == json!("event"))
+        .unwrap_or_else(|| panic!("no event in {entries:?}"));
+    assert_eq!(
+        (&event["event"], &event["action"], &event["app_id"]),
+        (&json!("repository"), &json!("created"), &json!(4002))
+    );
+    let delivery = entries
+        .iter()
+        .find(|e| e["kind"] == json!("delivery"))
+        .unwrap_or_else(|| panic!("no delivery in {entries:?}"));
+    assert_eq!(delivery["delivery_id"], event["delivery_id"]);
+    assert_eq!(delivery["status_code"], json!(200));
+    assert!(delivery["cursor"].as_u64() > event["cursor"].as_u64());
+    // And a wait for the delivery answers with it
+    let waited = server
+        .admin(
+            Method::GET,
+            "log/wait?match=delivery%20repository.created",
+            None,
+        )
+        .await;
+    assert_eq!(waited.status, StatusCode::OK);
+    assert_eq!(waited.json()["cursor"], delivery["cursor"]);
+}
+
+#[tokio::test]
 async fn a_transfer_from_an_organization_names_it_as_the_previous_owner() {
     // Given the watcher App is installed on the organization and on the new owner
     let mut seed = watcher().to_vec();

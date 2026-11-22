@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::delivery::{Outcome, send, signature_1, signature_256};
-use crate::{HooksError, Options, QUEUE_BYTES, Stats};
+use crate::{HooksError, Notice, Options, QUEUE_BYTES, Stats};
 
 const OVER_BUDGET: &str = "Queue full";
 
@@ -343,6 +343,16 @@ impl Shared {
         let Some(last) = assigned.last() else {
             return Ok(());
         };
+        if let Some(observe) = &self.options.observer {
+            for a in &assigned {
+                observe(&Notice::Event {
+                    app_id: a.app.id,
+                    delivery_id: a.id,
+                    event: &a.name.0,
+                    action: a.name.1.as_deref(),
+                });
+            }
+        }
         self.last_id.store(last.id, Ordering::SeqCst);
         let jobs: Vec<Result<Job, (i64, i64)>> = assigned
             .into_iter()
@@ -476,6 +486,7 @@ impl Shared {
         }
         let capacity = self.options.log_capacity.max(1);
         let logged = &mut log.logged;
+        let mut inserted = Vec::new();
         let _ = self.store.update(|tx| {
             let epoch = self.store.epoch();
             let logged = logged.get_or_insert_with(|| {
@@ -491,6 +502,7 @@ impl Shared {
                 }
                 if table.insert(d.clone()).is_ok() {
                     logged.push_back(d.id);
+                    inserted.push(d);
                 }
                 while logged.len() > capacity {
                     if let Some(old) = logged.pop_front() {
@@ -500,6 +512,17 @@ impl Shared {
             }
             Ok(())
         });
+        if let Some(observe) = &self.options.observer {
+            for d in inserted {
+                observe(&Notice::Delivery {
+                    app_id: d.app_id,
+                    delivery_id: d.id,
+                    event: &d.event,
+                    action: d.action.as_deref(),
+                    status_code: d.status_code,
+                });
+            }
+        }
         for id in ready.keys() {
             unlogged.remove(id);
         }

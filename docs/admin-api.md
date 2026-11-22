@@ -32,7 +32,11 @@ An explicit ID must exceed the current ID sequence. Replace startup environment 
 | `GET /_hubdouble/faults` | No body | `200` with an array of fault objects, each with its `id` and remaining `count`. |
 | `DELETE /_hubdouble/faults` | No body | `204`. Removes all fault rules. |
 
-The log keeps the last 50,000 request records. Each has `cursor`, `kind` (`"request"`), `method`, `path`, `operation_id`, `actor` (login or null), and `status`. The wait route looks for every `match` string in the space-separated method, path, operation ID, status, and actor. Omit `after` to start at the oldest available entry. Both routes return `410` for a cursor older than the window. A reset also returns `410` to a wait request that is open across the reset.
+The log keeps the last 50,000 records. Each has a `cursor` and a `kind`:
+
+- `"request"`: an API request, with `method`, `path`, `operation_id`, `actor` (login or null), and `status`. The wait route looks for every `match` string in the space-separated method, path, operation ID, status, and actor.
+- `"event"`: an event that got a delivery ID for one App, with `app_id`, `delivery_id`, `event`, and `action` (or null). The wait route matches against `event`, then `event.action`, the App ID and the delivery ID, for example `event issues.opened`.
+- `"delivery"`: a finished attempt that the delivery list now shows, with `app_id`, `delivery_id`, `event`, `action`, and `status_code` (`0` when no answer came). The wait route matches against `delivery`, then `event.action`, the status code, the App ID and the delivery ID, for example `delivery issues.opened 200`. Omit `after` to start at the oldest available entry. Both routes return `410` for a cursor older than the window. A reset also returns `410` to a wait request that is open across the reset.
 
 A fault requires `status` from 100 through 599. Use optional `method` (case insensitive), `path` (a pattern with `*`), or `operation` (a REST operation ID or GraphQL operation name). All supplied match fields must match. Optional fields are `body` (raw string or JSON), `headers` (object of string values), `delay_ms` (default 0), and `count` (omit for no limit). The first applicable rule replaces the normal response. A positive count decreases after each match and the rule expires at zero. A rule with an initial count of zero never matches.
 

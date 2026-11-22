@@ -81,7 +81,7 @@ pub struct Admin {
     pub(crate) kinds: Vec<(&'static str, KindApply)>,
     pub(crate) routes: Vec<(Method, String, AdminHandler)>,
     pub(crate) snapshot: Mutex<Option<Arc<Snapshot>>>,
-    pub(crate) log: Log,
+    pub(crate) log: Arc<Log>,
     pub(crate) faults: Faults,
 }
 
@@ -153,6 +153,14 @@ impl Admin {
     /// The request log hook: the server calls it once per API request.
     pub fn record(&self, entry: &LogEntry<'_>) {
         self.log.record(entry);
+    }
+
+    /// The delivery runtime's observer: it puts each event and each logged delivery in the
+    /// request log.
+    #[must_use]
+    pub fn observer(&self) -> hubdouble_hooks::Observer {
+        let log = self.log.clone();
+        Arc::new(move |notice| log.note(notice))
     }
 
     /// The faults hook: the server calls it before it runs a request. A fault with a `count`

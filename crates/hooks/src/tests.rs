@@ -19,7 +19,9 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::delivery::{signature_1, signature_256};
-use crate::{ConnectFuture, Connector, Handle, HooksError, Io, Options, emit, ping, redeliver};
+use crate::{
+    ConnectFuture, Connector, Handle, HooksError, Io, Notice, Options, emit, ping, redeliver,
+};
 
 const ORG: i64 = 10;
 const USER: i64 = 11;
@@ -594,9 +596,20 @@ async fn an_event_past_the_byte_budget_is_logged_failed_without_an_attempt() {
     emit_one(&sizing, event("push", WIDGET));
     let one = sizing.take_outbox()[0].entry.payload.len();
     // Given a budget of one payload and a receiver that holds the first attempt
+    let (seen, mut notices) = mpsc::unbounded_channel();
     let (hooks, mut hits) = start(&store, |o| {
         o.workers = 1;
         o.queue_bytes = one;
+        o.observer = Some(Arc::new(move |n: &Notice<'_>| {
+            if let Notice::Delivery {
+                delivery_id,
+                status_code,
+                ..
+            } = *n
+            {
+                let _ = seen.send((delivery_id, status_code));
+            }
+        }));
     });
     emit_one(&store, event("push", WIDGET));
     // When a second event commits while the first still waits for its attempt
@@ -619,6 +632,12 @@ async fn an_event_past_the_byte_budget_is_logged_failed_without_an_attempt() {
         json!(WIDGET)
     );
     assert!(d.request.headers.contains_key("X-Hub-Signature-256"));
+    // And the observer saw both deliveries, the refused one with status_code 0
+    let mut observed = Vec::new();
+    while let Ok(n) = notices.try_recv() {
+        observed.push(n);
+    }
+    assert_eq!(observed, vec![(1, 200), (2, 0)]);
     // And once the budget is free again, a new event is delivered
     let mut bodies = answer_all(hits);
     emit_one(&store, event("push", WIDGET));

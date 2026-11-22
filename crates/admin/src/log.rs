@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use hubdouble_hooks::Notice;
 use parking_lot::Mutex;
 use serde::Serialize;
 use tokio::sync::Notify;
@@ -11,12 +12,105 @@ pub(crate) const CAPACITY: usize = 50_000;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Logged {
     pub cursor: u64,
-    pub kind: &'static str,
-    pub method: String,
-    pub path: String,
-    pub operation_id: String,
-    pub actor: Option<String>,
-    pub status: u16,
+    #[serde(flatten)]
+    pub what: What,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub(crate) enum What {
+    Request {
+        method: String,
+        path: String,
+        operation_id: String,
+        actor: Option<String>,
+        status: u16,
+    },
+    Event {
+        app_id: i64,
+        delivery_id: i64,
+        event: String,
+        action: Option<String>,
+    },
+    Delivery {
+        app_id: i64,
+        delivery_id: i64,
+        event: String,
+        action: Option<String>,
+        status_code: i64,
+    },
+}
+
+fn event_name(event: &str, action: Option<&str>) -> String {
+    match action {
+        Some(a) => format!("{event}.{a}"),
+        None => event.to_owned(),
+    }
+}
+
+impl What {
+    fn line(&self) -> String {
+        match self {
+            What::Request {
+                method,
+                path,
+                operation_id,
+                actor,
+                status,
+            } => format!(
+                "{method} {path} {operation_id} {status} {}",
+                actor.as_deref().unwrap_or("")
+            ),
+            What::Event {
+                app_id,
+                delivery_id,
+                event,
+                action,
+            } => format!(
+                "event {} {app_id} {delivery_id}",
+                event_name(event, action.as_deref())
+            ),
+            What::Delivery {
+                app_id,
+                delivery_id,
+                event,
+                action,
+                status_code,
+            } => format!(
+                "delivery {} {status_code} {app_id} {delivery_id}",
+                event_name(event, action.as_deref())
+            ),
+        }
+    }
+
+    fn of(notice: &Notice<'_>) -> What {
+        match *notice {
+            Notice::Event {
+                app_id,
+                delivery_id,
+                event,
+                action,
+            } => What::Event {
+                app_id,
+                delivery_id,
+                event: event.to_owned(),
+                action: action.map(str::to_owned),
+            },
+            Notice::Delivery {
+                app_id,
+                delivery_id,
+                event,
+                action,
+                status_code,
+            } => What::Delivery {
+                app_id,
+                delivery_id,
+                event: event.to_owned(),
+                action: action.map(str::to_owned),
+                status_code,
+            },
+        }
+    }
 }
 
 impl Logged {
@@ -24,14 +118,7 @@ impl Logged {
         if patterns.is_empty() {
             return true;
         }
-        let line = format!(
-            "{} {} {} {} {}",
-            self.method,
-            self.path,
-            self.operation_id,
-            self.status,
-            self.actor.as_deref().unwrap_or("")
-        );
+        let line = self.what.line();
         patterns.iter().all(|p| line.contains(p.as_str()))
     }
 }
@@ -71,18 +158,24 @@ impl Log {
     }
 
     pub(crate) fn record(&self, e: &LogEntry<'_>) {
-        let mut ring = self.ring.lock();
-        ring.last += 1;
-        let logged = Logged {
-            cursor: ring.last,
-            kind: "request",
+        self.push(What::Request {
             method: e.method.to_owned(),
             path: e.path.to_owned(),
             operation_id: e.operation_id.to_owned(),
             actor: e.actor.map(str::to_owned),
             status: e.status,
-        };
-        ring.entries.push_back(logged);
+        });
+    }
+
+    pub(crate) fn note(&self, notice: &Notice<'_>) {
+        self.push(What::of(notice));
+    }
+
+    fn push(&self, what: What) {
+        let mut ring = self.ring.lock();
+        ring.last += 1;
+        let cursor = ring.last;
+        ring.entries.push_back(Logged { cursor, what });
         if ring.entries.len() > self.capacity
             && let Some(dropped) = ring.entries.pop_front()
         {
@@ -155,6 +248,13 @@ mod tests {
 
     use super::*;
 
+    fn path_of(l: &Logged) -> &str {
+        match &l.what {
+            What::Request { path, .. } => path,
+            What::Event { .. } | What::Delivery { .. } => "",
+        }
+    }
+
     fn entry(path: &str) -> LogEntry<'_> {
         LogEntry {
             method: "GET",
@@ -175,10 +275,7 @@ mod tests {
         // When
         let (all, cursor) = log.since(None).unwrap();
         // Then
-        assert_eq!(
-            all.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
-            ["/b", "/c"]
-        );
+        assert_eq!(all.iter().map(path_of).collect::<Vec<_>>(), ["/b", "/c"]);
         assert_eq!(cursor, 3);
         assert_eq!(log.since(Some(0)), Err(Gone));
         assert_eq!(log.since(Some(1)).unwrap().0.len(), 2);
@@ -223,7 +320,7 @@ mod tests {
         log.record(&entry("/repos/o/r"));
         // Then
         let got = waiting.await.unwrap().unwrap();
-        assert_eq!((got.path.as_str(), got.cursor), ("/repos/o/r", cursor + 2));
+        assert_eq!((path_of(&got), got.cursor), ("/repos/o/r", cursor + 2));
     }
 
     #[tokio::test(start_paused = true)]

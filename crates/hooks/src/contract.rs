@@ -75,6 +75,30 @@ pub struct Options {
     /// The most bytes of a receiver's answer body that are read and logged; the rest is dropped.
     pub response_bytes: usize,
     pub connector: Arc<dyn Connector>,
+    /// Called once per [`Notice`], with the runtime's lock held, so it must not wait.
+    pub observer: Option<Observer>,
+}
+
+pub type Observer = Arc<dyn Fn(&Notice<'_>) + Send + Sync>;
+
+/// What the delivery runtime reports to an [`Options::observer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Notice<'a> {
+    /// A committed event got a delivery ID for one App.
+    Event {
+        app_id: i64,
+        delivery_id: i64,
+        event: &'a str,
+        action: Option<&'a str>,
+    },
+    /// An attempt finished and is in the App's delivery log.
+    Delivery {
+        app_id: i64,
+        delivery_id: i64,
+        event: &'a str,
+        action: Option<&'a str>,
+        status_code: i64,
+    },
 }
 
 /// The default of [`Options::response_bytes`].
@@ -90,6 +114,7 @@ impl Default for Options {
             log_capacity: 50_000,
             response_bytes: RESPONSE_BYTES,
             connector: Arc::new(TcpConnector),
+            observer: None,
         }
     }
 }

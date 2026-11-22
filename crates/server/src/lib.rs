@@ -99,7 +99,14 @@ impl Server {
         git.clock(clock.clone());
         let config = Arc::new(config);
         let store = store.build_with(config.clone());
-        let hooks = hubdouble_hooks::Handle::start(store.clone(), clock.clone())?;
+        let hooks = hubdouble_hooks::Handle::start_with(
+            store.clone(),
+            clock.clone(),
+            hubdouble_hooks::Options {
+                observer: Some(admin.observer()),
+                ..hubdouble_hooks::Options::default()
+            },
+        )?;
         let services = Arc::new(Services {
             store,
             git: git.build(),
