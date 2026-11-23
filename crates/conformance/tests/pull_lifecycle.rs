@@ -780,3 +780,95 @@ async fn a_merge_that_deletes_its_head_branch_retargets_the_pull_requests_based_
         .collect();
     assert_eq!(deleted, [(json!("refs/heads/one"), json!(true))]);
 }
+
+async fn create_branch(client: &GoGithub, how: Deletion, branch: &str, sha: &str) {
+    let name = format!("refs/heads/{branch}");
+    match how {
+        Deletion::Rest => {
+            let answer = client
+                .post(
+                    "repos/acme/public/git/refs",
+                    &json!({"ref": name, "sha": sha}),
+                )
+                .await;
+            assert_eq!(answer.status, StatusCode::CREATED, "{}", answer.json());
+        }
+        Deletion::Graphql => {
+            let repository = client.get(PULL).await.json()["base"]["repo"]["node_id"].clone();
+            let answer = Graphql::new(client.clone())
+                .query(
+                    "mutation($input: UpdateRefsInput!) {updateRefs(input: $input) {clientMutationId}}",
+                    &json!({"input": {"repositoryId": repository, "refUpdates": [
+                        {"name": name, "afterOid": sha, "beforeOid": ObjectId::NULL.to_string()}
+                    ]}}),
+                )
+                .await
+                .json();
+            assert_eq!(answer.get("errors"), None, "{answer}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn restoring_a_deleted_head_branch_records_it_on_open_and_closed_pull_requests() {
+    for (how, closed) in [
+        (Deletion::Rest, false),
+        (Deletion::Rest, true),
+        (Deletion::Graphql, false),
+        (Deletion::Graphql, true),
+    ] {
+        // Given a pull request from feature, closed or open, whose head branch was deleted
+        let server = server(&[pull_request("feature", "main")]).await;
+        let client = alice(&server);
+        let head = tip(&server, "feature").to_string();
+        if closed {
+            let answer = client
+                .call_json(Method::PATCH, PULL, &json!({"state": "closed"}))
+                .await;
+            assert_eq!(answer.status, StatusCode::OK, "{}", answer.json());
+        }
+        delete_branch(&client, how, "feature").await;
+        deliveries(&server).await;
+        // When feature is created again at its old commit
+        create_branch(&client, how, "feature", &head).await;
+        // Then the timeline records the restore after the deletion, by the restorer
+        let recorded = events(&client, 1).await;
+        let expected: &[&str] = if closed {
+            &["closed", "head_ref_deleted", "head_ref_restored"]
+        } else {
+            &["head_ref_deleted", "head_ref_restored"]
+        };
+        assert_eq!(names(&recorded), expected, "{how:?} closed={closed}");
+        let restored = &recorded[recorded.len() - 1];
+        assert_eq!(keys(restored), REF_EVENT_KEYS.map(String::from), "{how:?}");
+        assert_eq!(
+            restored["node_id"].as_str().map(|id| &id[..5]),
+            Some("HRRE_")
+        );
+        assert_eq!(restored["actor"]["login"], "alice", "{how:?}");
+        let pull = client.get(PULL).await.json();
+        assert_eq!(pull["updated_at"], restored["created_at"], "{how:?}");
+        assert_eq!(pull["head"]["sha"], json!(head), "{how:?}");
+        // And the restore at the old commit sends no pull_request webhook
+        assert!(
+            pull_hooks(&deliveries(&server).await, 1).is_empty(),
+            "{how:?} closed={closed}"
+        );
+        // When feature is deleted and created again a second time
+        delete_branch(&client, how, "feature").await;
+        create_branch(&client, how, "feature", &head).await;
+        // Then each restore follows its deletion
+        let again = events(&client, 1).await;
+        let tail: Vec<_> = names(&again).into_iter().rev().take(4).collect();
+        assert_eq!(
+            tail,
+            [
+                "head_ref_restored",
+                "head_ref_deleted",
+                "head_ref_restored",
+                "head_ref_deleted"
+            ],
+            "{how:?}"
+        );
+    }
+}

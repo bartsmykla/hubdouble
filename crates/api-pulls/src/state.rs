@@ -138,6 +138,9 @@ pub(crate) fn ref_updated(
     if change.new.is_none() {
         return deleted(tx, git, change, name);
     }
+    if change.old.is_none() {
+        restored(tx, git, change, name)?;
+    }
     let affected: Vec<_> = tx
         .table::<Issues>()
         .pulls_on_branch(change.repo_id, name)
@@ -192,6 +195,44 @@ fn deleted(tx: &mut TxMut<'_>, git: &Git, change: &RefChange, name: &str) -> Res
     Ok(())
 }
 
+fn restored(tx: &mut TxMut<'_>, git: &Git, change: &RefChange, name: &str) -> Result<(), ApiError> {
+    let heads: Vec<_> =
+        tx.table::<Issues>()
+            .pulls_on_branch(change.repo_id, name)
+            .filter(|issue| {
+                issue.pull.as_ref().is_some_and(|p| {
+                    p.head.repo_id == Some(change.repo_id) && p.head.ref_name == name
+                })
+            })
+            .filter(|issue| head_deleted(tx, issue.id))
+            .cloned()
+            .collect();
+    for issue in heads {
+        let mut issue = Issue::clone(&issue);
+        issue.updated_at = git.now();
+        tx.table_mut::<Issues>().replace(issue.clone())?;
+        timeline::record(
+            tx,
+            &issue,
+            (change.sender, None),
+            StateKind::HeadRefRestored,
+        )?;
+    }
+    Ok(())
+}
+
+fn head_deleted(tx: &Tx, issue_id: i64) -> bool {
+    tx.table::<timeline::StateEvents>()
+        .children(issue_id)
+        .rev()
+        .find_map(|e| match e.kind {
+            StateKind::HeadRefDeleted => Some(true),
+            StateKind::HeadRefRestored => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
 fn update_refs(
     tx: &mut TxMut<'_>,
     git: &Git,
@@ -207,6 +248,7 @@ fn update_refs(
     let head_changed = p.head.repo_id == Some(change.repo_id) && p.head.ref_name == name;
     let base_changed = repo_id == change.repo_id && p.base.ref_name == name;
     let old_base = p.base.sha.parse()?;
+    let moved = head_changed && change.new.is_some_and(|id| p.head.sha != id.to_string());
     if let Some(id) = change.new {
         if head_changed {
             p.head.sha = id.to_string();
@@ -255,7 +297,7 @@ fn update_refs(
     }
     tx.table_mut::<Issues>().replace(issue.clone())?;
     sync_refs(tx, git, &issue)?;
-    if head_changed && let Some(after) = change.new {
+    if moved && let Some(after) = change.new {
         let before = change.old.unwrap_or(ObjectId::NULL);
         events::emit(
             tx,
