@@ -296,6 +296,12 @@ impl GoGithub {
     pub async fn call_json(&self, method: Method, path: &str, body: &Value) -> Answer {
         let mut bytes = serde_json::to_vec(body).unwrap_or_else(|e| panic!("encode the body: {e}"));
         bytes.push(b'\n');
+        self.call_bytes(method, path, bytes).await
+    }
+
+    /// Sends `bytes` as a JSON request body without encoding them, for a body that a `Value` cannot
+    /// hold, such as one with a repeated key.
+    pub async fn call_bytes(&self, method: Method, path: &str, bytes: Vec<u8>) -> Answer {
         let request = self
             .request(method, path)
             .header(http::header::CONTENT_TYPE, "application/json")

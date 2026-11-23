@@ -280,7 +280,8 @@ fn nullable_body<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BodyEdit, D::
 }
 
 pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
-    let input: Edit = ctx.body()?;
+    let input = Edit::deserialize(ctx.body::<Value>()?)
+        .map_err(|e| ApiError::unprocessable(format!("Invalid request.\n\n{e}")))?;
     let mut issue = Issue::clone(read::issue(ctx)?);
     may_edit(ctx, &issue)?;
     let before = issue.state;
@@ -415,8 +416,7 @@ fn edit(
     let target = input
         .state
         .as_deref()
-        .map(|state| IssueState::from_rest(state).ok_or_else(|| validation("state", "invalid")))
-        .transpose()?
+        .and_then(IssueState::from_rest)
         .unwrap_or(issue.state);
     if let BodyEdit::Set(body) = input.body
         && body != issue.body

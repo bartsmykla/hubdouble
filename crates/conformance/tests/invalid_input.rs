@@ -70,11 +70,6 @@ async fn writes_refuse_a_body_that_breaks_the_operation_schema() {
     // When each body leaves out a required member or breaks a constraint of the pinned schema
     let cases = [
         (
-            Method::PATCH,
-            format!("{REPO}/pulls/{number}"),
-            json!({"state": "bogus"}),
-        ),
-        (
             Method::POST,
             format!("{REPO}/issues/{issue}/comments"),
             json!({}),

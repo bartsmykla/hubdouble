@@ -943,6 +943,98 @@ async fn restoring_a_deleted_head_branch_records_it_on_open_and_closed_pull_requ
 }
 
 #[tokio::test]
+async fn an_unknown_state_on_a_pull_request_edit_is_ignored_and_the_rest_is_written() {
+    for closed in [false, true] {
+        // Given a pull request, open or closed
+        let server = server(&[pull_request("feature", "main")]).await;
+        let client = alice(&server);
+        if closed {
+            let answer = client
+                .call_json(Method::PATCH, PULL, &json!({"state": "closed"}))
+                .await;
+            assert_eq!(answer.status, StatusCode::OK);
+        }
+        let before = client.get(PULL).await.json()["state"].clone();
+        // When an edit sends a state that is neither open nor closed, with a new title
+        let answer = client
+            .call_json(
+                Method::PATCH,
+                PULL,
+                &json!({"state": "parked", "title": "renamed"}),
+            )
+            .await;
+        // Then GitHub answers 200 with the new title and the state unchanged
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.json());
+        let pull = client.get(PULL).await.json();
+        assert_eq!(
+            (&pull["title"], &pull["state"]),
+            (&json!("renamed"), &before),
+            "closed={closed}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_repeated_state_takes_its_last_value_and_an_unknown_last_value_is_ignored() {
+    // Given an open pull request and a closed one
+    let server = server(&[
+        pull_request("feature", "main"),
+        pull_request("feature", "develop"),
+    ])
+    .await;
+    let client = alice(&server);
+    let closed = client
+        .call_json(
+            Method::PATCH,
+            "repos/acme/public/pulls/2",
+            &json!({"state": "closed"}),
+        )
+        .await;
+    assert_eq!(closed.status, StatusCode::OK);
+    // When the pulls list repeats state, as live cli/cli answers state=closed&state=bogus with open ones and state=bogus&state=closed with closed ones
+    for (query, number) in [
+        ("state=closed&state=bogus", 1),
+        ("state=bogus&state=closed", 2),
+    ] {
+        let listed = client
+            .get(&format!("repos/acme/public/pulls?{query}"))
+            .await
+            .json();
+        // Then the last value counts, and an unknown one means open
+        let numbers: Vec<_> = listed
+            .as_array()
+            .map_or_default(|all| all.iter().map(|p| p["number"].clone()).collect());
+        assert_eq!(numbers, [json!(number)], "{query}");
+    }
+    // When an edit body repeats state, with an unknown value last
+    let answer = client
+        .call_bytes(
+            Method::PATCH,
+            PULL,
+            br#"{"state": "closed", "title": "renamed", "state": "parked"}"#.to_vec(),
+        )
+        .await;
+    // Then the last value counts, so the state is unchanged and the title is written
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.json());
+    let pull = client.get(PULL).await.json();
+    assert_eq!(
+        (&pull["title"], &pull["state"]),
+        (&json!("renamed"), &json!("open"))
+    );
+    // When an edit body repeats state with closed last
+    let answer = client
+        .call_bytes(
+            Method::PATCH,
+            PULL,
+            br#"{"state": "parked", "state": "closed"}"#.to_vec(),
+        )
+        .await;
+    // Then the pull request is closed
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.json());
+    assert_eq!(client.get(PULL).await.json()["state"], "closed");
+}
+
+#[tokio::test]
 async fn writes_to_pull_request_refs_are_refused_on_every_ref_path() {
     // Given an open pull request with its head and merge refs
     let server = server(&[pull_request("feature", "main")]).await;
