@@ -428,6 +428,68 @@ fn an_app_with_checks_write_gets_check_events_without_subscribing() {
 }
 
 #[test]
+fn an_event_to_an_explicit_installation_needs_access_to_the_repository() {
+    // Given App A suspended on the account, and App B whose installation covers only OTHER,
+    // both with checks write
+    let store = world();
+    store
+        .update_quiet(|tx| {
+            for (app_id, slug, id, repos) in [
+                (APP_A, "alpha", INSTALL_A, None),
+                (APP_B, "beta", INSTALL_B, Some(vec![OTHER])),
+            ] {
+                let mut a = app(app_id, slug, &["push"]);
+                a.permissions.insert("checks".to_owned(), Access::Write);
+                tx.table_mut::<Apps>().replace(a)?;
+                let mut i = installation(id, app_id, repos);
+                i.permissions.insert("checks".to_owned(), Access::Write);
+                if id == INSTALL_A {
+                    i.suspended_at = Some(Timestamp::SEED);
+                }
+                tx.table_mut::<Installations>().replace(i)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let to = |app_id, installation_id, e: Event| Event {
+        app_id: Some(app_id),
+        installation_id: Some(installation_id),
+        ..e
+    };
+    let requested = |repo_id| Event {
+        action: Some("requested_action"),
+        ..event("check_run", repo_id)
+    };
+    let cases = [
+        (to(APP_A, INSTALL_A, requested(OTHER)), vec![]),
+        (to(APP_B, INSTALL_B, requested(WIDGET)), vec![]),
+        (to(APP_B, INSTALL_B, requested(OTHER)), vec![APP_B]),
+        (
+            to(
+                APP_A,
+                INSTALL_A,
+                Event {
+                    action: Some("suspend"),
+                    repo_id: None,
+                    org_id: Some(ORG),
+                    ..event("installation", WIDGET)
+                },
+            ),
+            vec![APP_A],
+        ),
+    ];
+    for (e, want) in cases {
+        let what = (e.name, e.action, e.installation_id, e.repo_id);
+        // When the event for that installation commits
+        emit_one(&store, e);
+        // Then a suspended installation gets only its lifecycle event, and an installation
+        // gets no event of a repository it does not cover
+        let got: Vec<i64> = store.take_outbox().iter().map(|c| c.entry.app_id).collect();
+        assert_eq!(got, want, "{what:?}");
+    }
+}
+
+#[test]
 fn installation_event_reaches_only_its_app_with_the_data_before_the_change() {
     // Given two Apps installed on one account
     let store = world();

@@ -96,7 +96,13 @@ pub(crate) fn recipients(tx: &Tx, e: &Event) -> Vec<(i64, Option<Arc<Installatio
         return tx
             .table::<Installations>()
             .get(id)
-            .filter(|i| e.app_id.is_none_or(|a| a == i.app_id) && granted(i, e) && wants(i.app_id))
+            .filter(|i| {
+                e.app_id.is_none_or(|a| a == i.app_id)
+                    && (ALWAYS_DELIVERED.contains(&e.name)
+                        || i.suspended_at.is_none() && e.repo_id.is_none_or(|r| covers(i, r)))
+                    && granted(i, e)
+                    && wants(i.app_id)
+            })
             .map(|i| (i.app_id, Some(i.clone())))
             .into_iter()
             .collect();
