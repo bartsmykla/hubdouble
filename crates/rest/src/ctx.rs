@@ -10,8 +10,8 @@ use hubdouble_model::{ApiError, Clock, Repo, Timestamp};
 use hubdouble_render::Urls;
 use hubdouble_store::{Tx, TxMut};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 use crate::params::{Params, Query};
 use crate::reply::Reply;
@@ -115,7 +115,8 @@ impl<'a> Ctx<'a> {
         self.p.body
     }
 
-    /// The JSON body; an empty body reads as `{}`.
+    /// The JSON body; an empty body reads as `{}`, and a repeated object key takes its last
+    /// value, as GitHub reads it.
     ///
     /// # Errors
     ///
@@ -126,12 +127,21 @@ impl<'a> Ctx<'a> {
         } else {
             self.p.body
         };
-        serde_json::from_slice(body).map_err(|e| match e.classify() {
-            serde_json::error::Category::Data => {
-                ApiError::unprocessable(format!("Invalid request.\n\n{e}"))
-            }
-            _ => ApiError::bad_request("Problems parsing JSON"),
-        })
+        serde_json::from_slice(body)
+            .or_else(|e| {
+                if e.classify() != serde_json::error::Category::Data {
+                    return Err(e);
+                }
+                serde_json::from_slice::<serde_json::Value>(body)
+                    .and_then(T::deserialize)
+                    .map_err(|_| e)
+            })
+            .map_err(|e| match e.classify() {
+                serde_json::error::Category::Data => {
+                    ApiError::unprocessable(format!("Invalid request.\n\n{e}"))
+                }
+                _ => ApiError::bad_request("Problems parsing JSON"),
+            })
     }
 
     #[must_use]

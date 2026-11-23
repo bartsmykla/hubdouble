@@ -124,3 +124,55 @@ async fn a_review_request_for_a_user_who_is_not_a_collaborator_is_refused() {
     // Then GitHub answers 422, as pulls/request-reviewers documents
     assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+#[tokio::test]
+async fn a_repeated_body_key_takes_its_last_value_on_every_route() {
+    // Given an issue and the tip of main
+    let (_server, client) = start().await;
+    let issue =
+        created(&client, &format!("{REPO}/issues"), &json!({"title": "Bug"})).await["number"]
+            .as_u64()
+            .unwrap();
+    let main = client
+        .get(&format!("{REPO}/git/ref/heads/main"))
+        .await
+        .json();
+    let sha = main["object"]["sha"].as_str().unwrap().to_owned();
+
+    // When an issue edit, a commit status and a ref create each repeat a key
+    let cases = [
+        (
+            Method::PATCH,
+            format!("{REPO}/issues/{issue}"),
+            r#"{"state": "open", "state": "closed"}"#.to_owned(),
+            StatusCode::OK,
+            "state",
+            "closed",
+        ),
+        (
+            Method::POST,
+            format!("{REPO}/statuses/{sha}"),
+            r#"{"state": "pending", "context": "ci", "state": "success"}"#.to_owned(),
+            StatusCode::CREATED,
+            "state",
+            "success",
+        ),
+        (
+            Method::POST,
+            format!("{REPO}/git/refs"),
+            format!(r#"{{"ref": "refs/heads/one", "sha": "{sha}", "ref": "refs/heads/two"}}"#),
+            StatusCode::CREATED,
+            "ref",
+            "refs/heads/two",
+        ),
+    ];
+    for (method, path, body, status, field, value) in cases {
+        let answer = client
+            .call_bytes(method.clone(), &path, body.into_bytes())
+            .await;
+
+        // Then GitHub takes the last value, as it does for a repeated pull request edit key
+        assert_eq!(answer.status, status, "{method} {path} {}", answer.json());
+        assert_eq!(answer.json()[field], value, "{method} {path}");
+    }
+}
