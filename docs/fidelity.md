@@ -23,6 +23,7 @@ hubdouble implements the GitHub operations in the [client inventory](inventory/r
 | Negated search qualifiers | A qualifier such as `-author:octocat` acts as a text term. It does not exclude matches. |
 | Search in comments | Text search checks titles and bodies. `in:comments` alone with a text term finds no matches. If you also specify `title` or `body`, the search uses those fields. |
 | Search order | `sort:created` and `sort:updated` support ascending and descending order. Sorts by comments, reactions, or interactions have no effect. The default order is creation time, newest first. |
+| Pull request state order | `Issue.closedByPullRequestsReferences` accepts `orderByState`. The argument has no effect. The [GitHub schema](https://docs.github.com/en/graphql/reference/issues#issue) gives no sort direction, and client omits the argument. |
 
 GitHub documents redirect responses for the [repository endpoint](https://docs.github.com/en/rest/repos/repos#get-a-repository) and more qualifiers for [issue and pull request search](https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests).
 
