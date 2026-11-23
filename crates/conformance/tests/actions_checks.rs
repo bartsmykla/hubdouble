@@ -449,7 +449,6 @@ async fn a_workflow_job_is_its_check_run_in_the_github_actions_suite_of_its_run(
     assert_eq!(check["app"]["owner"]["login"], "github");
     assert_eq!(check["app"]["owner"]["id"], 9919);
     assert_eq!(check["pull_requests"][0]["number"], number);
-    // And its annotation is listed
     let listed = ok(
         &client
             .get(&format!("{REPO}/check-runs/{build}/annotations"))
@@ -458,7 +457,7 @@ async fn a_workflow_job_is_its_check_run_in_the_github_actions_suite_of_its_run(
     );
     assert_eq!(listed[0]["path"], "src/feature.txt");
     assert_eq!(listed[0]["annotation_level"], "failure");
-    // And the run's check suite is GitHub Actions' suite on the pushed head
+    // Then the run's check suite is GitHub Actions' suite on the pushed head
     let suite_view = actions_suite(&client, &after).await;
     assert_eq!(suite_view["id"], suite);
     assert_eq!(suite_view["app"]["slug"], "github-actions");
@@ -479,7 +478,7 @@ async fn a_workflow_job_is_its_check_run_in_the_github_actions_suite_of_its_run(
             suite_view["repository"]["url"].as_str().unwrap()
         )
     );
-    // And the check name finds that suite among every App's suites on the head
+    // Then the check name finds that suite among every App's suites on the head
     let by_name = ok(
         &client
             .get(&format!(
@@ -541,7 +540,7 @@ async fn check_runs_for_a_ref_count_attempts_as_github_filters_them() {
         .map(|check| check["id"].as_i64().unwrap())
         .collect();
     assert_eq!(listed, newest);
-    // And the name, status and App filters and paging apply to the Actions check runs
+    // Then the name, status and App filters and paging apply to the Actions check runs
     assert_eq!(build["total_count"], 2);
     assert!(build["check_runs"].as_array().unwrap().iter().all(|check| {
         check["name"] == "build" && check["check_suite"]["id"] == first["check_suite_id"]
@@ -551,7 +550,7 @@ async fn check_runs_for_a_ref_count_attempts_as_github_filters_them() {
     assert_eq!(other["total_count"], 0);
     assert_eq!(paged["total_count"], 8);
     assert_eq!(paged["check_runs"].as_array().unwrap().len(), 2);
-    // And the suite follows the queued attempt
+    // Then the suite follows the queued attempt
     let suite = actions_suite(&client, &sha).await;
     assert_eq!(
         (suite["status"].clone(), suite["conclusion"].clone()),
@@ -672,7 +671,6 @@ async fn another_app_cannot_update_an_actions_check_run() {
             "https://docs.github.com/rest/checks/runs#update-a-check-run"
         );
     }
-    // And the check run and its job stay queued
     let check = ok(&app(&server).get(&path).await, StatusCode::OK);
     assert_eq!(check["status"], "queued");
     assert_eq!(
@@ -836,7 +834,7 @@ async fn apps_get_created_and_completed_events_for_actions_checks() {
     assert_eq!(suites[0]["check_suite"]["id"], suite);
     assert_eq!(suites[0]["check_suite"]["conclusion"], "failure");
     assert_eq!(suites[0]["check_suite"]["app"]["slug"], "github-actions");
-    // And nothing meant for the suite's own App reached this App
+    // Then nothing meant for the suite's own App reached this App
     assert!(!queued.iter().chain(&done).any(|delivery| {
         let event = delivery.header("x-github-event");
         let action = delivery.json()["action"].clone();
@@ -864,7 +862,7 @@ async fn a_rerun_of_a_run_created_over_30_days_ago_is_refused() {
     // Then that re-run still starts
     ok(&at_limit, StatusCode::CREATED);
 
-    // And one second later every re-run route answers GitHub's 403
+    // Then one second later every re-run route answers GitHub's 403
     server.clock.advance(1);
     let job = jobs(&client, id, "latest").await[0]["id"].clone();
     for path in [
@@ -917,7 +915,7 @@ async fn the_51st_rerun_gives_a_failed_attempt_without_jobs() {
         ok(&client.get(&attempt).await, StatusCode::OK)["total_count"],
         0
     );
-    // And the run's suite fails with no new check run
+    // Then the run's suite fails with no new check run
     let suite = actions_suite(&client, &sha).await;
     assert_eq!(
         (suite["status"].clone(), suite["conclusion"].clone()),

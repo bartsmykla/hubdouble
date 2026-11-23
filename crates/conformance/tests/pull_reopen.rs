@@ -201,7 +201,7 @@ async fn every_reopen_takes_the_live_branches_and_sends_the_same_webhook() {
         assert_eq!(pull["commits"], 2, "{via:?}");
         let issue = client.get(ISSUE).await.json();
         assert_eq!(issue["state_reason"], Value::Null, "{via:?}");
-        // And the timeline lists the close and one reopened event by alice, with GitHub's fields
+        // Then the timeline lists the close and one reopened event by alice, with GitHub's fields
         let timeline = client.get(&format!("{ISSUE}/events")).await.json();
         let kinds: Vec<_> = timeline
             .as_array()
@@ -215,7 +215,7 @@ async fn every_reopen_takes_the_live_branches_and_sends_the_same_webhook() {
         assert_eq!(reopened_event["state_reason"], "reopened", "{via:?}");
         assert!(reopened_event.get("intent").is_none(), "{via:?}");
         assert_eq!(reopened_event["created_at"], pull["updated_at"], "{via:?}");
-        // And one pull_request reopened webhook carries that pull request, and no issues event is sent
+        // Then one pull_request reopened webhook carries that pull request, and no issues event is sent
         let all = deliveries(&server).await;
         let reopened = of(&all, "pull_request", "reopened");
         assert_eq!(reopened.len(), 1, "{via:?}");
@@ -240,7 +240,7 @@ async fn every_reopen_takes_the_live_branches_and_sends_the_same_webhook() {
             portable(&timeline),
         ));
     }
-    // And every way gives the same pull request and the same webhook
+    // Then every way gives the same pull request and the same webhook
     for (other, via) in answers.iter().zip(EVERY_WAY).skip(1) {
         assert_eq!(answers[0], *other, "{via:?}");
     }

@@ -798,7 +798,7 @@ async fn a_merge_into_the_default_branch_closes_the_issues_the_pull_request_link
     }
     let other = get(&client, "repos/acme/public/issues/5", "issues/get").await;
     assert_eq!(other["state"], "open");
-    // And each closed issue sends issues.closed
+    // Then each closed issue sends issues.closed
     assert_eq!(
         server.admin(Method::POST, "hooks/drain", None).await.status,
         StatusCode::NO_CONTENT

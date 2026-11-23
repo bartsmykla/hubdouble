@@ -403,7 +403,7 @@ fn an_app_with_checks_write_gets_check_events_without_subscribing() {
         let got: Vec<i64> = store.take_outbox().iter().map(|c| c.entry.app_id).collect();
         assert_eq!(got, [APP_A], "{name} {action:?}");
     }
-    // And an installation that grants only checks read still misses the write-level actions
+    // When the installation grants only checks read
     store
         .update_quiet(|tx| {
             let mut ia = installation(INSTALL_A, APP_A, None);
@@ -412,6 +412,7 @@ fn an_app_with_checks_write_gets_check_events_without_subscribing() {
             Ok(())
         })
         .unwrap();
+    // Then it still misses the write-level actions
     for (action, want) in [("created", vec![APP_A]), ("requested_action", vec![])] {
         emit_one(
             &store,
@@ -571,14 +572,14 @@ async fn delivers_signed_with_githubs_headers_and_logs_the_attempt() {
         signature_256(SECRET.as_bytes(), &raw)
     );
     assert_eq!(h["x-hub-signature"], signature_1(SECRET.as_bytes(), &raw));
-    // And the payload has its context with the configured origins
+    // Then the payload has its context with the configured origins
     assert_eq!(body["action"], json!("created"));
     assert_eq!(body["comment"]["id"], json!(7));
     assert_eq!(body["sender"], json!({ "login": "given" }));
     assert_eq!(body["installation"]["id"], json!(INSTALL_A));
     assert_eq!(body["organization"]["login"], json!("acme"));
     assert_eq!(body["repository"]["full_name"], json!("acme/widget"));
-    // And the delivery log holds the attempt
+    // Then the delivery log holds the attempt
     let d = store
         .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
         .unwrap()
@@ -671,7 +672,7 @@ async fn redelivery_keeps_the_guid_and_gets_a_new_id() {
     assert_eq!(two.event, "push");
     assert!(two.redelivery);
     assert!(!one.redelivery);
-    // And another App cannot redeliver it
+    // Then another App cannot redeliver it
     let other = store.update(|tx| Ok(redeliver(tx, APP_B, 1)));
     assert_eq!(other.unwrap(), Err(HooksError::UnknownDelivery(1)));
 }
@@ -841,13 +842,13 @@ async fn an_event_past_the_byte_budget_is_logged_failed_without_an_attempt() {
         json!(WIDGET)
     );
     assert!(d.request.headers.contains_key("X-Hub-Signature-256"));
-    // And the observer saw both deliveries, the refused one with status_code 0
+    // Then the observer saw both deliveries, the refused one with status_code 0
     let mut observed = Vec::new();
     while let Ok(n) = notices.try_recv() {
         observed.push(n);
     }
     assert_eq!(observed, vec![(1, 200), (2, 0)]);
-    // And once the budget is free again, a new event is delivered
+    // Then once the budget is free again, a new event is delivered
     let mut bodies = answer_all(hits);
     emit_one(&store, event("push", WIDGET));
     hooks.drain().await.unwrap();
@@ -888,7 +889,7 @@ async fn in_flight_attempts_keep_their_share_of_the_queue_byte_budget() {
     let s = hooks.stats();
     assert!(s.in_flight + s.queued <= 2, "{s:?}");
     assert!(s.waiting_bytes <= 2 * one, "{s:?}");
-    // And once the receiver answers, the two sent events succeed and the rest are Queue full
+    // Then once the receiver answers, the two sent events succeed and the rest are Queue full
     let _bodies = answer_all(hits);
     hooks.drain().await.unwrap();
     let codes: Vec<i64> = store
@@ -972,7 +973,7 @@ async fn past_the_log_byte_budget_the_oldest_deliveries_lose_their_bodies() {
             .all(|d| d.status_code == 200 && d.event == "push")
     );
     assert!(hooks.stats().log_bytes <= limit);
-    // And a delivery without its body cannot be redelivered
+    // Then a delivery without its body cannot be redelivered
     let again = store.update(|tx| Ok(redeliver(tx, APP_A, 1)));
     assert_eq!(again.unwrap(), Err(HooksError::UnknownDelivery(1)));
 }
@@ -1005,7 +1006,7 @@ async fn reset_stops_queued_and_in_flight_attempts_of_the_old_epoch() {
     assert!(hits.try_recv().is_err());
     assert_eq!(logged_ids(&store, APP_A), Vec::<i64>::new());
     assert_eq!(hooks.stats().waiting_bytes, 0);
-    // And a new event is delivered with the next delivery ID
+    // Then a new event is delivered with the next delivery ID
     let mut bodies = answer_all(hits);
     emit_one(&store, event("push", WIDGET));
     hooks.drain().await.unwrap();
@@ -1040,7 +1041,7 @@ async fn reset_keeps_a_job_the_new_epoch_queued_before_it_took_the_queue() {
     let in_flight = hits.recv().await.unwrap();
     // Given reset has moved the store to a new epoch
     store.restore(&snapshot);
-    // And an event of the new epoch is queued before reset takes the queue
+    // Given an event of the new epoch is queued before reset takes the queue
     emit_one(&store, event("push", WIDGET));
     hooks.shared.wait_stats(|s| s.queued == 1).await;
     // When reset forgets the older epoch
@@ -1066,7 +1067,7 @@ async fn an_earlier_reset_keeps_the_work_of_a_later_one() {
     let in_flight = hits.recv().await.unwrap();
     // Given a first reset that moved the store to an epoch
     let first = store.restore_epoch(&snapshot);
-    // And a second reset that moved past it, with an event of its epoch in the queue
+    // Given a second reset that moved past it, with an event of its epoch in the queue
     let second = store.restore_epoch(&snapshot);
     assert_eq!((first, second), (1, 2));
     emit_one(&store, event("push", WIDGET));
@@ -1079,7 +1080,7 @@ async fn an_earlier_reset_keeps_the_work_of_a_later_one() {
         _ = &mut forget => panic!("the reset returned before the attempt in flight ended"),
         () = std::future::ready(()) => {}
     }
-    // And the attempt in flight ends, so the first reset returns
+    // When the attempt in flight ends, so the first reset returns
     in_flight.reply.send(200).unwrap();
     forget.await.unwrap();
     // Then the later epoch's event is still delivered and logged

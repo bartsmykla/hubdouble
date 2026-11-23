@@ -203,7 +203,7 @@ async fn a_refused_reopen_keeps_only_the_body_on_both_edit_endpoints() {
             ),
             "{path}"
         );
-        // And the kept body sends its edited webhook, with no rename or reopen
+        // Then the kept body sends its edited webhook, with no rename or reopen
         let all = deliveries(&server).await;
         let hooks = pull_hooks(&all, 1);
         let issue_hooks: Vec<_> = all
@@ -295,7 +295,7 @@ async fn a_refused_base_keeps_the_other_writes_of_the_edit() {
             ),
             "{case}"
         );
-        // And the kept parts send their webhooks and record their events
+        // Then the kept parts send their webhooks and record their events
         let hooks = pull_hooks(&deliveries(&server).await, 1);
         let actions: Vec<_> = hooks.iter().map(|(action, _)| action.as_str()).collect();
         let expected: &[&str] = if state == "closed" {
@@ -393,7 +393,7 @@ async fn a_reopen_with_a_rename_and_a_new_base_records_them_in_github_order() {
             .to_vec()
         )
     );
-    // And the edited webhook names the old title and the old base
+    // Then the edited webhook names the old title and the old base
     let hooks = pull_hooks(&deliveries(&server).await, 1);
     let edited = hooks
         .iter()
@@ -430,7 +430,7 @@ async fn an_open_pull_request_names_a_signed_test_merge_commit_at_its_merge_ref(
         names,
         [json!("refs/pull/1/head"), json!("refs/pull/1/merge")]
     );
-    // And the commit merges the head into the base tip as GitHub writes it, signed by web-flow
+    // Then the commit merges the head into the base tip as GitHub writes it, signed by web-flow
     let commit = client
         .get(&format!("repos/acme/public/git/commits/{sha}"))
         .await
@@ -453,7 +453,7 @@ async fn an_open_pull_request_names_a_signed_test_merge_commit_at_its_merge_ref(
         ),
         (&json!(true), &json!("valid"))
     );
-    // And GraphQL mergeCommit stays null until the pull request merges
+    // Then GraphQL mergeCommit stays null until the pull request merges
     assert_eq!(graphql_merge_commit(&client).await, Value::Null);
 }
 
@@ -620,7 +620,7 @@ async fn deleting_a_base_branch_closes_its_open_pull_requests_on_every_path() {
             "{how:?}"
         );
         assert_eq!(ref_target(&client, MERGE_REF).await, None, "{how:?}");
-        // And the timeline records the base deletion and then the close, as GitHub does
+        // Then the timeline records the base deletion and then the close, as GitHub does
         let recorded = events(&client, 1).await;
         assert_eq!(names(&recorded), ["base_ref_deleted", "closed"], "{how:?}");
         assert_eq!(
@@ -637,7 +637,6 @@ async fn deleting_a_base_branch_closes_its_open_pull_requests_on_every_path() {
             (&json!("alice"), &Value::Null),
             "{how:?}"
         );
-        // And a closed webhook goes out
         let hooks = pull_hooks(&deliveries(&server).await, 1);
         let actions: Vec<_> = hooks.iter().map(|(action, _)| action.as_str()).collect();
         assert_eq!(actions, ["closed"], "{how:?}");
@@ -663,7 +662,7 @@ async fn deleting_a_head_branch_records_it_and_leaves_the_pull_request_open() {
             "{how:?}"
         );
         assert_eq!(ref_target(&client, HEAD_REF).await, Some(head), "{how:?}");
-        // And the timeline records only the head deletion, with no pull_request webhook
+        // Then the timeline records only the head deletion, with no pull_request webhook
         let recorded = events(&client, 1).await;
         assert_eq!(names(&recorded), ["head_ref_deleted"], "{how:?}");
         assert_eq!(
@@ -740,7 +739,7 @@ async fn a_merge_that_deletes_its_head_branch_retargets_the_pull_requests_based_
         (&second["state"], &second["base"]["ref"]),
         (&json!("open"), &json!("main"))
     );
-    // And the timelines record the deletion and the automatic base change as GitHub does
+    // Then the timelines record the deletion and the automatic base change as GitHub does
     let stack_events = |number: i64| {
         let client = client.clone();
         async move {
@@ -766,7 +765,7 @@ async fn a_merge_that_deletes_its_head_branch_retargets_the_pull_requests_based_
     );
     assert_eq!(keys(&recorded[1]), REF_EVENT_KEYS.map(String::from));
     assert_eq!(recorded[1]["actor"]["login"], "alice");
-    // And the retarget sends an edited webhook with the old base, and the deletion a push
+    // Then the retarget sends an edited webhook with the old base, and the deletion a push
     let all = deliveries(&server).await;
     let edited: Vec<_> = pull_hooks(&all, 2)
         .into_iter()
@@ -845,7 +844,6 @@ async fn a_merge_that_deletes_its_head_branch_records_a_failed_base_change_on_me
         (&json!("closed"), &json!(true), &json!("one"))
     );
     assert_eq!(after["updated_at"], before["updated_at"]);
-    // And it gets no pull_request webhook
     assert_eq!(
         pull_hooks(&deliveries(&server).await, 2),
         Vec::<(String, Value)>::new()
@@ -1139,7 +1137,7 @@ async fn restoring_a_deleted_head_branch_records_it_on_open_and_closed_pull_requ
         let pull = client.get(PULL).await.json();
         assert_eq!(pull["updated_at"], restored["created_at"], "{how:?}");
         assert_eq!(pull["head"]["sha"], json!(head), "{how:?}");
-        // And the restore at the old commit sends no pull_request webhook
+        // Then the restore at the old commit sends no pull_request webhook
         assert!(
             pull_hooks(&deliveries(&server).await, 1).is_empty(),
             "{how:?} closed={closed}"
@@ -1380,7 +1378,6 @@ async fn writes_to_pull_request_refs_are_refused_on_every_ref_path() {
         // Then it is refused as unprocessable
         assert_eq!(answer["errors"][0]["type"], "UNPROCESSABLE", "{answer}");
     }
-    // And every pull request ref is as it was
     assert_eq!(ref_target(&client, HEAD_REF).await, head);
     assert_eq!(ref_target(&client, MERGE_REF).await, merge);
     let other = client.get("repos/acme/public/git/ref/pull/2/head").await;

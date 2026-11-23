@@ -856,7 +856,7 @@ async fn the_request_log_lists_the_event_and_its_delivery() {
     assert_eq!(delivery["delivery_id"], event["delivery_id"]);
     assert_eq!(delivery["status_code"], json!(200));
     assert!(delivery["cursor"].as_u64() > event["cursor"].as_u64());
-    // And a wait for the delivery answers with it
+    // Then a wait for the delivery answers with it
     let waited = server
         .admin(
             Method::GET,

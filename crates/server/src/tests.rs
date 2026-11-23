@@ -227,7 +227,7 @@ async fn a_matching_if_none_match_answers_304() {
     assert_eq!(again.status, StatusCode::NOT_MODIFIED);
     assert!(again.body.is_empty());
     assert_eq!(again.header("etag"), tag);
-    // And another media type gets another tag
+    // Then another media type gets another tag
     let raw = get(
         s.addr,
         "/zen",

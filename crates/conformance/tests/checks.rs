@@ -373,7 +373,7 @@ async fn check_runs_for_ref_honour_the_client_listing_options() {
         200,
         "checks/list-for-ref",
     );
-    // And internal/dispatch/ci.go:221 reads the latest runs of one name
+    // When internal/dispatch/ci.go:221 reads the latest runs of one name
     let latest = checked(
         &client
             .get(&list("check_name=AGENT+review&filter=latest&per_page=100"))
@@ -386,7 +386,7 @@ async fn check_runs_for_ref_honour_the_client_listing_options() {
         200,
         "checks/list-for-ref",
     );
-    // And internal/dispatch/head.go:50 pages through every run
+    // When internal/dispatch/head.go:50 pages through every run
     let first = client.get(&list("per_page=1")).await;
     let second = client.get(&list("page=2&per_page=1")).await;
     let by_branch = client
@@ -500,7 +500,7 @@ async fn a_push_asks_each_checks_app_for_a_suite() {
     let (old, new) = push_feature(&server);
     let all = drain(&server).await;
     let suites = |query: &str| format!("repos/acme/public/commits/{new}/check-suites?{query}");
-    // And internal/dispatch/ci.go:105 counts the suites on the head
+    // When internal/dispatch/ci.go:105 counts the suites on the head
     let listed = checked(
         &client.get(&suites("per_page=1")).await,
         200,
@@ -635,7 +635,7 @@ async fn statuses_list_and_combine_as_the_client_reads_them() {
     let page_two = client
         .get(&format!("{commit}/statuses?page=2&per_page=2"))
         .await;
-    // And internal/dispatch/head.go:76 reads the combined state
+    // When internal/dispatch/head.go:76 reads the combined state
     let combined = checked(
         &client.get(&format!("{commit}/status?per_page=100")).await,
         200,

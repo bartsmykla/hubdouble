@@ -50,7 +50,7 @@ fn graphql_fields_lists_every_selected_field_with_an_owner() {
         listed, selected,
         "regenerate with `cargo run -p hubdouble-gql --example graphql_fields`"
     );
-    // And every row has one owner from the plan's tracks
+    // Then every row has one owner from the plan's tracks
     for row in &rows {
         assert_eq!(row.len(), 3, "{row:?}");
         assert!(OWNERS.contains(&row[1]), "{} has no owner", row[0]);

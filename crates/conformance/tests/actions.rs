@@ -710,7 +710,7 @@ async fn rerun_failed_jobs_queues_dependents_without_a_requested_run_event() {
         })
         .collect();
     let state = |name: &str, status: &str| (name.to_owned(), status.to_owned());
-    // And the job that passed is carried into the new attempt as it finished
+    // Then the job that passed is carried into the new attempt as it finished
     assert_eq!(
         states,
         BTreeSet::from([
@@ -720,7 +720,7 @@ async fn rerun_failed_jobs_queues_dependents_without_a_requested_run_event() {
             state("test", "queued"),
         ])
     );
-    // And only the new jobs' queued events are sent, with no workflow_run requested
+    // Then only the new jobs' queued events are sent, with no workflow_run requested
     drain(&server).await;
     let sent: Vec<_> = server
         .receiver
