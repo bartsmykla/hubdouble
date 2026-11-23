@@ -44,12 +44,12 @@ pub(super) fn run(root: &Path, args: &[String]) -> Result<()> {
                 for outcome in [
                     catalog.scan(&source, &paths, &mut routes),
                     graphql::scan(&source, &mut documents),
-                    permissions.scan(&source),
                 ] {
                     if let Err(error) = outcome {
                         errors.push(error.to_string());
                     }
                 }
+                permissions.collect(&source);
             }
             Err(error) => errors.push(error.to_string()),
         }
@@ -57,6 +57,7 @@ pub(super) fn run(root: &Path, args: &[String]) -> Result<()> {
     if !errors.is_empty() {
         return Err(errors.join("\n").into());
     }
+    permissions.resolve(&mut parser)?;
     permissions.check(root)?;
     let inventory = root.join("docs/inventory");
     let fields = graphql::fields(&inventory, &documents)?;
