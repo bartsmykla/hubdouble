@@ -120,6 +120,8 @@ The loader creates a lightweight tag if you omit the message.
 
 ## `app`
 
+The ID `15368` and the slug `github-actions` belong to the built-in GitHub Actions App. A seed or admin entry that uses either fails with `422`. An allocated App ID is never `15368`.
+
 | Field | Type | Required | Default |
 | --- | --- | --- | --- |
 | `id` | Integer | No | Allocated ID |

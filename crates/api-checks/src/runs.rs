@@ -12,6 +12,7 @@ use hubdouble_store::{Apps, CheckRuns, TxMut};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::actions;
 use crate::events::{self, To};
 use crate::view::{self, View, latest, no_commit};
 use crate::{invalid, missing, page_object, suites};
@@ -64,7 +65,7 @@ pub struct RunInput {
 
 pub fn app_actor(actor: &Actor) -> Result<(i64, i64), ApiError> {
     match actor {
-        Actor::Installation { app, bot, .. } => Ok((app.id, bot.id)),
+        Actor::Installation { app, bot, .. } if app.id != actions::APP_ID => Ok((app.id, bot.id)),
         _ => Err(ApiError::forbidden(
             "You must authenticate via a GitHub App.",
         )),

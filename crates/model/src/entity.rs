@@ -234,6 +234,12 @@ pub struct Webhook {
     pub active: bool,
 }
 
+/// The ID of the built-in GitHub Actions App. No row of the `Apps` table holds it.
+pub const ACTIONS_APP_ID: i64 = 15368;
+
+/// The slug of the built-in GitHub Actions App. No row of the `Apps` table holds it.
+pub const ACTIONS_APP_SLUG: &str = "github-actions";
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct App {

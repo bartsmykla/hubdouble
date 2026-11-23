@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use hubdouble_model::node_id;
 use hubdouble_model::{
-    Access, Account, AccountKind, ApiError, App, Collaborator, Event, Installation, Membership,
-    MembershipState, OrgRole, Repo, RepoRole, RepositorySelection, Timestamp, Token, TokenKind,
-    Visibility, Webhook,
+    ACTIONS_APP_ID, ACTIONS_APP_SLUG, Access, Account, AccountKind, ApiError, App, Collaborator,
+    Event, Installation, Membership, MembershipState, OrgRole, Repo, RepoRole, RepositorySelection,
+    Timestamp, Token, TokenKind, Visibility, Webhook,
 };
 use hubdouble_store::{
     Accounts, Apps, Counters, Installations, Memberships, Repos, Tokens, Tx, TxMut,
@@ -577,8 +577,24 @@ pub(crate) fn app_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<()
     if s.slug.is_empty() {
         return Err(ApiError::unprocessable("slug is empty"));
     }
+    if s.slug == ACTIONS_APP_SLUG {
+        return Err(ApiError::unprocessable(format!(
+            "slug {ACTIONS_APP_SLUG} belongs to GitHub Actions"
+        )));
+    }
+    if s.id == Some(ACTIONS_APP_ID) {
+        return Err(ApiError::unprocessable(format!(
+            "App ID {ACTIONS_APP_ID} belongs to GitHub Actions"
+        )));
+    }
     let owner_id = account(&ctx.tx, &s.owner)?.id;
-    let id = id_or_next(ctx, s.id);
+    let id = match s.id {
+        Some(id) => id,
+        None => match ctx.tx.next_id() {
+            ACTIONS_APP_ID => ctx.tx.next_id(),
+            id => id,
+        },
+    };
     let bot_id = id_or_next(ctx, s.bot_id);
     let now = ctx.clock.now();
     let mut bot = blank_account(

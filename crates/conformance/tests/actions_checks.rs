@@ -4,14 +4,17 @@
 )]
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use http::{Method, StatusCode};
 use hubdouble_admin::Registrar;
 use hubdouble_git::{Commit, CommitNode, EntryMode, FileChange, ObjectData, Signature};
 use hubdouble_model::{
-    Access, ApiError, Issue, IssueState, Pull, PullRef, Repo, Timestamp, Token, TokenKind, node_id,
+    Access, ApiError, Config, Issue, IssueState, ManualClock, Pull, PullRef, Repo, Timestamp,
+    Token, TokenKind, node_id,
 };
-use hubdouble_store::{Counters, Issues, Tokens};
+use hubdouble_server::{Registries, Server, ServerError};
+use hubdouble_store::{Apps, Counters, Issues, Sequence, Tokens};
 use hubdouble_testkit::fixture::{
     self, ALICE_ID, APP_ID, APP_PRIVATE_KEY, INSTALLATION_ID, PUBLIC_REPO_ID,
 };
@@ -609,6 +612,73 @@ async fn another_app_cannot_update_an_actions_check_run() {
         jobs(&app(&server), id, "latest").await[0]["status"],
         "queued"
     );
+}
+
+fn seed_error(app: &Value) -> ApiError {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("seed.json");
+    let seed = json!([{"kind": "org", "login": fixture::ORG}, app]);
+    std::fs::write(&path, seed.to_string()).unwrap();
+    let config = Config {
+        seed: Some(path),
+        ..Config::default()
+    };
+    let clock = Arc::new(ManualClock::new(Timestamp::SEED));
+    let registries = Registries::new(hubdouble_admin::register);
+    match Server::start(config, clock, &|_| None, registries) {
+        Err(ServerError::Seed(error)) => error,
+        Err(other) => panic!("{other}"),
+        Ok(_) => panic!("the seed loaded"),
+    }
+}
+
+#[tokio::test]
+async fn no_local_app_takes_the_id_or_slug_of_github_actions() {
+    // Given Apps that claim the GitHub Actions App's ID or slug
+    let by_id = json!({"kind": "app", "id": ACTIONS_APP_ID, "slug": "impostor",
+        "owner": fixture::ORG, "public_key": fixture::APP_PUBLIC_KEY});
+    let by_slug = json!({"kind": "app", "slug": "github-actions", "owner": fixture::ORG,
+        "public_key": fixture::APP_PUBLIC_KEY});
+
+    for claim in [&by_id, &by_slug] {
+        // When a seed holds one
+        let error = seed_error(claim);
+
+        // Then the seed does not load
+        assert_eq!(error.status, 422);
+    }
+
+    // Given a running server whose ID sequence hands out the GitHub Actions App's ID next
+    let server = start("none").await;
+    server
+        .server
+        .services()
+        .store
+        .update_quiet(|tx| {
+            tx.table_mut::<Counters>()
+                .bump(Sequence::Id, ACTIONS_APP_ID - 1);
+            Ok::<_, ApiError>(())
+        })
+        .unwrap();
+
+    // When the admin API creates an App with that slug, and one with no ID
+    let mut admin_slug = by_slug.clone();
+    admin_slug.as_object_mut().unwrap().remove("kind");
+    let refused = server.admin(Method::POST, "app", Some(&admin_slug)).await;
+    let fresh = json!({"slug": "fresh", "owner": fixture::ORG,
+        "public_key": fixture::APP_PUBLIC_KEY});
+    let made = server.admin(Method::POST, "app", Some(&fresh)).await;
+
+    // Then the slug is refused and the new App gets another ID
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(made.status, StatusCode::CREATED);
+    let id = server
+        .server
+        .services()
+        .store
+        .view(|tx| Ok(tx.table::<Apps>().by_slug("fresh").unwrap().id))
+        .unwrap();
+    assert_ne!(id, ACTIONS_APP_ID);
 }
 
 #[tokio::test]

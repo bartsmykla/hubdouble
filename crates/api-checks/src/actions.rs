@@ -15,7 +15,7 @@ use crate::view::View;
 
 /// The ID of the GitHub Actions App, which owns the check suite of every workflow run and the
 /// check run of every workflow job.
-pub const APP_ID: i64 = 15368;
+pub const APP_ID: i64 = hubdouble_model::ACTIONS_APP_ID;
 
 const PERMISSIONS: [(&str, Access); 23] = [
     ("actions", Access::Write),
@@ -120,14 +120,14 @@ pub fn owner_in(tx: &Tx) -> Account {
 pub fn app(urls: &Urls, owner: &Account) -> Integration {
     Integration {
         id: APP_ID,
-        slug: "github-actions".to_owned(),
+        slug: hubdouble_model::ACTIONS_APP_SLUG.to_owned(),
         node_id: "MDM6QXBwMTUzNjg=".to_owned(),
         client_id: "Iv1.05c79e9ad1f6bdfa".to_owned(),
         owner: SimpleUser::new(urls, owner),
         name: "GitHub Actions".to_owned(),
         description: Some("Automate your workflow from idea to production".to_owned()),
         external_url: "https://help.github.com/en/actions".to_owned(),
-        html_url: format!("{}/apps/github-actions", urls.web),
+        html_url: format!("{}/apps/{}", urls.web, hubdouble_model::ACTIONS_APP_SLUG),
         created_at: Timestamp(1_532_943_017),
         updated_at: Timestamp(1_781_799_468),
         permissions: PERMISSIONS
