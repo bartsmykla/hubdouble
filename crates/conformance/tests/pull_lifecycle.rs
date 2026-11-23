@@ -1,8 +1,9 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use http::{Method, StatusCode};
 use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
-use hubdouble_model::Repo;
+use hubdouble_model::{Repo, Timestamp, Token, TokenKind};
 use hubdouble_store::Repos;
 use hubdouble_testkit::fixture::{ALICE_ID, ALICE_TOKEN, PUBLIC_REPO_ID, WEBHOOK_SECRET};
 use hubdouble_testkit::validate::webhook_payload;
@@ -18,6 +19,7 @@ async fn server(entries: &[Value]) -> TestServer {
     let mut builder = TestServer::builder()
         .fixture()
         .register(hubdouble_api_gitdata::register)
+        .register(hubdouble_api_repos::register)
         .register(hubdouble_api_pulls::register)
         .register(hubdouble_api_issues::register);
     for entry in entries {
@@ -848,6 +850,225 @@ async fn a_merge_that_deletes_its_head_branch_records_a_failed_base_change_on_me
         pull_hooks(&deliveries(&server).await, 2),
         Vec::<(String, Value)>::new()
     );
+}
+
+#[tokio::test]
+async fn a_merge_records_a_failed_base_change_on_a_pull_request_whose_head_is_gone_and_the_deletion_closes_it()
+ {
+    // Given a repository that deletes head branches on merge, a pull request from one into main, and an open one from two into one whose head branch two was deleted
+    let server = server(&[]).await;
+    delete_branch_on_merge(&server);
+    let client = alice(&server);
+    for (branch, from) in [("one", "main"), ("two", "one")] {
+        create_branch(
+            &client,
+            Deletion::Rest,
+            branch,
+            &tip(&server, from).to_string(),
+        )
+        .await;
+        push(&server, branch, &format!("{branch}.txt"), "text\n");
+    }
+    for (head, base) in [("one", "main"), ("two", "one")] {
+        let opened = client
+            .post(
+                "repos/acme/public/pulls",
+                &json!({"title": head, "head": head, "base": base}),
+            )
+            .await;
+        assert_eq!(opened.status, StatusCode::CREATED, "{}", opened.json());
+    }
+    delete_branch(&client, Deletion::Rest, "two").await;
+    // When the first pull request is merged
+    let merged = client
+        .call_json(Method::PUT, "repos/acme/public/pulls/1/merge", &json!({}))
+        .await;
+    // Then the merge stands and deletes one
+    assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
+    assert_eq!(
+        client
+            .get("repos/acme/public/git/ref/heads/one")
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(client.get(PULL).await.json()["merged"], true);
+    // Then the second pull request records the failed base change, and the base deletion closes it on its base
+    let recorded = events(&client, 2).await;
+    assert_eq!(
+        names(&recorded),
+        [
+            "head_ref_deleted",
+            "automatic_base_change_failed",
+            "base_ref_deleted",
+            "closed"
+        ]
+    );
+    let second = client.get("repos/acme/public/pulls/2").await.json();
+    assert_eq!(
+        (&second["state"], &second["merged"], &second["base"]["ref"]),
+        (&json!("closed"), &json!(false), &json!("one"))
+    );
+}
+
+fn merger_app() -> [Value; 2] {
+    [
+        json!({"kind": "app", "id": 4100, "slug": "merger", "name": "Merger", "owner": "acme",
+               "public_key": hubdouble_testkit::fixture::APP_PUBLIC_KEY,
+               "permissions": {"contents": "write", "pull_requests": "write", "metadata": "read"},
+               "events": []}),
+        json!({"kind": "installation", "id": 5100, "app": "merger", "account": "acme",
+               "repositories": ["public"],
+               "permissions": {"contents": "write", "pull_requests": "write", "metadata": "read"}}),
+    ]
+}
+
+const MERGER_TOKEN: &str = "ghs_pull_lifecycle_merger_installation";
+
+fn merger_token(server: &TestServer) {
+    let store = &server.server.services().store;
+    store
+        .update(|tx| {
+            tx.table_mut::<hubdouble_store::Tokens>()
+                .insert(Token {
+                    id: 7100,
+                    token: MERGER_TOKEN.into(),
+                    kind: TokenKind::Installation,
+                    app_id: Some(4100),
+                    installation_id: Some(5100),
+                    user_id: None,
+                    repo_ids: None,
+                    permissions: BTreeMap::new(),
+                    scopes: vec![],
+                    expires_at: None,
+                    revoked: false,
+                    owner_seeded: false,
+                    created_at: Timestamp::SEED,
+                })
+                .map_err(|e| hubdouble_model::ApiError::internal(format!("{e:?}")))?;
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("insert the merger token: {e:?}"));
+}
+
+fn fork(collaborators: &Value) -> Value {
+    json!({"kind": "repository", "id": 3100, "owner": "bob", "name": "public",
+           "fork_of": "acme/public", "delete_branch_on_merge": true,
+           "collaborators": collaborators,
+           "commits": [{"branch": "fork-work", "message": "fork change",
+                        "files": {"fork.txt": "fork\n"}}]})
+}
+
+type DeletionCase = (
+    &'static str,
+    Vec<Value>,
+    bool,
+    &'static str,
+    &'static str,
+    bool,
+);
+
+fn fork_pull() -> Value {
+    json!({"kind": "pull_request", "repository": "acme/public", "user": "bob",
+           "title": "fork work", "head": "bob:fork-work", "base": "main"})
+}
+
+#[tokio::test]
+async fn a_merge_deletes_a_head_branch_only_with_write_access_to_it_and_no_rule_or_open_pull_request_keeping_it()
+ {
+    let protect_feature = json!({"kind": "ruleset", "repository": "acme/public",
+        "name": "keep feature", "target": "branch", "enforcement": "active",
+        "conditions": {"ref_name": {"include": ["refs/heads/feature"], "exclude": []}},
+        "rules": [{"type": "deletion"}]});
+    let [app, installation] = merger_app();
+    let alice_write = json!([{"login": "alice", "permission": "write"}]);
+    let cases: [DeletionCase; 7] = [
+        (
+            "a fork head the merger can push to",
+            vec![fork(&alice_write), fork_pull()],
+            false,
+            ALICE_TOKEN,
+            "repos/bob/public/git/ref/heads/fork-work",
+            true,
+        ),
+        (
+            "a fork head the merger cannot push to",
+            vec![fork(&json!([])), fork_pull()],
+            false,
+            ALICE_TOKEN,
+            "repos/bob/public/git/ref/heads/fork-work",
+            false,
+        ),
+        (
+            "a head in the installation's repository",
+            vec![
+                app.clone(),
+                installation.clone(),
+                pull_request("feature", "main"),
+            ],
+            true,
+            MERGER_TOKEN,
+            "repos/acme/public/git/ref/heads/feature",
+            true,
+        ),
+        (
+            "a fork head outside the installation",
+            vec![app, installation, fork(&alice_write), fork_pull()],
+            false,
+            MERGER_TOKEN,
+            "repos/bob/public/git/ref/heads/fork-work",
+            false,
+        ),
+        (
+            "a head a ruleset keeps from deletion",
+            vec![protect_feature, pull_request("feature", "main")],
+            true,
+            ALICE_TOKEN,
+            "repos/acme/public/git/ref/heads/feature",
+            false,
+        ),
+        (
+            "a head of another open pull request",
+            vec![
+                pull_request("feature", "main"),
+                pull_request("feature", "develop"),
+            ],
+            true,
+            ALICE_TOKEN,
+            "repos/acme/public/git/ref/heads/feature",
+            false,
+        ),
+        (
+            "a head with no rule or other pull request",
+            vec![pull_request("feature", "main")],
+            true,
+            ALICE_TOKEN,
+            "repos/acme/public/git/ref/heads/feature",
+            true,
+        ),
+    ];
+    for (case, entries, base_deletes, token, head_ref, deleted) in cases {
+        // Given a merge setting on the head repository and a pull request from that head into main
+        let server = server(&entries).await;
+        if base_deletes {
+            delete_branch_on_merge(&server);
+        }
+        merger_token(&server);
+        // When the merger merges it
+        let merged = GoGithub::enterprise(&server)
+            .with_token(token)
+            .call_json(Method::PUT, &format!("{PULL}/merge"), &json!({}))
+            .await;
+        // Then the merge succeeds, and the head branch is deleted only where GitHub deletes it
+        assert_eq!(merged.status, StatusCode::OK, "{case}: {}", merged.json());
+        let head = alice(&server).get(head_ref).await.status;
+        let expected = if deleted {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::OK
+        };
+        assert_eq!(head, expected, "{case}");
+    }
 }
 
 async fn create_branch(client: &GoGithub, how: Deletion, branch: &str, sha: &str) {

@@ -2,18 +2,18 @@ use std::sync::Arc;
 
 use http::StatusCode;
 use hubdouble_admin::SeedCtx;
-use hubdouble_auth::{Actor, repo_role};
+use hubdouble_auth::{Actor, Target as AuthTarget, authorize, repo_role};
 use hubdouble_git::{Git, GitError};
 use hubdouble_model::{
     ApiError, FieldError, Issue, IssueState, Pull, PullRef, Repo, RepoRole, Timestamp, node_id,
 };
 use hubdouble_rest::{Ctx, Reply};
-use hubdouble_store::{Accounts, Counters, Issues, Repos, Sequence, Tx, TxMut};
+use hubdouble_store::{Accounts, Counters, Issues, Repos, Rulesets, Sequence, Tx, TxMut};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::timeline::{self, StateKind};
-use crate::{events, read, render, reopen, state};
+use crate::{CONTENTS_WRITE, events, read, render, reopen, state};
 
 #[derive(Deserialize)]
 struct Create {
@@ -494,12 +494,14 @@ fn retarget(
         }
         Err(other) => return Err(other.into()),
     };
-    let head_repo = p
-        .head
-        .repo_id
-        .ok_or_else(|| validation("head", "invalid"))?;
-    let head = state::branch(git, tx, head_repo, &p.head.ref_name)
-        .map_err(|_| validation("head", "invalid"))?;
+    let Some(head_repo) = p.head.repo_id else {
+        return Ok(Err(validation("head", "invalid")));
+    };
+    let head = match state::branch(git, tx, head_repo, &p.head.ref_name) {
+        Ok(head) => head,
+        Err(GitError::NotFound) => return Ok(Err(validation("head", "invalid"))),
+        Err(other) => return Err(other.into()),
+    };
     if git.compare(tx, repo, base, head)?.ahead_by == 0 {
         return refused(format!(
             "There are no new commits between base branch '{name}' and head branch '{}'",
@@ -571,7 +573,7 @@ pub(crate) fn merge(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .tx()
         .table::<Repos>()
         .get(head_repo)
-        .is_some_and(|h| h.delete_branch_on_merge && can_push(ctx.tx(), ctx.actor(), h));
+        .is_some_and(|h| deletes_head(ctx.tx(), ctx.actor(), &issue, h));
     let who = (actor, timeline::via_app(ctx.actor()));
     let (tx, git) = ctx.tx_mut_and_git()?;
     let result = git
@@ -588,6 +590,34 @@ pub(crate) fn merge(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     Reply::json(
         &json!({"sha": result.commit, "merged": true, "message": "Pull Request successfully merged"}),
     )
+}
+
+fn deletes_head(tx: &Tx, actor: &Actor, merged: &Issue, head: &Arc<Repo>) -> bool {
+    let Some(p) = merged.pull.as_ref() else {
+        return false;
+    };
+    let branch = p.head.ref_name.as_str();
+    let protected = tx
+        .table::<Rulesets>()
+        .iter()
+        .filter(|r| r.applies_to_branch(head, branch))
+        .any(|r| r.rules.iter().any(|rule| rule.rule_type == "deletion"));
+    let heads_another = tx
+        .table::<Issues>()
+        .pulls_with_head_repo(head.id)
+        .any(|other| {
+            other.id != merged.id
+                && other.state == IssueState::Open
+                && other
+                    .pull
+                    .as_ref()
+                    .is_some_and(|o| o.head.ref_name == branch)
+        });
+    head.delete_branch_on_merge
+        && branch != head.default_branch
+        && !protected
+        && !heads_another
+        && authorize(tx, actor, &CONTENTS_WRITE, AuthTarget::Repo(head)).is_ok()
 }
 
 fn delete_head(
