@@ -68,6 +68,60 @@ pub(crate) fn commit_node(
     })
 }
 
+pub(crate) fn test_merge(
+    git: &Git,
+    tx: &Tx,
+    (repo, author): (i64, i64),
+    p: &mut Pull,
+    (base, head): (ObjectId, ObjectId),
+) -> Result<(), GitError> {
+    let merge = git.test_merge(tx, repo, author, base, head)?;
+    p.mergeable = Some(merge.is_some());
+    p.merge_commit_sha = merge.map(|id| id.to_string());
+    Ok(())
+}
+
+/// Points `refs/pull/{n}/head` at the pull request's head and, while it is open,
+/// `refs/pull/{n}/merge` at its test merge commit, as GitHub keeps them. A pull request with
+/// a conflict keeps its last merge ref, and a closed one loses it. Call it after the store
+/// holds `issue`.
+///
+/// # Errors
+///
+/// A git error while it moves the refs.
+pub fn sync_refs(tx: &mut TxMut<'_>, git: &Git, issue: &Issue) -> Result<(), ApiError> {
+    let p = pull(issue)?;
+    let (repo, sender) = (issue.repo_id, issue.user_id);
+    let head = format!("refs/pull/{}/head", issue.number);
+    set_ref(tx, git, (repo, sender), &head, Some(p.head.sha.parse()?))?;
+    let merge = match (issue.state, &p.merge_commit_sha) {
+        (IssueState::Open, None) => return Ok(()),
+        (IssueState::Open, Some(sha)) => Some(sha.parse()?),
+        (IssueState::Closed, _) => None,
+    };
+    let name = format!("refs/pull/{}/merge", issue.number);
+    set_ref(tx, git, (repo, sender), &name, merge)?;
+    Ok(())
+}
+
+fn set_ref(
+    tx: &mut TxMut<'_>,
+    git: &Git,
+    (repo, sender): (i64, i64),
+    name: &str,
+    new: Option<ObjectId>,
+) -> Result<(), GitError> {
+    let old = match git.resolve_ref(tx, repo, name) {
+        Ok(id) => Some(id),
+        Err(GitError::NotFound) => None,
+        Err(other) => return Err(other),
+    };
+    if old == new {
+        return Ok(());
+    }
+    git.update_ref(tx, repo, sender, name, old, new, true)
+}
+
 pub(crate) fn ref_updated(
     tx: &mut TxMut<'_>,
     git: &Git,
@@ -134,7 +188,7 @@ fn update_refs(
                 oid: comparison_base,
             })?;
         } else {
-            p.mergeable = Some(git.mergeable(tx, repo_id, base, head)?);
+            test_merge(git, tx, (repo_id, issue.user_id), p, (base, head))?;
         }
         reaches
     } else {
@@ -150,6 +204,7 @@ fn update_refs(
         issue.updated_at = now;
     }
     tx.table_mut::<Issues>().replace(issue.clone())?;
+    sync_refs(tx, git, &issue)?;
     if head_changed && let Some(after) = change.new {
         let before = change.old.unwrap_or(ObjectId::NULL);
         events::emit(

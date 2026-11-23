@@ -174,7 +174,7 @@ fn open(
     }
     let issue_id = tx.next_id();
     let pull_id = id.unwrap_or_else(|| tx.next_id());
-    let issue = Issue {
+    let mut issue = Issue {
         id: issue_id,
         node_id: node_id::entity(node_id::ISSUE, issue_id),
         repo_id: base.id,
@@ -210,13 +210,16 @@ fn open(
             merged_at: None,
             merge_commit_sha: None,
             merged_by: None,
-            mergeable: Some(git.mergeable(tx, base.id, base_oid, head_oid)?),
+            mergeable: None,
             maintainer_can_modify: input.maintainer_can_modify,
             requested_reviewers: Vec::new(),
             requested_teams: Vec::new(),
         }),
     };
+    let p = issue.pull.as_mut().ok_or_else(ApiError::not_found)?;
+    state::test_merge(git, tx, (base.id, sender), p, (base_oid, head_oid))?;
     let issue = tx.table_mut::<Issues>().insert(issue)?;
+    state::sync_refs(tx, git, &issue)?;
     events::emit(tx, git, &issue, sender, "opened", json!({}))?;
     Ok(issue)
 }
@@ -294,6 +297,7 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     {
         issue.updated_at = now;
         tx.table_mut::<Issues>().replace(issue.clone())?;
+        state::sync_refs(tx, git, &issue)?;
     }
     if !changed.is_empty() {
         events::emit(
@@ -421,7 +425,7 @@ fn edit(
         p.base.ref_name = name;
         p.base.sha = base.to_string();
         p.head.sha = head.to_string();
-        p.mergeable = Some(git.mergeable(tx, issue.repo_id, base, head)?);
+        state::test_merge(git, tx, (issue.repo_id, issue.user_id), p, (base, head))?;
     }
     if let Some(allow) = input.maintainer_can_modify {
         p.maintainer_can_modify = allow;

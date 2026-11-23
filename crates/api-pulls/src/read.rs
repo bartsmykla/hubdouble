@@ -196,7 +196,7 @@ pub(crate) fn for_commit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         if p.merged_at.is_none() && (in_default || issue.state == IssueState::Closed) {
             continue;
         }
-        if p.merge_commit_sha.as_ref() == Some(&sha)
+        if (p.merged_at.is_some() && p.merge_commit_sha.as_ref() == Some(&sha))
             || p.head.sha == sha
             || state::compare(git, tx, issue)?
                 .commits

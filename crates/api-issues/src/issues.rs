@@ -110,6 +110,9 @@ impl Change<'_> {
         if to == IssueState::Open && issue.pull.is_some() {
             return hubdouble_api_pulls::reopened(tx, git, issue, sender, self.who.via_app);
         }
+        if issue.pull.is_some() {
+            hubdouble_api_pulls::sync_refs(tx, git, issue)?;
+        }
         events::record(tx, issue, sender, self.who.via_app, what, self.now)?;
         emit_issue(tx, self.repo, issue, action, sender, Vec::new())
     }

@@ -11,6 +11,7 @@ mod state;
 mod timeline;
 
 pub use reopen::{reopen, reopened};
+pub use state::sync_refs;
 pub use timeline::{StateEvent, StateEvents};
 
 const fn repo_requirement(grants: &'static [Grant]) -> Requirement {

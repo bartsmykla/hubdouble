@@ -299,7 +299,12 @@ fn base_ref(cx: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {
 
 fn merge_commit(cx: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {
     let issue = obj.get::<Issue>()?;
-    let Some(sha) = state::pull(issue)?.merge_commit_sha.as_deref() else {
+    let p = state::pull(issue)?;
+    let Some(sha) = p
+        .merge_commit_sha
+        .as_deref()
+        .filter(|_| p.merged_at.is_some())
+    else {
         return Ok(Resolved::Null);
     };
     let node = state::commit_node(

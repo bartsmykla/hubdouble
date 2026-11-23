@@ -12,7 +12,8 @@ use crate::{change, events, state, timeline};
 /// head repository counts as a deleted head branch), another open pull request from the same
 /// head into the same base, and a head branch whose tip no longer descends from the pull
 /// request's head, each with GitHub's `422` and a `custom` error on `state`. Otherwise it opens
-/// `issue` and takes `head.sha`, `base.sha` and `mergeable` from the live branches. It does not
+/// `issue` and takes `head.sha`, `base.sha`, `mergeable` and the test merge commit in
+/// `merge_commit_sha` from the live branches. It does not
 /// store `issue`: the caller stores it and then sends [`reopened`].
 ///
 /// # Errors
@@ -59,8 +60,7 @@ pub fn reopen(tx: &Tx, git: &Git, issue: &mut Issue) -> Result<(), ApiError> {
     }
     p.base.sha = base.to_string();
     p.head.sha = head.to_string();
-    p.mergeable = Some(git.mergeable(tx, repo_id, base, head)?);
-    p.merge_commit_sha = None;
+    state::test_merge(git, tx, (repo_id, issue.user_id), p, (base, head))?;
     issue.state = IssueState::Open;
     issue.state_reason = None;
     issue.closed_at = None;
@@ -82,6 +82,7 @@ pub fn reopened(
     sender: i64,
     via_app: Option<i64>,
 ) -> Result<(), ApiError> {
+    state::sync_refs(tx, git, issue)?;
     timeline::record(tx, issue, (sender, via_app), true)?;
     events::emit(tx, git, issue, sender, "reopened", json!({}))
 }

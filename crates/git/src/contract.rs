@@ -862,13 +862,67 @@ impl Git {
         if history::is_ancestor(&odb, head_id, base_id)? {
             return Err(GitError::NothingToMerge);
         }
-        let merge_base = history::merge_base(&odb, base_id, head_id)?;
-        let origin = match merge_base {
+        let id = self.merge_commit(
+            tx,
+            &odb,
+            sender,
+            (base_id, &base_commit),
+            (head_id, &head_commit),
+            msg,
+        )?;
+        self.update_ref(tx, repo, sender, &name, Some(base_ref), Some(id), false)?;
+        Ok(MergeResult { commit: id })
+    }
+
+    /// Writes the test merge commit that GitHub keeps for an open pull request at
+    /// `refs/pull/{n}/merge`: `head` merged into `base` with the message
+    /// `Merge {head} into {base}`, the `author` account as author and a web-flow signature, at
+    /// the clock's time. It moves no ref. `None` when the merge has a conflict.
+    ///
+    /// # Errors
+    ///
+    /// [`GitError::NotFound`] when either commit or the author account is missing.
+    pub fn test_merge(
+        &self,
+        tx: &Tx,
+        repo: i64,
+        author: i64,
+        base: ObjectId,
+        head: ObjectId,
+    ) -> Result<Option<ObjectId>, GitError> {
+        let odb = self.odb(tx, repo);
+        let (base, base_commit) = odb.peel_commit(base)?;
+        let (head, head_commit) = odb.peel_commit(head)?;
+        let msg = format!("Merge {head} into {base}");
+        match self.merge_commit(
+            tx,
+            &odb,
+            author,
+            (base, &base_commit),
+            (head, &head_commit),
+            &msg,
+        ) {
+            Ok(id) => Ok(Some(id)),
+            Err(GitError::Conflict { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn merge_commit(
+        &self,
+        tx: &Tx,
+        odb: &Odb,
+        author: i64,
+        (base_id, base_commit): (ObjectId, &Commit),
+        (head_id, head_commit): (ObjectId, &Commit),
+        msg: &str,
+    ) -> Result<ObjectId, GitError> {
+        let origin = match history::merge_base(odb, base_id, head_id)? {
             Some(m) => Some(odb.commit(m)?.tree),
             None => None,
         };
         let tree = merge::trees(
-            &odb,
+            odb,
             origin,
             Some(base_commit.tree),
             Some(head_commit.tree),
@@ -876,12 +930,12 @@ impl Git {
         )?;
         let tree = match tree {
             Some(t) => t,
-            None => tree::empty(&odb)?,
+            None => tree::empty(odb)?,
         };
         let now = self.inner.clock.now();
         let account = tx
             .table::<Accounts>()
-            .get(sender)
+            .get(author)
             .ok_or(GitError::NotFound)?;
         let author = Signature {
             name: account
@@ -903,9 +957,7 @@ impl Git {
             gpg_signature: None,
         };
         self.sign(&mut commit)?;
-        let id = odb.put(ObjectData::Commit(Arc::new(commit)))?;
-        self.update_ref(tx, repo, sender, &name, Some(base_ref), Some(id), false)?;
-        Ok(MergeResult { commit: id })
+        odb.put(ObjectData::Commit(Arc::new(commit)))
     }
 
     /// Whether merging `head` into `base` has no conflict; `true` when base already holds head.
