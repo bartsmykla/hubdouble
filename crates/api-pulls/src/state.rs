@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use hubdouble_git::{Comparison, Git, GitError, ObjectId, RefChange};
@@ -80,10 +82,53 @@ pub(crate) fn test_merge(
     p: &mut Pull,
     (base, head): (ObjectId, ObjectId),
 ) -> Result<(), GitError> {
-    let merge = git.test_merge(tx, repo, author, base, head)?;
+    set_merge(p, git.test_merge(tx, repo, author, base, head)?);
+    Ok(())
+}
+
+fn set_merge(p: &mut Pull, merge: Option<ObjectId>) {
     p.mergeable = Some(merge.is_some());
     p.merge_commit_sha = merge.map(|id| id.to_string());
-    Ok(())
+}
+
+type TestMerges = HashMap<i64, (ObjectId, ObjectId, Result<Option<ObjectId>, GitError>)>;
+
+fn test_merges(git: &Git, tx: &Tx, issues: &[Arc<Issue>]) -> Result<TestMerges, GitError> {
+    let threads = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    if threads < 2 || issues.len() < 2 {
+        return Ok(TestMerges::new());
+    }
+    let mut jobs = Vec::with_capacity(issues.len());
+    for issue in issues {
+        let Some(p) = &issue.pull else { continue };
+        if let (Some(base), Some(head)) = (live_tip(git, tx, &p.base)?, live_tip(git, tx, &p.head)?)
+        {
+            jobs.push((issue.id, issue.repo_id, issue.user_id, base, head));
+        }
+    }
+    let size = jobs.len().div_ceil(threads).max(1);
+    Ok(std::thread::scope(|s| {
+        let parts: Vec<_> = jobs
+            .chunks(size)
+            .map(|part| {
+                s.spawn(move || {
+                    part.iter()
+                        .filter(|&&(_, repo, _, base, head)| {
+                            matches!(git.is_ancestor(tx, repo, head, base), Ok(false))
+                        })
+                        .map(|&(id, repo, author, base, head)| {
+                            let merge = git.test_merge(tx, repo, author, base, head);
+                            (id, (base, head, merge))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        parts
+            .into_iter()
+            .flat_map(|part| part.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    }))
 }
 
 /// Points `refs/pull/{n}/head` at the pull request's head and, while it is open,
@@ -149,8 +194,9 @@ pub(crate) fn ref_updated(
         .filter(|issue| issue.state == IssueState::Open)
         .cloned()
         .collect();
+    let merges = test_merges(git, tx, &affected)?;
     for issue in affected {
-        update_refs(tx, git, change, name, &issue)?;
+        update_refs(tx, git, change, name, &issue, &merges)?;
     }
     Ok(())
 }
@@ -246,6 +292,7 @@ fn update_refs(
     change: &RefChange,
     name: &str,
     issue: &Issue,
+    merges: &TestMerges,
 ) -> Result<(), ApiError> {
     let mut issue = issue.clone();
     let repo_id = issue.repo_id;
@@ -287,7 +334,11 @@ fn update_refs(
                 oid: comparison_base,
             })?;
         } else {
-            test_merge(git, tx, (repo_id, issue.user_id), p, (base, head))?;
+            let merge = match merges.get(&issue.id) {
+                Some((b, h, merge)) if (*b, *h) == (base, head) => merge.clone()?,
+                _ => git.test_merge(tx, repo_id, issue.user_id, base, head)?,
+            };
+            set_merge(p, merge);
         }
         reaches
     } else {

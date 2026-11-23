@@ -538,7 +538,7 @@ Measured by `mise run bench` on one CPU, gated in CI against `main` with a 20 % 
 | Mixed inventory load, reads and writes | over 5 000 requests per second |
 | Webhook enqueue | under 20 µs per event |
 
-A push to a branch runs the test merge of every open pull request whose base or head is that branch inside the write, as GitHub's mergeability check does after a push, so the push row measures that work for 100 pull requests. Each push moves `main` between two commits, so every push changes the base of all 100 pull requests, and the bench checks that all 100 are open and mergeable before and after.
+A push to a branch runs the test merge of every open pull request whose base or head is that branch inside the write, as GitHub's mergeability check does after a push, so the push row measures that work for 100 pull requests. The test merges of one push do not depend on each other, so the write computes them on every core and then records them in order, with the same answers as one at a time. Each push moves `main` between two commits, so every push changes the base of all 100 pull requests, and the bench checks that all 100 are open and mergeable before and after.
 
 Measured on the release profile (`lto = "fat"`, `codegen-units = 1`, `panic = "unwind"`, and the server wraps each handler call in `catch_unwind`, so a panicking handler rolls back and answers `500` without dropping the connection or ending the process). If parsing GitHub's GraphQL schema at start breaks the start target, `xtask gen` precomputes what the executor needs at build time.
 

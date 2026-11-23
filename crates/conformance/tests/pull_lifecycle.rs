@@ -5,7 +5,7 @@ use http::{Method, StatusCode};
 use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
 use hubdouble_model::{Repo, Timestamp, Token, TokenKind};
 use hubdouble_store::Repos;
-use hubdouble_testkit::fixture::{ALICE_ID, ALICE_TOKEN, PUBLIC_REPO_ID, WEBHOOK_SECRET};
+use hubdouble_testkit::fixture::{self, ALICE_ID, ALICE_TOKEN, PUBLIC_REPO_ID, WEBHOOK_SECRET};
 use hubdouble_testkit::validate::webhook_payload;
 use hubdouble_testkit::{Delivery, GoGithub, Graphql, TestServer};
 use serde_json::{Value, json};
@@ -455,6 +455,65 @@ async fn an_open_pull_request_names_a_signed_test_merge_commit_at_its_merge_ref(
     );
     // Then GraphQL mergeCommit stays null until the pull request merges
     assert_eq!(graphql_merge_commit(&client).await, Value::Null);
+}
+
+#[tokio::test]
+async fn a_base_push_gives_every_open_pull_request_on_it_its_own_test_merge() {
+    // Given three open pull requests into main, the third changing the README
+    let mut entries = fixture::seed();
+    for entry in &mut entries {
+        if entry["kind"] == "repository" && entry["name"] == fixture::PUBLIC_REPO {
+            entry["commits"] = json!([
+                {"branch": "one", "message": "one", "files": {"one.txt": "one\n"}},
+                {"branch": "two", "message": "two", "files": {"two.txt": "two\n"}},
+                {"branch": "clash", "message": "clash", "files": {"README.md": "# clash\n"}},
+            ]);
+        }
+    }
+    let mut builder = TestServer::builder()
+        .register(hubdouble_api_gitdata::register)
+        .register(hubdouble_api_repos::register)
+        .register(hubdouble_api_pulls::register)
+        .register(hubdouble_api_issues::register);
+    for entry in entries.into_iter().chain(
+        ["one", "two", "clash"]
+            .into_iter()
+            .map(|head| pull_request(head, "main")),
+    ) {
+        builder = builder.entry(entry);
+    }
+    let server = builder.start().await;
+    let client = alice(&server);
+
+    // When main changes the README
+    let base = push(&server, "main", "README.md", "# main\n");
+
+    // Then each clean pull request names its own test merge of the new base tip and its head
+    let mut merges = Vec::new();
+    for (number, head) in [(1, "one"), (2, "two")] {
+        let pull = client
+            .get(&format!("repos/acme/public/pulls/{number}"))
+            .await
+            .json();
+        assert_eq!(pull["mergeable"], true, "pull request {number}");
+        let sha = pull["merge_commit_sha"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        assert_eq!(
+            parents(&client, &sha).await,
+            [json!(base), json!(tip(&server, head))],
+            "pull request {number}"
+        );
+        let merge_ref = format!("repos/acme/public/git/ref/pull/{number}/merge");
+        assert_eq!(ref_target(&client, &merge_ref).await, Some(sha.clone()));
+        merges.push(sha);
+    }
+    assert_ne!(merges[0], merges[1]);
+    // Then the pull request with a conflict has no test merge
+    let clash = client.get("repos/acme/public/pulls/3").await.json();
+    assert_eq!(clash["mergeable"], false);
+    assert_eq!(clash["merge_commit_sha"], Value::Null);
 }
 
 #[tokio::test]
