@@ -1,5 +1,6 @@
 mod go;
 mod graphql;
+mod permissions;
 mod rest;
 mod seed;
 
@@ -31,6 +32,8 @@ pub(super) fn run(root: &Path, args: &[String]) -> Result<()> {
     let mut parser = go::parser()?;
     seed::check(root, &checkout, &mut parser, &names)?;
     let catalog = rest::Catalog::read(&mut parser, go::files(&module.join("github"))?)?;
+    let go_github = go::Source::read(&mut parser, module.join("github/apps.go"))?;
+    let mut permissions = permissions::Permissions::read(&go_github)?;
     let paths = rest::paths(root)?;
     let mut routes = BTreeSet::new();
     let mut documents = BTreeMap::new();
@@ -41,6 +44,7 @@ pub(super) fn run(root: &Path, args: &[String]) -> Result<()> {
                 for outcome in [
                     catalog.scan(&source, &paths, &mut routes),
                     graphql::scan(&source, &mut documents),
+                    permissions.scan(&source),
                 ] {
                     if let Err(error) = outcome {
                         errors.push(error.to_string());
@@ -53,6 +57,7 @@ pub(super) fn run(root: &Path, args: &[String]) -> Result<()> {
     if !errors.is_empty() {
         return Err(errors.join("\n").into());
     }
+    permissions.check(root)?;
     let inventory = root.join("docs/inventory");
     let fields = graphql::fields(&inventory, &documents)?;
     let mut output = BTreeMap::from([

@@ -32,8 +32,7 @@ pub(super) fn check(
             .ok_or_else(|| format!("{path}: missing version constant {name}"))?;
         expected.insert(field, rename(&value, names));
     }
-    let seed = std::fs::read_to_string(root.join("examples/client.yaml"))?;
-    let entries: Vec<Value> = serde_saphyr::from_str(&seed)?;
+    let entries = entries(root)?;
     let repo = entries
         .iter()
         .find(|entry| {
@@ -53,6 +52,11 @@ pub(super) fn check(
         return Err(format!("the seed has no {CAPABILITY} file").into());
     }
     Ok(())
+}
+
+pub(super) fn entries(root: &Path) -> Result<Vec<Value>> {
+    let seed = std::fs::read_to_string(root.join("examples/client.yaml"))?;
+    Ok(serde_saphyr::from_str(&seed)?)
 }
 
 fn check_versions(capability: &Value, expected: &BTreeMap<&str, String>) -> Result<()> {
