@@ -95,6 +95,7 @@ pub(crate) fn test_merge(
 ///
 /// A git error while it moves the refs.
 pub fn sync_refs(tx: &mut TxMut<'_>, git: &Git, issue: &Issue) -> Result<(), ApiError> {
+    crate::merge_state::record(tx, git, issue)?;
     let p = pull(issue)?;
     let (repo, sender) = (issue.repo_id, issue.user_id);
     let head = format!("refs/pull/{}/head", issue.number);
@@ -135,6 +136,7 @@ pub(crate) fn ref_updated(
     let Some(name) = change.name.strip_prefix("refs/heads/") else {
         return Ok(());
     };
+    crate::association::pushed(tx, git, change)?;
     if change.new.is_none() {
         return deleted(tx, git, change, name);
     }
@@ -296,6 +298,7 @@ fn update_refs(
         issue.state = IssueState::Closed;
         issue.closed_at = Some(now);
         issue.closed_by = Some(change.sender);
+        crate::association::add(tx, repo_id, [issue.user_id])?;
     }
     if closes || head_changed {
         issue.updated_at = now;

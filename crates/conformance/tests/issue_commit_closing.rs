@@ -251,6 +251,7 @@ async fn each_ref_write_closes_issues_from_commit_messages() {
         .register(hubdouble_api_issues::register)
         .register(|r| {
             r.store.register_table::<hubdouble_api_pulls::StateEvents>();
+            hubdouble_api_pulls::register_tables(r.store);
         })
         .start()
         .await;

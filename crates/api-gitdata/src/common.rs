@@ -147,7 +147,10 @@ pub(crate) fn signature_of(account: &Account, time: Timestamp) -> Signature {
     }
 }
 
-pub(crate) fn account_by_email<'t>(tx: &'t Tx, email: &str) -> Option<&'t Arc<Account>> {
+/// The account GitHub links a commit email to: the account with that email, or the login
+/// of a `users.noreply.github.com` address.
+#[must_use]
+pub fn account_by_email<'t>(tx: &'t Tx, email: &str) -> Option<&'t Arc<Account>> {
     let local = email.strip_suffix("@users.noreply.github.com");
     let login = local.map(|l| l.split_once('+').map_or(l, |(_, login)| login));
     tx.table::<Accounts>().iter().find(|a| {

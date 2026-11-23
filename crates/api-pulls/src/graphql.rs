@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use hubdouble_auth::{Target as AuthTarget, authorize};
@@ -6,12 +5,12 @@ use hubdouble_git::{CommitNode, GitError, RefNode};
 use hubdouble_gql::{
     Args, Ctx, ErrorType, GqlError, MutCtx, Obj, Registry, Resolved, Target, connection,
 };
-use hubdouble_model::{ApiError, Issue, IssueState, Pull, Repo, RepoRole, ReviewState, node_id};
-use hubdouble_store::{Issues, Labels, Repos, Reviews, Rulesets};
+use hubdouble_model::{ApiError, Issue, IssueState, Pull, Repo, node_id};
+use hubdouble_store::{Issues, Labels, Repos};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{CONTENTS_WRITE, READ, WRITE, change, events, render, state};
+use crate::{CONTENTS_WRITE, READ, WRITE, change, events, merge_state, render, state};
 
 macro_rules! fields {
     ($r:ident, $($field:literal => |$ctx:ident, $issue:ident, $p:ident| $value:expr),* $(,)?) => {
@@ -60,7 +59,9 @@ pub(crate) fn register(r: &mut Registry) {
         "updatedAt" => |_cx, issue, _p| issue.updated_at,
         "mergedAt" => |_cx, _issue, p| p.merged_at,
         "mergeable" => |_cx, _issue, p| match p.mergeable { Some(true) => "MERGEABLE", Some(false) => "CONFLICTING", None => "UNKNOWN" },
-        "reviewDecision" => |cx, issue, p| decision(cx, issue, p),
+        "mergeStateStatus" => |cx, issue, _p| crate::mergeable_state(cx.tx, issue).to_ascii_uppercase(),
+        "authorAssociation" => |cx, issue, _p| association(cx, issue)?,
+        "reviewDecision" => |cx, issue, p| merge_state::review_decision(cx.tx, issue, p),
         "url" => |cx, issue, _p| format!("{}/{}/pull/{}", cx.urls.web, render::full_name(cx.tx, issue.repo_id)?, issue.number),
     );
     r.object::<DraftPayload>("ReopenPullRequestPayload");
@@ -211,57 +212,13 @@ fn associated(cx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError
     )
 }
 
-fn decision(cx: &Ctx<'_>, issue: &Issue, pull: &Pull) -> Option<&'static str> {
-    let repo = cx.tx.table::<Repos>().get(pull.base.repo_id?)?;
-    let required = cx
+fn association(cx: &Ctx<'_>, issue: &Issue) -> Result<&'static str, GqlError> {
+    let repo = cx
         .tx
-        .table::<Rulesets>()
-        .iter()
-        .filter(|r| r.applies_to_branch(repo, &pull.base.ref_name))
-        .flat_map(|r| &r.rules)
-        .filter(|r| r.rule_type == "pull_request")
-        .filter_map(|r| {
-            usize::try_from(
-                r.parameters
-                    .as_ref()?
-                    .get("required_approving_review_count")?
-                    .as_u64()?,
-            )
-            .ok()
-        })
-        .filter(|&count| count > 0)
-        .max()?;
-    let mut reviewers = BTreeMap::new();
-    for review in cx.tx.table::<Reviews>().children(issue.id) {
-        if matches!(review.state, ReviewState::Pending | ReviewState::Commented)
-            || review.user_id == issue.user_id
-            || hubdouble_auth::repo_role(cx.tx, review.user_id, repo) < Some(RepoRole::Write)
-        {
-            continue;
-        }
-        let key = (review.submitted_at, review.id, review.state);
-        let last = reviewers.entry(review.user_id).or_insert(key);
-        if (key.0, key.1) > (last.0, last.1) {
-            *last = key;
-        }
-    }
-    Some(
-        if reviewers
-            .values()
-            .any(|entry| entry.2 == ReviewState::ChangesRequested)
-        {
-            "CHANGES_REQUESTED"
-        } else if reviewers
-            .values()
-            .filter(|entry| entry.2 == ReviewState::Approved)
-            .count()
-            >= required
-        {
-            "APPROVED"
-        } else {
-            "REVIEW_REQUIRED"
-        },
-    )
+        .table::<Repos>()
+        .get(issue.repo_id)
+        .ok_or_else(ApiError::not_found)?;
+    Ok(crate::association(cx.tx, repo, issue.user_id))
 }
 
 struct PullCommit {

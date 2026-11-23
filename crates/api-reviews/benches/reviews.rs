@@ -134,6 +134,7 @@ fn pull_issue(base: PullRef) -> Issue {
 fn bench(c: &mut Criterion) {
     let mut store = StoreBuilder::new();
     let mut git = GitBuilder::new(&mut store);
+    hubdouble_api_pulls::register_tables(&mut store);
     let mut rest = Registry::new();
     hubdouble_api_reviews::register(&mut Registrar {
         store: &mut store,

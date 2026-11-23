@@ -3,9 +3,7 @@ use hubdouble_model::{ApiError, Issue, PullRef, Timestamp, node_id};
 use hubdouble_render::{
     Label, PullBranch, PullRequest, Repository, SimpleUser, TeamSimple, Urls, escape,
 };
-use hubdouble_store::{
-    Accounts, IssueComments, Labels, Memberships, Repos, ReviewComments, Teams, Tx,
-};
+use hubdouble_store::{Accounts, IssueComments, Labels, Repos, ReviewComments, Teams, Tx};
 use serde::Serialize;
 
 use crate::state;
@@ -73,31 +71,11 @@ pub(crate) fn pull(
     answer.merged_by = p.merged_by.and_then(|id| user(tx, urls, id));
     answer.comments = count(tx.table::<IssueComments>().children(issue.id).count());
     answer.review_comments = count(tx.table::<ReviewComments>().children(issue.id).count());
-    answer.author_association = association(tx, issue);
-    Ok(answer)
-}
-
-fn association(tx: &Tx, issue: &Issue) -> &'static str {
-    let Some(repo) = tx.table::<Repos>().get(issue.repo_id) else {
-        return "NONE";
-    };
-    if repo.owner_id == issue.user_id {
-        "OWNER"
-    } else if tx
-        .table::<Memberships>()
-        .of(repo.owner_id, issue.user_id)
-        .is_some_and(|member| member.state == hubdouble_model::MembershipState::Active)
-    {
-        "MEMBER"
-    } else if repo
-        .collaborators
-        .iter()
-        .any(|c| c.user_id == issue.user_id)
-    {
-        "COLLABORATOR"
-    } else {
-        "NONE"
+    if let Some(repo) = tx.table::<Repos>().get(issue.repo_id) {
+        answer.author_association = crate::association(tx, repo, issue.user_id);
     }
+    answer.mergeable_state = crate::mergeable_state(tx, issue);
+    Ok(answer)
 }
 
 fn branch(tx: &Tx, urls: &Urls, reference: &PullRef, author: i64) -> Result<PullBranch, ApiError> {

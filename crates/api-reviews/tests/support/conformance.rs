@@ -21,6 +21,7 @@ const NOW: Timestamp = Timestamp::SEED;
 pub(super) async fn fixture_server() -> TestServer {
     let mut builder = TestServer::builder()
         .register(hubdouble_api_reviews::register)
+        .register(|r| hubdouble_api_pulls::register_tables(r.store))
         .register(standins::query_repository)
         .register(standins::repository_pull_request)
         .register(review_parents);

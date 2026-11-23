@@ -3,14 +3,12 @@ use std::sync::Arc;
 use http::StatusCode;
 use hubdouble_auth::{Actor, repo_role};
 use hubdouble_model::{
-    Account, ApiError, Event, FieldError, Grant, Issue, IssueComment, Label, MembershipState,
-    ReactionSubjectKind, Repo, RepoRole, Requirement, Scope, Timestamp,
+    Account, ApiError, Event, FieldError, Grant, Issue, IssueComment, Label, ReactionSubjectKind,
+    Repo, RepoRole, Requirement, Scope, Timestamp,
 };
 use hubdouble_render::{self as r, ReactionRollup, Urls};
 use hubdouble_rest::{Ctx, Reply};
-use hubdouble_store::{
-    Accounts, Apps, IssueComments, Labels, Memberships, Reactions, Repos, Teams, Tx, TxMut,
-};
+use hubdouble_store::{Accounts, Apps, IssueComments, Labels, Reactions, Repos, Teams, Tx, TxMut};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -81,21 +79,7 @@ pub(crate) fn user(tx: &Tx, urls: &Urls, id: i64) -> Option<r::SimpleUser> {
         .map(|a| r::SimpleUser::new(urls, a))
 }
 
-pub(crate) fn association(tx: &Tx, repo: &Repo, user_id: i64) -> &'static str {
-    if repo.owner_id == user_id {
-        "OWNER"
-    } else if tx
-        .table::<Memberships>()
-        .of(repo.owner_id, user_id)
-        .is_some_and(|m| m.state == MembershipState::Active)
-    {
-        "MEMBER"
-    } else if repo.collaborators.iter().any(|c| c.user_id == user_id) {
-        "COLLABORATOR"
-    } else {
-        "NONE"
-    }
-}
+pub(crate) use hubdouble_api_pulls::association;
 
 pub(crate) fn integration(tx: &Tx, urls: &Urls, app_id: Option<i64>) -> Option<r::Integration> {
     let app = tx.table::<Apps>().get(app_id?)?;
@@ -242,6 +226,7 @@ pub(crate) fn pull_view(
     v.merged_by = p.merged_by.and_then(|id| user(tx, urls, id));
     v.comments = count(tx.table::<IssueComments>().children(i.id).count());
     v.author_association = association(tx, repo, i.user_id);
+    v.mergeable_state = hubdouble_api_pulls::mergeable_state(tx, i);
     Some(v)
 }
 

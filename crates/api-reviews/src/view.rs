@@ -74,13 +74,16 @@ impl<'a> View<'a> {
     }
 
     pub fn review(&self, review: &Review, number: i64) -> hubdouble_render::Review {
-        hubdouble_render::Review::new(
+        let mut view = hubdouble_render::Review::new(
             self.urls,
             review,
             &self.name,
             number,
             self.user(review.user_id),
-        )
+        );
+        view.author_association =
+            hubdouble_api_pulls::association(self.tx, self.repo, review.user_id);
+        view
     }
 
     pub fn comment(&self, comment: &ReviewComment, number: i64) -> hubdouble_render::ReviewComment {
@@ -91,6 +94,8 @@ impl<'a> View<'a> {
             number,
             self.user(comment.user_id),
         );
+        view.author_association =
+            hubdouble_api_pulls::association(self.tx, self.repo, comment.user_id);
         let mut reactions = self.tx.table::<Reactions>().children(comment.id);
         if let Some(first) = reactions.next() {
             view.reactions = ReactionRollup::new(
@@ -131,6 +136,9 @@ impl<'a> View<'a> {
             .filter_map(|&id| self.user(id))
             .collect();
         response.merged_by = pull.merged_by.and_then(|id| self.user(id));
+        response.author_association =
+            hubdouble_api_pulls::association(self.tx, self.repo, issue.user_id);
+        response.mergeable_state = hubdouble_api_pulls::mergeable_state(self.tx, issue);
         response.comments =
             i64::try_from(self.tx.table::<IssueComments>().children(issue.id).count())
                 .unwrap_or(i64::MAX);

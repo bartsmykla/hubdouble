@@ -39,6 +39,14 @@ fn keyword_link(
             .is_some_and(|body| closes(body, full_name, number, source.id == issue_repo))
 }
 
+fn association(cx: &Ctx<'_>, repo_id: i64, user_id: i64) -> Result<Resolved, GqlError> {
+    let repo =
+        cx.tx.table::<Repos>().get(repo_id).ok_or_else(|| {
+            GqlError::new(ErrorType::NotFound, "Could not resolve the repository.")
+        })?;
+    leaf(&hubdouble_api_pulls::association(cx.tx, repo, user_id))
+}
+
 fn leaf(v: &impl Serialize) -> Result<Resolved, GqlError> {
     match serde_json::to_value(v) {
         Ok(serde_json::Value::Null) => Ok(Resolved::Null),
@@ -201,6 +209,14 @@ pub(crate) fn register(gql: &mut Registry) {
         cx.load(Target::RepoId(o.get::<Issue>()?.repo_id))
     });
     gql.field("Issue", "closedByPullRequestsReferences", closed_by);
+    gql.field("Issue", "authorAssociation", |cx, o, _| {
+        let issue = o.get::<Issue>()?;
+        association(cx, issue.repo_id, issue.user_id)
+    });
+    gql.field("IssueComment", "authorAssociation", |cx, o, _| {
+        let comment = o.get::<IssueComment>()?;
+        association(cx, comment.repo_id, comment.user_id)
+    });
 
     gql.field("IssueComment", "id", |_, o, _| {
         leaf(&o.get::<IssueComment>()?.node_id)

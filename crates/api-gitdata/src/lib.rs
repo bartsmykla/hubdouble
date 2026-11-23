@@ -13,7 +13,7 @@ use hubdouble_git::{
 };
 use hubdouble_model::{Grant, Requirement, Scope};
 
-pub use common::{decode_base64, wrapped_base64};
+pub use common::{account_by_email, decode_base64, wrapped_base64};
 
 pub(crate) const READ_CONTENTS: Requirement = Requirement {
     any_of: &[Grant::read("contents")],

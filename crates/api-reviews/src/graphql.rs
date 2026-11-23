@@ -60,11 +60,28 @@ fn review_fields(r: &mut Registry) {
     r.field(REVIEW, "submittedAt", |_, p, _| {
         leaf(p.get::<Review>()?.submitted_at)
     });
+    r.field(REVIEW, "authorAssociation", |ctx, p, _| {
+        let review = p.get::<Review>()?;
+        association(ctx, review.repo_id, review.user_id)
+    });
+}
+
+fn association(ctx: &Ctx<'_>, repo_id: i64, user_id: i64) -> Result<Resolved, GqlError> {
+    let repo = ctx
+        .tx
+        .table::<Repos>()
+        .get(repo_id)
+        .ok_or_else(ApiError::not_found)?;
+    leaf(hubdouble_api_pulls::association(ctx.tx, repo, user_id))
 }
 
 fn comment_fields(r: &mut Registry) {
     r.field(COMMENT, "author", |ctx, p, _| {
         Ok(account(ctx, p.get::<ReviewComment>()?.user_id))
+    });
+    r.field(COMMENT, "authorAssociation", |ctx, p, _| {
+        let comment = p.get::<ReviewComment>()?;
+        association(ctx, comment.repo_id, comment.user_id)
     });
     r.field(COMMENT, "body", |_, p, _| {
         leaf(&p.get::<ReviewComment>()?.body)
