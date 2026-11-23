@@ -2,8 +2,53 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
 use std::sync::Arc;
 
-use crate::contract::{Commit, GitError, ObjectData, ObjectId};
+use hubdouble_store::Tx;
+
+use crate::contract::{Commit, Git, GitError, ObjectData, ObjectId, RefChange};
 use crate::odb::Odb;
+
+impl Git {
+    /// Returns the commits a branch update makes reachable, with parents before children.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError::NotFound`] if the repository lacks a commit in the history.
+    pub fn newly_reachable_commits(
+        &self,
+        tx: &Tx,
+        change: &RefChange,
+    ) -> Result<Vec<(ObjectId, Arc<Commit>)>, GitError> {
+        let Some(head) = change.new else {
+            return Ok(Vec::new());
+        };
+        let odb = self.odb(tx, change.repo_id);
+        let mut tip = head;
+        let mut suffix = Vec::new();
+        if let Some(old) = change.old.filter(|_| !change.forced) {
+            while tip != old {
+                let commit = odb.commit(tip)?;
+                let [parent] = commit.parents.as_slice() else {
+                    break;
+                };
+                let id = tip;
+                tip = *parent;
+                suffix.push((id, commit));
+            }
+            if tip == old {
+                suffix.reverse();
+                return Ok(suffix);
+            }
+        }
+        let known = change
+            .old
+            .map(|old| ancestors(&odb, old))
+            .transpose()?
+            .unwrap_or_default();
+        let mut commits = topo(&odb, tip, &known)?;
+        commits.extend(suffix.into_iter().rev());
+        Ok(commits)
+    }
+}
 
 pub(crate) fn ancestors(odb: &Odb, start: ObjectId) -> Result<HashSet<ObjectId>, GitError> {
     let mut seen = HashSet::from([start]);

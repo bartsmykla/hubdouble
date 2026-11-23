@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
 use hubdouble_admin::SeedCtx;
-use hubdouble_git::{Git, RefChange};
-use hubdouble_model::{ApiError, Issue, IssueState, Repo, Timestamp};
-use hubdouble_store::{Accounts, Entity, Issues, Repos, Rows, Tx, TxMut};
+use hubdouble_auth::repo_role;
+use hubdouble_git::{Git, ObjectId, RefChange};
+use hubdouble_model::{
+    Access, ApiError, Issue, IssueState, Repo, RepoRole, RepositorySelection, Timestamp,
+};
+use hubdouble_store::{Accounts, Entity, Installations, Issues, Repos, Rows, Tx, TxMut};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -70,6 +73,23 @@ impl Entity for MergeClose {
 
 pub(crate) type MergeCloses = Rows<MergeClose>;
 
+pub(crate) struct CommitClose {
+    id: i64,
+    key: String,
+}
+
+impl Entity for CommitClose {
+    fn id(&self) -> i64 {
+        self.id
+    }
+
+    fn keys(&self) -> Vec<String> {
+        vec![self.key.clone()]
+    }
+}
+
+pub(crate) type CommitCloses = Rows<CommitClose>;
+
 pub(crate) fn ref_updated(
     tx: &mut TxMut<'_>,
     git: &Git,
@@ -81,9 +101,14 @@ pub(crate) fn ref_updated(
     let Some(repo) = tx.table::<Repos>().get(change.repo_id) else {
         return Ok(());
     };
+    let default = repo.default_branch == name;
+    let related = [Some(repo.id), repo.fork_of];
+    if default {
+        close_from_commits(tx, git, change)?;
+    }
     let issues = tx.table::<Issues>();
     let done = tx.table::<MergeCloses>();
-    let merged: Vec<Arc<Issue>> = [Some(repo.id), repo.fork_of]
+    let merged: Vec<Arc<Issue>> = related
         .into_iter()
         .flatten()
         .flat_map(|id| issues.in_repo(id))
@@ -106,10 +131,60 @@ pub(crate) fn ref_updated(
             .and_then(|p| p.merged_by)
             .unwrap_or(change.sender);
         for issue in closed_by_merge(tx, &pull) {
-            close(tx, &issue, sender, git.now())?;
+            close(tx, &issue, sender, git.now(), None)?;
         }
     }
     Ok(())
+}
+
+fn close_from_commits(tx: &mut TxMut<'_>, git: &Git, change: &RefChange) -> Result<(), ApiError> {
+    let source = change.repo_id;
+    let sender = change.sender;
+    let now = git.now();
+    for (sha, commit) in git.newly_reachable_commits(tx, change)? {
+        let mut refs = closing_references(&commit.message);
+        let Some(first) = refs.next() else {
+            continue;
+        };
+        let key = format!("{source}/{sha}");
+        if tx.table::<CommitCloses>().by_key(&key).is_some() {
+            continue;
+        }
+        let mut issues: Vec<_> = std::iter::once(first)
+            .chain(refs)
+            .filter_map(|(qualifier, number)| referenced_issue(tx, source, qualifier, number))
+            .filter(|i| i.state == IssueState::Open)
+            .filter(|i| i.repo_id == source || can_push(tx, sender, i.repo_id))
+            .cloned()
+            .collect();
+        issues.sort_unstable_by_key(|i| i.id);
+        issues.dedup_by_key(|i| i.id);
+        let id = tx.next_id();
+        tx.table_mut::<CommitCloses>()
+            .insert(CommitClose { id, key })?;
+        for issue in issues {
+            close(tx, &issue, sender, now, Some((source, sha)))?;
+        }
+    }
+    Ok(())
+}
+
+fn can_push(tx: &Tx, sender: i64, repo_id: i64) -> bool {
+    let Some(repo) = tx.table::<Repos>().get(repo_id) else {
+        return false;
+    };
+    match tx.table::<Accounts>().get(sender).and_then(|a| a.app_id) {
+        Some(app) => tx
+            .table::<Installations>()
+            .of(app, repo.owner_id)
+            .is_some_and(|i| {
+                i.suspended_at.is_none()
+                    && (i.repository_selection == RepositorySelection::All
+                        || i.repo_ids.contains(&repo.id))
+                    && i.permissions.get("contents") >= Some(&Access::Write)
+            }),
+        None => repo_role(tx, sender, repo) >= Some(RepoRole::Write),
+    }
 }
 
 fn closed_by_merge(tx: &Tx, pull: &Issue) -> Vec<Arc<Issue>> {
@@ -156,7 +231,13 @@ fn referenced_issue<'a>(
         .filter(|i| i.pull.is_none())
 }
 
-fn close(tx: &mut TxMut<'_>, issue: &Issue, sender: i64, now: Timestamp) -> Result<(), ApiError> {
+fn close(
+    tx: &mut TxMut<'_>,
+    issue: &Issue,
+    sender: i64,
+    now: Timestamp,
+    commit: Option<(i64, ObjectId)>,
+) -> Result<(), ApiError> {
     let repo: Arc<Repo> = tx
         .table::<Repos>()
         .get(issue.repo_id)
@@ -167,7 +248,9 @@ fn close(tx: &mut TxMut<'_>, issue: &Issue, sender: i64, now: Timestamp) -> Resu
     closed.updated_at = now;
     tx.table_mut::<Issues>().replace(closed.clone())?;
     let via_app = tx.table::<Accounts>().get(sender).and_then(|a| a.app_id);
-    let what = What::Closed(closed.state_reason);
+    let what = commit.map_or(What::Closed(closed.state_reason), |(repo_id, sha)| {
+        What::CommitClosed { repo_id, sha }
+    });
     events::record(tx, &closed, sender, via_app, what, now)?;
     emit_issue(tx, &repo, &closed, "closed", sender, Vec::new())
 }

@@ -3,7 +3,7 @@
 use std::hint::black_box;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use hubdouble_git::{EntryMode, FileChange, Git, GitBuilder, ObjectId, Signature};
+use hubdouble_git::{EntryMode, FileChange, Git, GitBuilder, ObjectId, RefChange, Signature};
 use hubdouble_model::{Account, AccountKind, Repo, Timestamp, Visibility, node_id};
 use hubdouble_store::{Accounts, Repos, Store, StoreBuilder};
 
@@ -131,6 +131,21 @@ fn bench(c: &mut Criterion) {
         left = commit(&store, &git, "left", &files(1000 + i, 3));
         right = commit(&store, &git, "right", &files(2000 + i, 3));
     }
+    let advance = RefChange {
+        repo_id: REPO,
+        sender: OWNER,
+        name: "refs/heads/left".to_owned(),
+        old: Some(base),
+        new: Some(left),
+        forced: false,
+    };
+    c.bench_function("git_newly_reachable_50_commit_fast_forward", |b| {
+        b.iter(|| {
+            store
+                .view(|tx| Ok(git.newly_reachable_commits(tx, black_box(&advance))?))
+                .unwrap()
+        });
+    });
     c.bench_function("git_compare_two_50_commit_branches", |b| {
         b.iter(|| {
             store

@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
+use hubdouble_git::ObjectId;
 use hubdouble_model::{ApiError, Issue, IssueState, StateReason, Timestamp, node_id};
 use hubdouble_rest::{Ctx, Reply};
-use hubdouble_store::{Entity, Issues, Rows, TxMut};
+use hubdouble_store::{Entity, Issues, Repos, Rows, TxMut};
 use serde_json::{Value, json};
 
 use crate::shared::{full_name, integration, user};
@@ -10,6 +11,7 @@ use crate::shared::{full_name, integration, user};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum What {
     Closed(Option<StateReason>),
+    CommitClosed { repo_id: i64, sha: ObjectId },
     Reopened,
     Labeled { name: String, color: String },
     Unlabeled { name: String, color: String },
@@ -22,7 +24,7 @@ pub(crate) enum What {
 impl What {
     fn name(&self) -> &'static str {
         match self {
-            What::Closed(_) => "closed",
+            What::Closed(_) | What::CommitClosed { .. } => "closed",
             What::Reopened => "reopened",
             What::Labeled { .. } => "labeled",
             What::Unlabeled { .. } => "unlabeled",
@@ -35,7 +37,7 @@ impl What {
 
     fn prefix(&self) -> &'static str {
         match self {
-            What::Closed(_) => "CE",
+            What::Closed(_) | What::CommitClosed { .. } => "CE",
             What::Reopened => "REE",
             What::Labeled { .. } => "LE",
             What::Unlabeled { .. } => "UNLE",
@@ -48,7 +50,7 @@ impl What {
 
     fn state(&self) -> Option<IssueState> {
         match self {
-            What::Closed(_) => Some(IssueState::Closed),
+            What::Closed(_) | What::CommitClosed { .. } => Some(IssueState::Closed),
             What::Reopened => Some(IssueState::Open),
             _ => None,
         }
@@ -169,9 +171,19 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let urls = ctx.urls();
     let full = full_name(tx, &repo);
     ctx.page(&events, |e| {
-        let commit_id = match &e.what {
-            What::Merged(sha) => sha.clone(),
-            _ => None,
+        let (commit_id, commit_url) = match &e.what {
+            What::Merged(Some(sha)) => (
+                Some(sha.clone()),
+                Some(format!("{}/repos/{full}/commits/{sha}", urls.api)),
+            ),
+            What::CommitClosed { repo_id, sha } => {
+                let url = tx.table::<Repos>().get(*repo_id).map(|source| {
+                    let source = full_name(tx, source);
+                    format!("{}/repos/{source}/commits/{sha}", urls.api)
+                });
+                (Some(sha.to_string()), url)
+            }
+            _ => (None, None),
         };
         let mut v = json!({
             "id": e.id,
@@ -179,7 +191,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             "url": format!("{}/repos/{full}/issues/events/{}", urls.api, e.id),
             "actor": user(tx, urls, e.actor_id),
             "event": e.what.name(),
-            "commit_url": commit_id.as_ref().map(|c| format!("{}/repos/{full}/commits/{c}", urls.api)),
+            "commit_url": commit_url,
             "commit_id": commit_id,
             "created_at": e.created_at,
             "performed_via_github_app": integration(tx, urls, e.via_app),
@@ -194,6 +206,9 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             ],
             What::Renamed { from, to } => vec![("rename", json!({"from": from, "to": to}))],
             What::Closed(reason) => vec![("state_reason", json!(reason.map(StateReason::as_str)))],
+            What::CommitClosed { .. } => {
+                vec![("state_reason", Value::Null), ("intent", Value::Null)]
+            }
             What::Reopened | What::Merged(_) => vec![("state_reason", Value::Null)],
         };
         for (k, value) in extra {
