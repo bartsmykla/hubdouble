@@ -86,6 +86,7 @@ pub fn register(r: &mut Registrar<'_>) {
     gql.field("Tree", "oid", graphql::tree_oid);
     gql.field("Tree", "entries", graphql::tree_entries);
     gql.field("Blob", "oid", graphql::blob_oid);
+    gql.field("Blob", "byteSize", graphql::blob_byte_size);
     gql.field("Blob", "text", graphql::blob_text);
     gql.field("Blob", "isTruncated", graphql::blob_is_truncated);
     gql.field("Tag", "oid", graphql::tag_oid);

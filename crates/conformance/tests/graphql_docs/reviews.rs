@@ -76,6 +76,7 @@ pub(super) async fn run(server: &TestServer, alice: &GoGithub, cases: &mut Inven
     assert_eq!(pull["state"], "OPEN");
     assert_eq!(pull["baseRefName"], "main");
     assert_ne!(pull["baseRefOid"], pull["headRefOid"]);
+    assert_eq!(pull["baseRef"]["target"]["oid"], pull["baseRefOid"]);
     assert_eq!(pull["baseRepository"], json!({"nameWithOwner":"acme/docs"}));
     assert_eq!(pull["headRepository"], json!({"nameWithOwner":"acme/docs"}));
     assert_eq!(pull["reviewThreads"]["nodes"][0]["recent"]["totalCount"], 2);
@@ -179,7 +180,8 @@ async fn issue(server: &TestServer, alice: &GoGithub, cases: &mut Inventory) {
     let repo = &data["repository"];
     assert_eq!(
         repo["t0"],
-        json!({"text":"# Template\n","isTruncated":false})
+        json!({"text":"# Template\n","isTruncated":false,
+            "oid":"c296a5f621e8f1d1536d8b671d272a96a5d22a7d","byteSize":11})
     );
     assert_eq!(repo["t1"], Value::Null);
     assert_eq!(
@@ -197,7 +199,7 @@ async fn issue(server: &TestServer, alice: &GoGithub, cases: &mut Inventory) {
         for i in 0..count {
             let _ = writeln!(
                 doc,
-                "t{i}: object(expression: \"HEAD:.github/pull_request_template.md\") {{ ... on Blob {{ text isTruncated }} }}"
+                "t{i}: object(expression: \"HEAD:.github/pull_request_template.md\") {{ ... on Blob {{ text isTruncated oid byteSize }} }}"
             );
         }
         doc.push_str(&sample[tail..]);

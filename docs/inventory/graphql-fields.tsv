@@ -1,7 +1,9 @@
 field	owner	documents
 Actor.login	T2	contextThreads,implementPull,implementThreadComments,originalCommentEdit,planThreads,reviewBodies
 AddPullRequestReviewThreadPayload.thread	T6	fileThread
+Blob.byteSize	T4	filesAt,implementIssue
 Blob.isTruncated	T4	filesAt,implementIssue,versionFiles
+Blob.oid	T4	filesAt,implementIssue
 Blob.text	T4	filesAt,implementIssue,versionFiles
 Bot.databaseId	T1	originalCommentEdit
 Comment.id	T7	lastEdits
@@ -11,7 +13,7 @@ Commit.signature	T4	createCommit
 Commit.statusCheckRollup	T8	proposals
 Commit.tree	T4	createCommit
 CreateCommitOnBranchPayload.commit	T4	createCommit
-GitObject.oid	T4	defaultHead,head,implementIssue,peelTags,releasesProbe,tags,versionRef,workflows
+GitObject.oid	T4	defaultHead,head,implementIssue,implementPull,peelTags,releasesProbe,tags,versionRef,workflows
 GitSignature.state	T4	createCommit
 Issue.body	T7	implementIssue
 Issue.closedByPullRequestsReferences	T7	implementIssue
@@ -37,6 +39,7 @@ Organization.teams	T3	teams
 PageInfo.endCursor	P0-B	contextThreads,implementPull,implementThreadComments,planThreads,reviewBodies,tags,teams,threadOpenings,threads
 PageInfo.hasNextPage	P0-B	contextThreads,implementPull,implementThreadComments,planThreads,reviewBodies,tags,teams,threadOpenings,threads
 PageInfo.hasPreviousPage	P0-B	contextThreads
+PullRequest.baseRef	T5	implementPull
 PullRequest.baseRefName	T5	implementPull
 PullRequest.baseRefOid	T5	implementPull
 PullRequest.baseRepository	T5	implementPull
@@ -104,7 +107,7 @@ Query.repository	T10	access,contextThreads,defaultHead,filesAt,head,holdsFiles,i
 Query.search	T11	proposals
 Ref.associatedPullRequests	T5	proposalOpen,proposals
 Ref.name	T4	defaultHead,implementIssue,proposalOpen,releasesProbe,tags
-Ref.target	T4	defaultHead,head,implementIssue,releasesProbe,tags,versionRef
+Ref.target	T4	defaultHead,head,implementIssue,implementPull,releasesProbe,tags,versionRef
 RefConnection.nodes	P0-B	proposalOpen,proposals,releasesProbe,tags
 RefConnection.pageInfo	P0-B	tags
 RefConnection.totalCount	P0-B	releasesProbe

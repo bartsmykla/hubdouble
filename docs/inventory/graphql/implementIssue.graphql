@@ -1,12 +1,12 @@
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     defaultBranchRef { name target { oid } }
-    t0: object(expression: "HEAD:.github/pull_request_template.md") { ... on Blob { text isTruncated } }
-    t1: object(expression: "HEAD:.github/PULL_REQUEST_TEMPLATE.md") { ... on Blob { text isTruncated } }
-    t2: object(expression: "HEAD:pull_request_template.md") { ... on Blob { text isTruncated } }
-    t3: object(expression: "HEAD:PULL_REQUEST_TEMPLATE.md") { ... on Blob { text isTruncated } }
-    t4: object(expression: "HEAD:docs/pull_request_template.md") { ... on Blob { text isTruncated } }
-    t5: object(expression: "HEAD:docs/PULL_REQUEST_TEMPLATE.md") { ... on Blob { text isTruncated } }
+    t0: object(expression: "HEAD:.github/pull_request_template.md") { ... on Blob { text isTruncated oid byteSize } }
+    t1: object(expression: "HEAD:.github/PULL_REQUEST_TEMPLATE.md") { ... on Blob { text isTruncated oid byteSize } }
+    t2: object(expression: "HEAD:pull_request_template.md") { ... on Blob { text isTruncated oid byteSize } }
+    t3: object(expression: "HEAD:PULL_REQUEST_TEMPLATE.md") { ... on Blob { text isTruncated oid byteSize } }
+    t4: object(expression: "HEAD:docs/pull_request_template.md") { ... on Blob { text isTruncated oid byteSize } }
+    t5: object(expression: "HEAD:docs/PULL_REQUEST_TEMPLATE.md") { ... on Blob { text isTruncated oid byteSize } }
     issue(number: $number) {
       state title body
       closedByPullRequestsReferences(first: 20, includeClosedPrs: false) {

@@ -1176,6 +1176,46 @@ async fn blob_and_tree_expressions_read_text_and_entries() {
 }
 
 #[tokio::test]
+async fn blob_text_stops_at_the_last_whole_character_within_512000_bytes() {
+    // Given
+    let s = graphql_server().await;
+    let client = alice(&s);
+    let whole = "a".repeat(512_000);
+    let cut = format!("a{}", "é".repeat(256_000));
+    let mut oids = Vec::new();
+    for content in [&whole, &cut] {
+        let made = client
+            .post(
+                "repos/acme/public/git/blobs",
+                &json!({"content": content, "encoding": "utf-8"}),
+            )
+            .await;
+        oids.push(made.json()["sha"].as_str().unwrap().to_owned());
+    }
+    let doc = "query($owner: String!, $name: String!, $a: GitObjectID!, $b: GitObjectID!) {
+        repository(owner: $owner, name: $name) {
+            a: object(oid: $a) { ... on Blob { text isTruncated byteSize } }
+            b: object(oid: $b) { ... on Blob { text isTruncated byteSize } }
+        } }";
+    // When
+    let answer = Graphql::new(alice(&s))
+        .query(doc, &public(json!({"a": oids[0], "b": oids[1]})))
+        .await
+        .json();
+    // Then
+    let r = &data(&answer)["repository"];
+    assert_eq!(
+        r["a"],
+        json!({"text": whole, "isTruncated": false, "byteSize": 512_000})
+    );
+    let expected = format!("a{}", "é".repeat(255_999));
+    assert_eq!(
+        r["b"],
+        json!({"text": expected, "isTruncated": true, "byteSize": 512_001})
+    );
+}
+
+#[tokio::test]
 async fn create_commit_on_branch_writes_a_signed_commit_on_the_expected_head_only() {
     // Given
     let s = graphql_server().await;

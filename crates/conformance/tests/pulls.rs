@@ -536,6 +536,109 @@ fn resolve_ref(cx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlErro
     })
 }
 
+fn stand_in_ref_target(r: &mut Registrar<'_>) {
+    r.gql.field("Ref", "name", |_, obj, _| {
+        let r = obj.get::<RefNode>()?;
+        Ok(Resolved::Leaf(json!(r.name.strip_prefix(&r.prefix))))
+    });
+    r.gql.field("Ref", "target", |cx, obj, _| {
+        let r = obj.get::<RefNode>()?;
+        let object = cx
+            .git
+            .object(cx.tx, r.repo_id, r.target)
+            .map_err(ApiError::from)?;
+        let hubdouble_git::ObjectData::Commit(commit) = object.data else {
+            return Err(GqlError::new(ErrorType::Internal, "not a commit"));
+        };
+        Ok(Resolved::Object {
+            type_name: "Commit",
+            value: Arc::new(CommitNode {
+                repo_id: r.repo_id,
+                id: r.target,
+                commit,
+            }),
+        })
+    });
+}
+
+#[tokio::test]
+async fn base_ref_follows_the_base_branch_tip_and_is_null_once_the_branch_is_gone() {
+    // Given pull request 1 into main and pull request 2 into develop
+    let server = fixture()
+        .entry(seeded("main", false))
+        .entry(seeded("develop", false))
+        .register(standins::query_repository)
+        .register(stand_in_repo)
+        .register(stand_in_git)
+        .register(stand_in_ref_target)
+        .start()
+        .await;
+    let services = server.server.services();
+    let old = services
+        .store
+        .view(|tx| {
+            Ok(services
+                .git
+                .resolve_ref(tx, fixture::PUBLIC_REPO_ID, "refs/heads/main")?)
+        })
+        .unwrap();
+    let sig = Signature::seed();
+    // When main moves and develop is deleted
+    let tip = services
+        .store
+        .update(|tx| {
+            let tip = services.git.commit(
+                tx,
+                fixture::PUBLIC_REPO_ID,
+                fixture::ALICE_ID,
+                "main",
+                Some(old),
+                &[FileChange::Write {
+                    path: "later.txt".into(),
+                    data: Arc::from(&b"later\n"[..]),
+                    mode: EntryMode::File,
+                }],
+                "move main",
+                &sig,
+                &sig,
+                false,
+            )?;
+            let develop =
+                services
+                    .git
+                    .resolve_ref(tx, fixture::PUBLIC_REPO_ID, "refs/heads/develop")?;
+            services.git.update_ref(
+                tx,
+                fixture::PUBLIC_REPO_ID,
+                fixture::ALICE_ID,
+                "refs/heads/develop",
+                Some(develop),
+                None,
+                false,
+            )?;
+            Ok(tip)
+        })
+        .unwrap();
+    let answer = Graphql::new(writer(&server))
+        .query(
+            r#"{ repository(owner:"acme", name:"public") {
+                a: pullRequest(number:1) { baseRef { name target { oid } } }
+                b: pullRequest(number:2) { baseRef { name } } }}"#,
+            &json!({}),
+        )
+        .await
+        .json();
+    // Then
+    assert!(answer.get("errors").is_none(), "{answer}");
+    let repo = &answer["data"]["repository"];
+    assert_ne!(tip, old);
+    assert_eq!(
+        repo["a"]["baseRef"],
+        json!({"name": "main", "target": {"oid": tip}})
+    );
+    assert_eq!(repo["b"]["baseRef"], Value::Null);
+}
+
 fn approve(server: &TestServer, sha: &str) -> Result<(), ApiError> {
     let now = server.clock.now();
     let store = &server.server.services().store;

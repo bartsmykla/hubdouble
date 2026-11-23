@@ -230,6 +230,8 @@ fn review_parents(r: &mut Registrar<'_>) {
     r.gql.field("PullRequest", "headRefOid", |_, p, _| {
         Ok(Resolved::Leaf(json!(branch(p, true)?.sha)))
     });
+    r.gql
+        .field("PullRequest", "baseRef", |_, _, _| Ok(Resolved::Null));
     r.gql.field("PullRequest", "mergeable", |_, _, _| {
         Ok(Resolved::Leaf(json!("MERGEABLE")))
     });

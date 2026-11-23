@@ -325,6 +325,7 @@ pub fn registry() -> Registry {
     r.field("Repository", "pullRequest", repository_pull);
     r.field("PullRequest", "baseRepository", pull_repository);
     r.field("PullRequest", "headRepository", pull_repository);
+    r.field("PullRequest", "baseRef", |_, _, _| Ok(Resolved::Null));
     r.field("PullRequest", "reviewThreads", pull_threads);
     r.field("PullRequestReviewThread", "comments", thread_comments);
     r.field("PullRequestReviewComment", "author", comment_author);

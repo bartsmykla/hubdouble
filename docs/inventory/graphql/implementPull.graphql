@@ -2,6 +2,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       state mergeable baseRefName baseRefOid headRefOid
+      baseRef { target { oid } }
       baseRepository { nameWithOwner }
       headRepository { nameWithOwner }
       reviewThreads(first: 50, after: $after) {

@@ -96,7 +96,7 @@ async fn alias_cases(cases: &Inventory, main: &str, tag: &str) {
         for i in 0..count {
             let _ = writeln!(
                 doc,
-                "t{i}: object(expression: \"{main}:.github/pull_request_template.md\") {{ ... on Blob {{ text isTruncated }} }}"
+                "t{i}: object(expression: \"{main}:.github/pull_request_template.md\") {{ ... on Blob {{ text isTruncated oid byteSize }} }}"
             );
             let _ = writeln!(
                 doc,
@@ -108,7 +108,8 @@ async fn alias_cases(cases: &Inventory, main: &str, tag: &str) {
         for i in 0..count {
             assert_eq!(
                 output["repository"][format!("t{i}")],
-                json!({"text":"# Template\n","isTruncated":false})
+                json!({"text":"# Template\n","isTruncated":false,
+                    "oid":"c296a5f621e8f1d1536d8b671d272a96a5d22a7d","byteSize":11})
             );
             assert_eq!(
                 output["repository"][format!("p{i}")],

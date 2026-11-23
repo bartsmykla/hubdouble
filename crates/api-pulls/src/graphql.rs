@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use hubdouble_auth::{Target as AuthTarget, authorize};
-use hubdouble_git::{CommitNode, RefNode};
+use hubdouble_git::{CommitNode, GitError, RefNode};
 use hubdouble_gql::{
     Args, Ctx, ErrorType, GqlError, MutCtx, Obj, Registry, Resolved, Target, connection,
 };
@@ -40,6 +40,7 @@ pub(crate) fn register(r: &mut Registry) {
     r.field("PullRequest", "headRepository", |cx, obj, _| {
         repository(cx, state::pull(obj.get::<Issue>()?)?.head.repo_id)
     });
+    r.field("PullRequest", "baseRef", base_ref);
     r.field("PullRequest", "commits", commits);
     r.field("PullRequest", "mergeCommit", merge_commit);
     r.field("PullRequestCommit", "commit", |_, obj, _| {
@@ -269,6 +270,28 @@ fn commit_object(value: Arc<CommitNode>) -> Resolved {
         type_name: "Commit",
         value,
     }
+}
+
+fn base_ref(cx: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {
+    let base = &state::pull(obj.get::<Issue>()?)?.base;
+    let Some(repo_id) = base.repo_id else {
+        return Ok(Resolved::Null);
+    };
+    Ok(
+        match state::branch(cx.git, cx.tx, repo_id, &base.ref_name) {
+            Ok(target) => Resolved::Object {
+                type_name: "Ref",
+                value: Arc::new(RefNode {
+                    repo_id,
+                    name: format!("refs/heads/{}", base.ref_name),
+                    prefix: "refs/heads/".to_owned(),
+                    target,
+                }),
+            },
+            Err(GitError::NotFound) => Resolved::Null,
+            Err(e) => return Err(ApiError::from(e).into()),
+        },
+    )
 }
 
 fn merge_commit(cx: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {

@@ -18,6 +18,7 @@ use crate::refs::{denied_workflow, workflow_refusal};
 use crate::{READ_CONTENTS, WRITE_CONTENTS};
 
 const REF_CONNECTION: &str = "RefConnection";
+const BLOB_TEXT_LIMIT: usize = 512_000;
 
 fn required<T: serde::de::DeserializeOwned>(args: &Args, name: &str) -> Result<T, GqlError> {
     args.get(name)?.ok_or_else(|| {
@@ -338,17 +339,24 @@ pub(crate) fn tree_entry_mode(_: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolv
     Ok(Resolved::Leaf(json!(value)))
 }
 
+pub(crate) fn blob_byte_size(_: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {
+    Ok(Resolved::Leaf(json!(obj.get::<BlobNode>()?.data.len())))
+}
+
 pub(crate) fn blob_text(_: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {
     let b = obj.get::<BlobNode>()?;
     Ok(match std::str::from_utf8(&b.data) {
-        Ok(text) if !b.data.contains(&0) => Resolved::Leaf(json!(text)),
+        Ok(text) if !b.data.contains(&0) => {
+            Resolved::Leaf(json!(&text[..text.floor_char_boundary(BLOB_TEXT_LIMIT)]))
+        }
         _ => Resolved::Null,
     })
 }
 
 pub(crate) fn blob_is_truncated(_: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {
-    obj.get::<BlobNode>()?;
-    Ok(Resolved::Leaf(json!(false)))
+    Ok(Resolved::Leaf(json!(
+        obj.get::<BlobNode>()?.data.len() > BLOB_TEXT_LIMIT
+    )))
 }
 
 pub(crate) struct CommitPayload {
