@@ -1,11 +1,15 @@
+mod submodules;
+
 use std::sync::Arc;
 
 use hubdouble_git::{EntryMode, Git, ObjectData, ObjectId, ObjectKind, TreeEntry};
 use hubdouble_model::ApiError;
+use hubdouble_render::Urls;
 use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::Tx;
 use serde::Serialize;
 
+use self::submodules::SubmoduleUrls;
 use crate::common::{Links, accepted_media, accepts, commit_at, wrapped_base64};
 use crate::data::RAW;
 
@@ -37,6 +41,8 @@ struct Content {
     git_url: Option<String>,
     html_url: Option<String>,
     download_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    submodule_git_url: Option<String>,
     #[serde(rename = "_links")]
     links: ContentLinks,
 }
@@ -50,10 +56,16 @@ struct Directory {
 
 struct At<'a> {
     links: &'a Links,
+    urls: &'a Urls,
     reference: &'a str,
+    lists_submodule_type: bool,
 }
 
 impl At<'_> {
+    fn self_url(&self, path: &str) -> String {
+        format!("{}/contents/{path}?ref={}", self.links.api, self.reference)
+    }
+
     fn content(
         &self,
         kind: &'static str,
@@ -64,10 +76,10 @@ impl At<'_> {
         content: Option<(&'static str, String)>,
     ) -> Content {
         let name = path.rsplit('/').next().unwrap_or(path).to_owned();
-        let own = format!("{}/contents/{path}?ref={}", self.links.api, self.reference);
+        let own = self.self_url(path);
         let view = if kind == "dir" { "tree" } else { "blob" };
         let html = format!("{}/{view}/{}/{path}", self.links.web, self.reference);
-        let git = (kind != "submodule").then(|| self.links.object(object, sha));
+        let git = Some(self.links.object(object, sha));
         let (encoding, data) = content.map_or((None, None), |(encoding, data)| {
             (Some(encoding), Some(data))
         });
@@ -84,11 +96,43 @@ impl At<'_> {
             html_url: Some(html.clone()),
             download_url: (kind == "file")
                 .then(|| format!("{}/raw/{}/{path}", self.links.web, self.reference)),
+            submodule_git_url: None,
             links: ContentLinks {
                 own,
                 git,
                 html: Some(html),
             },
+        }
+    }
+
+    fn submodule(&self, path: &str, sha: ObjectId, url: Option<&str>, listed: bool) -> Content {
+        let own = self.self_url(path);
+        let (git, html) = url
+            .and_then(|url| submodules::github_repository(url, &self.links.web))
+            .map_or((None, None), |repo| {
+                (
+                    Some(format!("{}/repos/{repo}/git/trees/{sha}", self.urls.api)),
+                    Some(format!("{}/{repo}/tree/{sha}", self.urls.web)),
+                )
+            });
+        Content {
+            kind: if listed && !self.lists_submodule_type {
+                "file"
+            } else {
+                "submodule"
+            },
+            encoding: None,
+            size: 0,
+            name: path.rsplit('/').next().unwrap_or(path).to_owned(),
+            path: path.to_owned(),
+            data: None,
+            sha,
+            url: own.clone(),
+            git_url: git.clone(),
+            html_url: html.clone(),
+            download_url: None,
+            submodule_git_url: url.filter(|_| !listed).map(str::to_owned),
+            links: ContentLinks { own, git, html },
         }
     }
 }
@@ -144,6 +188,17 @@ impl ContentTree<'_> {
         }
         None
     }
+
+    fn submodule_urls(&self) -> Option<SubmoduleUrls> {
+        let (mode, id) = self.entry(".gitmodules")?;
+        if !matches!(mode, EntryMode::File | EntryMode::Executable) {
+            return None;
+        }
+        let ObjectData::Blob(bytes) = self.git.object(self.tx, self.repo, id).ok()?.data else {
+            return None;
+        };
+        submodules::parse(&bytes)
+    }
 }
 
 fn target_path(link: &str, target: &[u8]) -> Option<String> {
@@ -183,15 +238,22 @@ pub(crate) fn get_content(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         root: commit.tree,
     };
     let (mode, id) = tree.entry(path).ok_or_else(ApiError::not_found)?;
+    let links = Links::of(ctx)?;
+    let at = At {
+        links: &links,
+        urls: ctx.urls(),
+        reference,
+        lists_submodule_type: ctx.header("x-github-api-version") == Some("2026-03-10"),
+    };
+    if mode == EntryMode::Submodule {
+        let urls = tree.submodule_urls().ok_or_else(ApiError::not_found)?;
+        let url = urls.get(path).ok_or_else(ApiError::not_found)?;
+        return Reply::json(&at.submodule(path, id, Some(url), false));
+    }
     let data = git
         .object(tx, repo.id, id)
         .map_err(|_| ApiError::not_found())?
         .data;
-    let links = Links::of(ctx)?;
-    let at = At {
-        links: &links,
-        reference,
-    };
     match data {
         ObjectData::Blob(data) if mode == EntryMode::Symlink => {
             if let Some(target) = tree.file_target(path, &data) {
@@ -204,10 +266,14 @@ pub(crate) fn get_content(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         }
         ObjectData::Blob(data) => file(ctx, &at, path, id, &data),
         ObjectData::Tree(entries) => {
+            let entries = entries.iter().take(MAX_DIRECTORY_ENTRIES);
+            let urls = if entries.clone().any(|e| e.mode == EntryMode::Submodule) {
+                tree.submodule_urls()
+            } else {
+                None
+            };
             let listing = entries
-                .iter()
-                .take(MAX_DIRECTORY_ENTRIES)
-                .map(|e| entry_content(&tree, &at, path, e))
+                .map(|e| entry_content(&tree, &at, path, e, urls.as_ref()))
                 .collect::<Result<Vec<_>, _>>()?;
             if accepts(ctx, "object") {
                 let content = at.content("dir", path, id, ObjectKind::Tree, 0, None);
@@ -261,6 +327,7 @@ fn entry_content(
     at: &At<'_>,
     dir: &str,
     e: &TreeEntry,
+    submodule_urls: Option<&SubmoduleUrls>,
 ) -> Result<Content, ApiError> {
     let path = if dir.is_empty() {
         e.name.clone()
@@ -269,7 +336,10 @@ fn entry_content(
     };
     let (kind, object, size) = match e.mode {
         EntryMode::Tree => ("dir", ObjectKind::Tree, 0),
-        EntryMode::Submodule => ("submodule", ObjectKind::Commit, 0),
+        EntryMode::Submodule => {
+            let url = submodule_urls.and_then(|urls| urls.get(&path).map(String::as_str));
+            return Ok(at.submodule(&path, e.id, url, true));
+        }
         _ => {
             let ObjectData::Blob(data) = tree.git.object(tree.tx, tree.repo, e.id)?.data else {
                 return Err(ApiError::internal("a file entry is not a blob"));
