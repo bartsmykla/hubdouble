@@ -81,7 +81,6 @@ fn insert(
     Ok(label)
 }
 
-/// The labels with these names, case-insensitive, made with GitHub's default color when missing.
 pub(crate) fn ensure(
     tx: &mut TxMut<'_>,
     repo: &Repo,

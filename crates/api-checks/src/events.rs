@@ -234,8 +234,6 @@ fn commit_object(view: &View<'_>, sha: &str) -> Result<Value, ApiError> {
     }))
 }
 
-/// GitHub's `status` event lists at most 10 branches that contain the SHA, each with its own
-/// head commit.
 fn branches(view: &View<'_>, sha: &str) -> Vec<Value> {
     let (api, full) = (&view.urls.api, &view.name);
     let Ok(commit) = sha.parse::<ObjectId>() else {

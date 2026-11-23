@@ -61,7 +61,6 @@ fn object(type_name: &'static str, a: &Arc<Account>) -> Resolved {
     }
 }
 
-/// Loads a node, and for a legacy ID also gives its current-format ID.
 pub(crate) fn node(cx: &Ctx<'_>, id: &str) -> Result<(Resolved, Option<String>), GqlError> {
     let not_found = || {
         GqlError::new(

@@ -55,7 +55,6 @@ impl What {
     }
 }
 
-/// One entry of an issue's event list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IssueEvent {
     pub(crate) id: i64,

@@ -495,8 +495,6 @@ fn error_call<'r>(
     }
 }
 
-/// Writes an [`ApiError`] as GitHub does: `message`, `errors` (when any), `documentation_url`
-/// and `status` as a string, plus the error's own headers.
 pub(crate) fn error_reply(e: &ApiError) -> Reply {
     let body = ErrorBody {
         message: &e.message,
@@ -594,7 +592,6 @@ fn api_version(headers: &HeaderMap) -> Result<&'static str, ApiError> {
         })
 }
 
-/// GitHub's `X-GitHub-Media-Type` for the first `application/vnd.github` range of `Accept`.
 pub(crate) fn media_type(accept: Option<&str>) -> String {
     let range = accept
         .unwrap_or("")

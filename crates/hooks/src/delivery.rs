@@ -15,9 +15,6 @@ use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::{Duration, Instant};
 
-/// How long an idle pooled connection is reused. It is below the idle timeouts servers commonly
-/// set (client closes idle connections after 60 s), so an attempt does not race the server's
-/// close of the connection it picks.
 pub(crate) const IDLE_REUSE: Duration = Duration::from_secs(30);
 
 /// A byte stream a webhook request is written to.
@@ -63,7 +60,6 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// `X-Hub-Signature-256`: HMAC SHA-256 of the body under the secret.
 pub(crate) fn signature_256(secret: &[u8], body: &[u8]) -> String {
     let mut mac = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(secret)
         .unwrap_or_else(|_| unreachable!("HMAC takes a key of any length"));
@@ -71,7 +67,6 @@ pub(crate) fn signature_256(secret: &[u8], body: &[u8]) -> String {
     format!("sha256={}", hex(&mac.finalize().into_bytes()))
 }
 
-/// `X-Hub-Signature`: HMAC SHA-1 of the body under the secret.
 pub(crate) fn signature_1(secret: &[u8], body: &[u8]) -> String {
     let mut mac = <Hmac<sha1::Sha1> as KeyInit>::new_from_slice(secret)
         .unwrap_or_else(|_| unreachable!("HMAC takes a key of any length"));
@@ -79,7 +74,6 @@ pub(crate) fn signature_1(secret: &[u8], body: &[u8]) -> String {
     format!("sha1={}", hex(&mac.finalize().into_bytes()))
 }
 
-/// What one attempt got back.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Outcome {
     pub status_code: i64,
@@ -137,9 +131,6 @@ async fn read_capped(mut body: hyper::body::Incoming, cap: usize) -> Option<(Vec
 
 type Sender = SendRequest<Full<Bytes>>;
 
-/// Idle keep-alive connections per webhook origin, at most `per_origin` each and each for at most
-/// [`IDLE_REUSE`], so attempts reuse them as an HTTP client with a connection pool does. A
-/// returned connection drops the stale and closed ones of every origin.
 pub(crate) struct Pool {
     idle: Mutex<HashMap<String, Vec<(Sender, Instant)>>>,
     per_origin: usize,
@@ -191,9 +182,6 @@ async fn connect(connector: &dyn Connector, uri: &Uri) -> Option<Sender> {
     Some(sender)
 }
 
-/// Sends one `POST` on an idle pooled connection or a new one, and reads at most `cap` bytes of
-/// the answer body. A pooled connection that closed before it took the request is replaced by a
-/// new one. The caller bounds it with the attempt timeout.
 pub(crate) async fn send(
     connector: &dyn Connector,
     pool: &Pool,

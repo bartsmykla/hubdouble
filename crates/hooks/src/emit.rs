@@ -34,16 +34,11 @@ fn subscribes(app: &App, event: &str) -> bool {
             && app.permissions.get("checks") >= Some(&Access::Write)
 }
 
-/// What an installation must hold to receive an event.
 enum Need {
-    /// Every installation holds it: the `metadata` permission, or an event about the
-    /// installation itself.
     Nothing,
     Permission(&'static str, Access),
 }
 
-/// The permission each emitted event needs, from GitHub's webhook events reference. An event
-/// that is not listed reaches no installation.
 fn needs(event: &str, action: Option<&str>) -> Option<Need> {
     let level = |write: &[&str]| {
         if action.is_some_and(|a| write.contains(&a)) {
@@ -241,8 +236,6 @@ fn webhook_label(l: &mut Value) {
     }
 }
 
-/// GitHub's webhook `label` has no `archived_at` or `archived_by` and its webhook `issue` has no
-/// `closed_by`, which the REST forms that tracks render carry.
 fn webhook_form(p: &mut Map<String, Value>) {
     if let Some(l) = p.get_mut("label") {
         webhook_label(l);

@@ -167,8 +167,6 @@ pub(crate) fn workflow_refusal(path: &str) -> String {
     )
 }
 
-/// The first `.github/workflows` path a ref move from `base` to `target` changes when the actor
-/// is an installation without `workflows: write`; `None` when the move is allowed.
 pub(crate) fn denied_workflow(
     tx: &Tx,
     git: &Git,

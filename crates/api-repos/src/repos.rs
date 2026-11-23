@@ -35,7 +35,6 @@ pub(crate) fn register(r: &mut Registrar<'_>) {
         .handle("repos/list-for-org", ORG_METADATA, list_for_org);
 }
 
-/// GitHub's `full-repository`.
 #[derive(Serialize)]
 struct FullRepository {
     #[serde(flatten)]
@@ -54,7 +53,6 @@ fn count(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-/// The repository as the actor sees it, with its counts and the actor's `permissions`.
 pub(crate) fn render(tx: &Tx, urls: &Urls, actor: &Actor, r: &Repo, owner: &Account) -> Repository {
     let mut out = Repository::new(urls, r, owner);
     let forks = count(

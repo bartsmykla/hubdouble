@@ -103,7 +103,6 @@ fn default_owner(type_name: &str, field: &str) -> Option<&'static str> {
     (type_name.ends_with("Connection") || type_name.ends_with("Edge")).then_some("P0-B")
 }
 
-/// Regenerates `docs/inventory/graphql-fields.tsv`, keeping every owner already assigned.
 fn main() -> ExitCode {
     let schema = match hubdouble_gql::Schema::load() {
         Ok(s) => s,

@@ -12,8 +12,6 @@ use crate::schema::Schema;
 
 const CONFLICTING_FIELD_TYPE: &str = "ConflictingFieldType";
 
-/// Validates `query` with GitHub's rule set: the spec's rules, except that fields of one response
-/// name in distinct concrete types may differ in nullability.
 pub(crate) fn validate(
     schema: &Schema,
     query: &str,

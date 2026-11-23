@@ -8,7 +8,6 @@ use serde::Serialize;
 
 use crate::CONTENTS;
 
-/// Where GitHub looks for the file, in this order.
 const LOCATIONS: [&str; 3] = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"];
 
 pub(crate) fn register(r: &mut Registrar<'_>) {
@@ -31,8 +30,6 @@ struct Errors {
     errors: Vec<OwnersError>,
 }
 
-/// Whether an owner named in the file can own code: a user or team with write access, or the
-/// email of such a user.
 pub(crate) trait Owners {
     fn user_can_write(&self, login: &str) -> bool;
     fn team_can_write(&self, org: &str, slug: &str) -> bool;
@@ -112,7 +109,6 @@ fn owner_kind(owner: &str, owners: &impl Owners) -> Option<&'static str> {
     Some("Invalid owner")
 }
 
-/// The errors GitHub reports for one CODEOWNERS file, line by line.
 pub(crate) fn check(path: &str, text: &str, owners: &impl Owners) -> Vec<OwnersError> {
     let mut out = Vec::new();
     for (i, raw) in text.lines().enumerate() {

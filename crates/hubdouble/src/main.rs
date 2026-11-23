@@ -69,8 +69,6 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-/// Prints the registered share of the `OpenAPI` table by category and, with `--inventory`, each
-/// inventory route that is not registered. Fails when an inventory route is missing.
 fn coverage(args: &[String]) -> Result<bool, String> {
     let inventory = match args {
         [] => None,

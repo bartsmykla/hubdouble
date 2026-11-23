@@ -249,8 +249,6 @@ fn count(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-/// The acting account of a write, the App behind an installation token, and the role the
-/// account holds on the repository.
 pub(crate) struct Who {
     pub(crate) account: Arc<Account>,
     pub(crate) via_app: Option<i64>,
@@ -308,8 +306,6 @@ pub(crate) fn emit(
     );
 }
 
-/// Emits `issues.<action>`, or `pull_request.<action>` when `issue` is a pull request, with
-/// `extra` members (`label`, `assignee`, `changes`) added to the payload.
 pub(crate) fn emit_issue(
     tx: &mut TxMut<'_>,
     repo: &Repo,
@@ -341,7 +337,6 @@ pub(crate) fn emit_issue(
     Ok(())
 }
 
-/// `{field: {"from": old}}`, one member of a webhook's `changes`.
 pub(crate) fn changed_from(field: &str, old: Value) -> Map<String, Value> {
     let mut from = Map::new();
     from.insert("from".to_owned(), old);

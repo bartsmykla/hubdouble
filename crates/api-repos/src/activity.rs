@@ -23,7 +23,6 @@ const KINDS: [&str; 6] = [
     "merge_queue_merge",
 ];
 
-/// One change of a branch, as `GET /repos/{owner}/{repo}/activity` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Activity {
     pub(crate) id: i64,

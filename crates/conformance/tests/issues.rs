@@ -163,8 +163,6 @@ fn valid(operation: &str, a: &Answer) -> Value {
         .unwrap_or_else(|e| panic!("{operation} {}: not JSON: {e}", a.status))
 }
 
-/// Adds a pull request from `feature` to `main` on `acme/public` through the store, as T5's
-/// handlers would, and answers its number.
 fn pull_request(server: &TestServer, title: &str, body: &str, state: IssueState) -> i64 {
     pull_request_on(server, title, body, state, (PUBLIC_REPO_ID, "main"))
 }

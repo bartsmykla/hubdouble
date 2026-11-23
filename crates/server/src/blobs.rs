@@ -13,8 +13,6 @@ enum Range {
     Unsatisfiable,
 }
 
-/// One `Range` value against a body of `len` bytes. A malformed or multi-part range is ignored,
-/// as RFC 9110 allows, so the whole body answers.
 fn parse_range(value: &str, len: usize) -> Range {
     let Some(spec) = value.trim().strip_prefix("bytes=") else {
         return Range::Whole;

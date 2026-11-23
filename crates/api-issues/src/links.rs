@@ -12,7 +12,6 @@ use crate::graphql::keyword_link;
 use crate::issues::apply_state;
 use crate::shared::{emit_issue, full_name};
 
-/// A pull request linked to an issue by hand, in the issue's Development sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IssueLink {
     pub(crate) id: i64,

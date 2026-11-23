@@ -14,7 +14,6 @@ fn world() -> World {
     World::new(fake::registry())
 }
 
-/// The 1-based line and column where `needle` starts in `query`.
 fn at(query: &str, needle: &str) -> Value {
     let offset = query
         .find(needle)

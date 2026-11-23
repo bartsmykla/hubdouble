@@ -68,7 +68,6 @@ fn bypasses(tx: &Tx, actor: &Actor, repo: &Repo, b: &BypassActor) -> bool {
     }
 }
 
-/// GitHub's `current_user_can_bypass`: the widest bypass any of the actor's matches grants.
 fn can_bypass(tx: &Tx, actor: &Actor, repo: &Repo, r: &Ruleset) -> &'static str {
     let modes: Vec<&str> = r
         .bypass_actors
@@ -105,7 +104,6 @@ fn get_ruleset(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     Reply::json(&out)
 }
 
-/// GitHub's `repository-rule-detailed`.
 #[derive(Serialize)]
 struct DetailedRule<'a> {
     #[serde(rename = "type")]

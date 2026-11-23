@@ -32,7 +32,6 @@ pub(crate) fn register(r: &mut Registrar<'_>) {
     r.admin.kind("release", release_kind);
 }
 
-/// The release as REST and the `release` payload write it.
 pub(crate) fn render(tx: &Tx, urls: &Urls, r: &Release) -> Result<render::Release, ApiError> {
     let repo = tx
         .table::<hubdouble_store::Repos>()
@@ -62,7 +61,6 @@ pub(crate) fn render(tx: &Tx, urls: &Urls, r: &Release) -> Result<render::Releas
     ))
 }
 
-/// The `release` payload's own part.
 pub(crate) fn payload(tx: &Tx, r: &Release) -> Result<Map<String, Value>, ApiError> {
     let urls = Urls::new(tx.config(), "");
     let release = serde_json::to_value(render(tx, &urls, r)?)
@@ -192,8 +190,6 @@ fn sha256(data: &[u8]) -> String {
     out
 }
 
-/// Creates `refs/tags/<tag>` at the commit `target` names when the tag is missing, as GitHub
-/// does when it publishes a release.
 pub(crate) fn ensure_tag(
     tx: &mut TxMut<'_>,
     git: &Git,
