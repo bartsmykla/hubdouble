@@ -76,30 +76,37 @@ const EVENTS: [&str; 30] = [
     "workflow_run",
 ];
 
-/// GitHub Actions as GitHub renders it in a check run or suite, owned by the `github`
-/// organization.
+/// The `github` organization that owns GitHub Actions, as `GET /users/github` gives it. It is
+/// not a row of the store, so a seeded account with its login or ID takes its place there.
 #[must_use]
-pub fn app(urls: &Urls) -> Integration {
-    let owner = Account {
+pub fn owner() -> Account {
+    Account {
         id: 9919,
         node_id: "MDEyOk9yZ2FuaXphdGlvbjk5MTk=".to_owned(),
         login: "github".to_owned(),
         kind: AccountKind::Organization,
-        name: None,
+        name: Some("GitHub".to_owned()),
         email: None,
         company: None,
-        blog: None,
-        location: None,
-        bio: None,
+        blog: Some("https://github.com/about".to_owned()),
+        location: Some("United States of America".to_owned()),
+        bio: Some("How people build software.".to_owned()),
         twitter_username: None,
         description: None,
         site_admin: false,
         verified_email: true,
         sso_enforced: false,
         app_id: None,
-        created_at: Timestamp::SEED,
-        updated_at: Timestamp::SEED,
-    };
+        created_at: Timestamp(1_210_480_651),
+        updated_at: Timestamp(1_778_109_125),
+    }
+}
+
+/// GitHub Actions as GitHub renders it in a check run or suite, owned by the `github`
+/// organization.
+#[must_use]
+pub fn app(urls: &Urls) -> Integration {
+    let owner = owner();
     Integration {
         id: APP_ID,
         slug: "github-actions".to_owned(),

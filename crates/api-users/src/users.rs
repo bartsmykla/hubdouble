@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use hubdouble_api_checks::actions;
 use hubdouble_auth::Actor;
 use hubdouble_model::{Account, ApiError, Requirement, Scope, Timestamp, Visibility};
 use hubdouble_render::{SimpleUser, Urls};
@@ -115,20 +118,37 @@ fn authenticated(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     Reply::json(&render(ctx.tx(), ctx.urls(), user, true))
 }
 
+fn builtin(tx: &Tx, matches: impl Fn(&Account) -> bool) -> Option<Account> {
+    let owner = actions::owner();
+    let accounts = tx.table::<Accounts>();
+    let free = accounts.by_login(&owner.login).is_none() && accounts.get(owner.id).is_none();
+    (free && matches(&owner)).then_some(owner)
+}
+
+fn reply(
+    ctx: &Ctx<'_>,
+    found: Option<&Arc<Account>>,
+    builtin: Option<Account>,
+) -> Result<Reply, ApiError> {
+    if let Some(account) = found {
+        return Reply::json(&render(ctx.tx(), ctx.urls(), account, own(ctx, account)));
+    }
+    let account = builtin.ok_or_else(ApiError::not_found)?;
+    Reply::json(&render(ctx.tx(), ctx.urls(), &account, false))
+}
+
 fn by_username(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
-    let account = ctx
-        .tx()
-        .table::<Accounts>()
-        .by_login(ctx.param("username")?)
-        .ok_or_else(ApiError::not_found)?;
-    Reply::json(&render(ctx.tx(), ctx.urls(), account, own(ctx, account)))
+    let login = ctx.param("username")?;
+    let found = ctx.tx().table::<Accounts>().by_login(login);
+    reply(
+        ctx,
+        found,
+        builtin(ctx.tx(), |a| a.login.eq_ignore_ascii_case(login)),
+    )
 }
 
 fn by_id(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
-    let account = ctx
-        .tx()
-        .table::<Accounts>()
-        .get(ctx.param_i64("account_id")?)
-        .ok_or_else(ApiError::not_found)?;
-    Reply::json(&render(ctx.tx(), ctx.urls(), account, own(ctx, account)))
+    let id = ctx.param_i64("account_id")?;
+    let found = ctx.tx().table::<Accounts>().get(id);
+    reply(ctx, found, builtin(ctx.tx(), |a| a.id == id))
 }

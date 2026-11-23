@@ -13,6 +13,7 @@ base64.workspace = true
 hmac.workspace = true
 http.workspace = true
 hubdouble-admin.workspace = true
+hubdouble-api-checks.workspace = true
 hubdouble-auth.workspace = true
 hubdouble-gql.workspace = true
 hubdouble-model.workspace = true

@@ -779,6 +779,63 @@ async fn user_reads_answer_public_and_private_profiles() {
 }
 
 #[tokio::test]
+async fn the_github_organization_that_owns_github_actions_is_a_user() {
+    // Given the owner that every GitHub Actions check run names, and no seeded account for it
+    let server = start().await;
+    let anonymous = GoGithub::enterprise(&server);
+
+    // When it is read by login and by ID
+    let by_login = anonymous.get("users/GitHub").await;
+    let by_id = anonymous.get("user/9919").await;
+
+    // Then both give the organization as live GET /users/github gives it
+    for org in [
+        ok(&by_login, "users/get-by-username"),
+        ok(&by_id, "users/get-by-id"),
+    ] {
+        assert_eq!(org["login"], "github");
+        assert_eq!(org["id"], 9919);
+        assert_eq!(org["node_id"], "MDEyOk9yZ2FuaXphdGlvbjk5MTk=");
+        assert_eq!(org["type"], "Organization");
+        assert_eq!(org["user_view_type"], "public");
+        assert_eq!(org["site_admin"], false);
+        assert_eq!(org["name"], "GitHub");
+        assert_eq!(org["company"], Value::Null);
+        assert_eq!(org["blog"], "https://github.com/about");
+        assert_eq!(org["location"], "United States of America");
+        assert_eq!(org["email"], Value::Null);
+        assert_eq!(org["bio"], "How people build software.");
+        assert_eq!(org["twitter_username"], Value::Null);
+        assert_eq!(org["created_at"], "2008-05-11T04:37:31Z");
+        assert_eq!(org["updated_at"], "2026-05-06T23:12:05Z");
+        assert_eq!(org["url"], format!("{}/api/v3/users/github", server.base));
+    }
+}
+
+#[tokio::test]
+async fn a_seeded_account_with_the_login_github_replaces_the_github_organization() {
+    // Given a seed that names its own organization github
+    let server = TestServer::builder()
+        .register(hubdouble_api_users::register)
+        .register(org_repos)
+        .fixture()
+        .entry(json!({"kind": "org", "id": 7777, "login": "github", "name": "Seeded"}))
+        .start()
+        .await;
+    let anonymous = GoGithub::enterprise(&server);
+
+    // When the login and the ID of the GitHub organization are read
+    let by_login = anonymous.get("users/github").await;
+    let by_id = anonymous.get("user/9919").await;
+
+    // Then the seeded account holds the login and the ID belongs to no account
+    let seeded = ok(&by_login, "users/get-by-username");
+    assert_eq!(seeded["id"], 7777);
+    assert_eq!(seeded["name"], "Seeded");
+    assert_eq!(by_id.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn the_authenticated_user_is_refused_to_an_installation_token() {
     // Given
     let server = start().await;

@@ -2461,6 +2461,7 @@ dependencies = [
  "hmac 0.13.0",
  "http",
  "hubdouble-admin",
+ "hubdouble-api-checks",
  "hubdouble-auth",
  "hubdouble-git",
  "hubdouble-gql",
