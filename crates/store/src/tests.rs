@@ -258,6 +258,7 @@ fn an_entry_past_the_outbox_limits_commits_over_budget_until_space_is_released()
     s.limit_outbox(OutboxUse {
         events: 2,
         bytes: 5,
+        refused_per_app: usize::MAX,
         ..OutboxUse::default()
     });
     let sized = |n: usize| OutboxEntry {
@@ -305,6 +306,7 @@ fn over_budget_entries_keep_only_the_newest_payloads_within_the_refused_limit() 
         events: 10,
         bytes: 1,
         refused_bytes: 5,
+        refused_per_app: usize::MAX,
     });
     let commit = |n: usize| {
         s.update(|tx| {
@@ -344,6 +346,7 @@ fn a_taken_over_budget_entry_holds_its_refused_share_until_it_is_released() {
         events: 10,
         bytes: 1,
         refused_bytes: 5,
+        refused_per_app: usize::MAX,
     });
     let commit = |n: usize| {
         s.update(|tx| {
@@ -379,6 +382,45 @@ fn a_taken_over_budget_entry_holds_its_refused_share_until_it_is_released() {
 
     // Then that entry keeps its payload
     assert_eq!(kept(s.take_outbox()), [3]);
+}
+
+#[test]
+fn an_app_keeps_only_its_newest_over_budget_entries_within_the_refused_count() {
+    // Given an outbox with no room, which keeps two over-budget entries per App
+    let s = store();
+    s.limit_outbox(OutboxUse {
+        refused_bytes: usize::MAX,
+        refused_per_app: 2,
+        ..OutboxUse::default()
+    });
+    let commit = |app_id: i64, n: usize| {
+        s.update(|tx| {
+            tx.push_outbox(OutboxEntry {
+                app_id,
+                payload: Bytes::from(vec![b'1'; n]),
+                ..entry("push")
+            });
+            Ok(())
+        })
+        .unwrap();
+    };
+
+    // When App 1 commits entries of 1, 2, 3 and 4 bytes around one of 5 bytes for App 2
+    commit(1, 1);
+    commit(1, 2);
+    commit(2, 5);
+    commit(1, 3);
+    commit(1, 4);
+
+    // Then App 1 keeps its two newest, App 2 keeps its one, in commit order, and only they hold bytes
+    assert_eq!(s.outbox_use().refused_per_app, 2);
+    assert_eq!(s.outbox_use().refused_bytes, 12);
+    let kept: Vec<_> = s
+        .take_outbox()
+        .iter()
+        .map(|c| (c.entry.app_id, c.entry.payload.len()))
+        .collect();
+    assert_eq!(kept, [(2, 5), (1, 3), (1, 4)]);
 }
 
 #[test]

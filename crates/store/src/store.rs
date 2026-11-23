@@ -1,5 +1,5 @@
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -180,20 +180,34 @@ struct State {
 
 #[derive(Default)]
 struct Outbox {
-    entries: Vec<Committed>,
+    entries: BTreeMap<u64, Committed>,
+    refused: HashMap<i64, VecDeque<u64>>,
     refused_bytes: usize,
-    shed_until: usize,
+    shed_from: u64,
 }
 
 impl Outbox {
-    fn refuse(&mut self, c: Committed, limit: usize) {
+    fn push(&mut self, c: Committed) {
+        self.entries.insert(c.seq, c);
+    }
+
+    fn refuse(&mut self, c: Committed, limit: OutboxUse) {
+        let (seq, app) = (c.seq, c.entry.app_id);
         self.refused_bytes += c.entry.payload.len();
-        self.entries.push(c);
-        while self.refused_bytes > limit {
-            let Some(old) = self.entries.get_mut(self.shed_until) else {
+        self.push(c);
+        let held = self.refused.entry(app).or_default();
+        held.push_back(seq);
+        if held.len() > limit.refused_per_app
+            && let Some(old) = held.pop_front()
+            && let Some(old) = self.entries.remove(&old)
+        {
+            self.refused_bytes -= old.entry.payload.len();
+        }
+        while self.refused_bytes > limit.refused_bytes {
+            let Some((&seq, old)) = self.entries.range_mut(self.shed_from..).next() else {
                 break;
             };
-            self.shed_until += 1;
+            self.shed_from = seq + 1;
             if old.over_budget {
                 self.refused_bytes -= old.entry.payload.len();
                 old.entry.payload = Bytes::new();
@@ -201,9 +215,14 @@ impl Outbox {
         }
     }
 
+    fn refused_per_app(&self) -> usize {
+        self.refused.values().map(VecDeque::len).max().unwrap_or(0)
+    }
+
     fn take(&mut self) -> Vec<Committed> {
-        self.shed_until = 0;
-        std::mem::take(&mut self.entries)
+        self.shed_from = 0;
+        self.refused.clear();
+        std::mem::take(&mut self.entries).into_values().collect()
     }
 
     fn release_refused(&mut self, bytes: usize) {
@@ -312,7 +331,7 @@ impl Store {
         let delivered = deliver && !entries.is_empty();
         if delivered {
             let epoch = self.inner.epoch.load(Ordering::SeqCst);
-            let refused_limit = self.inner.limit.lock().refused_bytes;
+            let limit = *self.inner.limit.lock();
             let mut outbox = self.inner.outbox.lock();
             for entry in entries {
                 *next_seq += 1;
@@ -323,9 +342,9 @@ impl Store {
                     entry,
                 };
                 if c.over_budget {
-                    outbox.refuse(c, refused_limit);
+                    outbox.refuse(c, limit);
                 } else {
-                    outbox.entries.push(c);
+                    outbox.push(c);
                 }
             }
         }
@@ -384,7 +403,9 @@ impl Store {
     /// than `limit.events` entries or `limit.bytes` payload bytes is committed with
     /// [`Committed::over_budget`] set. Over-budget entries keep at most `limit.refused_bytes`
     /// payload bytes until they are released with [`Store::release_refused`], taken or not;
-    /// past it the oldest of them still in the outbox lose their payload.
+    /// past it the oldest of them still in the outbox lose their payload. At most
+    /// `limit.refused_per_app` over-budget entries of one App wait in the outbox; past it the
+    /// oldest of them is dropped and gives back its share.
     /// Without a call there is no bound.
     pub fn limit_outbox(&self, limit: OutboxUse) {
         *self.inner.limit.lock() = limit;
@@ -406,9 +427,12 @@ impl Store {
     /// What the committed entries hold now.
     #[must_use]
     pub fn outbox_use(&self) -> OutboxUse {
-        let refused_bytes = self.inner.outbox.lock().refused_bytes;
+        let outbox = self.inner.outbox.lock();
+        let (refused_bytes, refused_per_app) = (outbox.refused_bytes, outbox.refused_per_app());
+        drop(outbox);
         OutboxUse {
             refused_bytes,
+            refused_per_app,
             ..*self.inner.used.lock()
         }
     }
@@ -492,6 +516,7 @@ impl StoreBuilder {
                     events: usize::MAX,
                     bytes: usize::MAX,
                     refused_bytes: usize::MAX,
+                    refused_per_app: usize::MAX,
                 }),
                 used: Mutex::new(OutboxUse::default()),
             }),

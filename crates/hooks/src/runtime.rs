@@ -154,6 +154,7 @@ impl Shared {
                 n => n,
             },
             refused_bytes: options.log_bytes,
+            refused_per_app: options.log_capacity.max(1),
         });
         let (drains, drain_rx) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {

@@ -40,4 +40,7 @@ pub struct OutboxUse {
     pub bytes: usize,
     /// The payload bytes that over-budget entries keep until [`crate::Store::release_refused`].
     pub refused_bytes: usize,
+    /// The over-budget entries of one App that wait in the outbox; [`crate::Store::outbox_use`]
+    /// gives the most any App holds.
+    pub refused_per_app: usize,
 }
