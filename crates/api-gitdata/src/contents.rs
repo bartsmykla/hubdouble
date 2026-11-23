@@ -109,7 +109,7 @@ impl At<'_> {
     fn submodule(&self, path: &str, sha: ObjectId, url: Option<&str>, listed: bool) -> Content {
         let own = self.self_url(path);
         let (git, html) = url
-            .and_then(|url| submodules::github_repository(url, &self.links.web))
+            .and_then(|url| submodules::github_repository(url, &self.links.web, &self.urls.web))
             .map_or((None, None), |repo| {
                 (
                     Some(format!("{}/repos/{repo}/git/trees/{sha}", self.urls.api)),

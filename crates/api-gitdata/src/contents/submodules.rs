@@ -21,24 +21,34 @@ pub(super) fn parse(bytes: &[u8]) -> Option<SubmoduleUrls> {
     )
 }
 
-pub(super) fn github_repository(clone_url: &str, parent_web: &str) -> Option<String> {
+pub(super) fn github_repository(clone_url: &str, parent_web: &str, web: &str) -> Option<String> {
     if clone_url.starts_with("./") || clone_url.starts_with("../") {
         let parent = Url::parse(&format!("{parent_web}/")).ok()?;
         return repository_path(parent.join(clone_url).ok()?.path());
     }
-    if let Some((remote, path)) = clone_url.split_once(':')
-        && remote
-            .rsplit('@')
-            .next()?
-            .eq_ignore_ascii_case("github.com")
+    let web = Url::parse(web).ok();
+    let served = |host: &str| {
+        host.eq_ignore_ascii_case("github.com")
+            || web
+                .as_ref()
+                .and_then(Url::host_str)
+                .is_some_and(|own| own.eq_ignore_ascii_case(host))
+    };
+    if let Ok(url) = Url::parse(clone_url)
+        && url.has_host()
     {
-        return repository_path(path);
+        let ours = url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("github.com")
+                || (served(host)
+                    && web.as_ref().and_then(Url::port_or_known_default)
+                        == url.port_or_known_default())
+        });
+        return ours.then(|| repository_path(url.path())).flatten();
     }
-    let url = Url::parse(clone_url).ok()?;
-    if url.host_str()?.eq_ignore_ascii_case("github.com") {
-        return repository_path(url.path());
-    }
-    None
+    let (remote, path) = clone_url.split_once(':')?;
+    served(remote.rsplit('@').next()?)
+        .then(|| repository_path(path))
+        .flatten()
 }
 
 fn repository_path(path: &str) -> Option<String> {

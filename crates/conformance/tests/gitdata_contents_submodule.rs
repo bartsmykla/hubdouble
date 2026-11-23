@@ -9,12 +9,13 @@ use serde_json::{Value, json};
 const MODULE_ID: &str = "855827c583bc30645ba427885caa40c5b81764d2";
 const MODULE_URL: &str = "https://github.com/example/dependency.git";
 
-async fn server(module_url: &str) -> TestServer {
+async fn server(module_url: impl FnOnce(&str) -> String) -> TestServer {
     let s = TestServer::builder()
         .fixture()
         .register(hubdouble_api_gitdata::register)
         .start()
         .await;
+    let module_url = module_url(&s.base);
     let services = s.server.services();
     let git = &services.git;
     let repo = PUBLIC_REPO_ID;
@@ -73,7 +74,7 @@ fn assert_module(s: &TestServer, body: &Value, kind: &str) {
 
 #[tokio::test]
 async fn direct_contents_reads_submodule_metadata_at_the_requested_ref() {
-    let s = server(MODULE_URL).await;
+    let s = server(|_| MODULE_URL.to_owned()).await;
     let client = GoGithub::new(&s).with_token(ALICE_TOKEN);
     let answer = client
         .get("repos/acme/public/contents/nested/module?ref=modules")
@@ -85,8 +86,19 @@ async fn direct_contents_reads_submodule_metadata_at_the_requested_ref() {
 }
 
 #[tokio::test]
+async fn a_submodule_on_the_doubles_own_web_host_links_to_that_repository() {
+    let s = server(|base| format!("{base}/example/dependency.git")).await;
+    let client = GoGithub::new(&s).with_token(ALICE_TOKEN);
+    let answer = client
+        .get("repos/acme/public/contents/nested/module?ref=modules")
+        .await;
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_module(&s, &answer.json(), "submodule");
+}
+
+#[tokio::test]
 async fn contents_directory_lists_submodules_by_api_version() {
-    let s = server("../../example/dependency.git").await;
+    let s = server(|_| "../../example/dependency.git".to_owned()).await;
     let client = GoGithub::new(&s).with_token(ALICE_TOKEN);
     let path = "repos/acme/public/contents/nested?ref=modules";
     for (version, kind) in [("2022-11-28", "file"), ("2026-03-10", "submodule")] {
