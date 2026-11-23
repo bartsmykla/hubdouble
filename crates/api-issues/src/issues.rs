@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use hubdouble_model::{
-    ApiError, Issue, IssueState, Label, Repo, RepoRole, StateReason, Timestamp, node_id,
+    ApiError, FieldError, Issue, IssueState, Label, Repo, RepoRole, StateReason, Timestamp, node_id,
 };
 use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::{Accounts, Counters, IssueComments, Issues, Labels, Tx, TxMut};
@@ -425,6 +425,26 @@ pub(crate) fn apply_state(
             }
         }
     }
+    if issue.pull.is_some() {
+        issue.state_reason = None;
+    }
+}
+
+fn refuse_merged_reopen(issue: &Issue, to: Option<IssueState>) -> Result<(), ApiError> {
+    if to == Some(IssueState::Open) && issue.pull.as_ref().is_some_and(|p| p.merged_at.is_some()) {
+        return Err(
+            ApiError::unprocessable("Validation Failed").with_error(FieldError {
+                resource: "PullRequest".to_owned(),
+                field: "state".to_owned(),
+                code: "custom".to_owned(),
+                message: Some(
+                    "state cannot be changed. The pull request cannot be reopened.".to_owned(),
+                ),
+                value: None,
+            }),
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
@@ -464,6 +484,7 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         issue.last_edited_at = Some(now);
     }
     let reopened_or_closed = state.filter(|s| *s != old.state);
+    refuse_merged_reopen(&old, reopened_or_closed)?;
     apply_state(&mut issue, reopened_or_closed, reason, who.account.id, now);
     let (added_labels, removed_labels) = match names.filter(|_| pushes) {
         Some(names) => {

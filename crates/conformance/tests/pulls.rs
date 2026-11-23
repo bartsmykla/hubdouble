@@ -389,6 +389,15 @@ async fn rest_merge_validates_options_and_preserves_history() {
     assert_eq!(pull["merged_at"], json!(server.clock.now()));
     assert_eq!(pull["merge_commit_sha"], merged["sha"]);
     assert_eq!(pull["merged_by"]["login"], "alice");
+    let reopen = client
+        .call_json(Method::PATCH, NUM, &json!({"state": "open"}))
+        .await;
+    assert_eq!(reopen.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let error = &reopen.json()["errors"][0];
+    assert_eq!(
+        (&error["resource"], &error["field"], &error["code"]),
+        (&json!("PullRequest"), &json!("state"), &json!("custom"))
+    );
     let graph = Graphql::new(client.clone())
         .query(
             "query($id:ID!) {node(id:$id) {... on PullRequest {state mergedAt mergeCommit {oid}}}}",

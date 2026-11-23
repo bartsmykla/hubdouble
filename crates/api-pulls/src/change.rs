@@ -373,6 +373,19 @@ fn edit(
             .repo_id
             .ok_or_else(|| validation("head", "invalid"))?;
         let name = retarget.as_deref().unwrap_or(&p.base.ref_name);
+        if p.merged_at.is_some() && issue.state != target {
+            return Err(
+                ApiError::unprocessable("Validation Failed").with_error(FieldError {
+                    resource: "PullRequest".into(),
+                    field: "state".into(),
+                    code: "custom".into(),
+                    message: Some(
+                        "state cannot be changed. The pull request cannot be reopened.".into(),
+                    ),
+                    value: None,
+                }),
+            );
+        }
         if p.merged_at.is_some() || (head_repo == issue.repo_id && p.head.ref_name == name) {
             return Err(validation("state", "invalid"));
         }
