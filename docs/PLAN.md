@@ -535,6 +535,23 @@ Measured by `mise run bench` on one CPU, gated in CI against `main` with a 20 % 
 
 Measured on the release profile (`lto = "fat"`, `codegen-units = 1`, `panic = "unwind"`, and the server wraps each handler call in `catch_unwind`, so a panicking handler rolls back and answers `500` without dropping the connection or ending the process). If parsing GitHub's GraphQL schema at start breaks the start target, `xtask gen` precomputes what the executor needs at build time.
 
+The targets hold on the reference runner. A GitHub `ubuntu-latest` runner is not one machine. Ten runners measured the same code in runs 45162472641, 45176261035 and 45188758569, and the raw readings were:
+
+| CPU of the runner | Runners | REST `GET` p50 | Webhook enqueue | Mixed load | Start, client seed | JSON calibration |
+| --- | --- | --- | --- | --- | --- | --- |
+| Intel Xeon 6975P-C | 1 | 35 µs | 11.6 µs | 8 461 req/s | 137 ms | 54.8 µs |
+| AMD EPYC 9V74 | 4 | 85 to 112 µs | 20.2 to 26.1 µs | 5 454 to 7 433 req/s | 170 to 224 ms | 60.4 to 77.5 µs |
+| Intel Xeon Platinum 8573C | 4 | 78 to 92 µs | 20.2 to 20.8 µs | 5 705 to 6 058 req/s | 188 to 205 ms | 72.2 to 73.2 µs |
+| AMD EPYC 7763 | 1 | 139 µs | 28.6 µs | 5 571 req/s | 219 ms | 76.8 µs |
+
+The same row was up to 4 times slower on one runner than on another, and the runner can change speed during a job: a criterion bench read 79 µs and then 99 µs on the same code in run 45162472641, and 50 µs and 97 µs on two other runners. A raw reading on a slow runner says more about the runner than about the code.
+
+CI judges the targets on the reference runner, the fastest runner in the evidence, the Xeon 6975P-C above. Each run of the targets bench measures a calibration row that uses no hubdouble code, the time to encode and decode a fixed 13 KB JSON document with `serde_json`, before and after the other rows, and keeps the faster of the two. Its factor is that time over 54.8 µs, the time on the reference runner. The gate divides REST `GET` p50 and p99, webhook enqueue and both start times by the factor, multiplies the mixed load by it, and judges the target on the result. The GraphQL document rows, sizes, memory, connections and delivery counts take no factor. A runner faster than the reference has a factor under 1, which makes the check stricter. `mise run bench:targets` on a developer machine judges the raw values.
+
+A scaled verdict is never looser than the raw reading on the reference runner. On each of the ten runners, each scaled row divided by its raw value on the reference runner was 1.00 or more: the JSON factor of a runner, 1.10 to 1.41, was never larger than the slowdown of a scaled row on the same runner, which was 1.1 to 4.0. A regression adds work to the request or the event it slows, and that work runs on the same CPU as the rest of the row, so on these runners it slows down by at least the factor too. So a head that misses a target on the reference runner also misses it when scaled on a slower runner. The GraphQL documents take no factor because they do not follow the calibration: on the AMD runners `createCommit` was faster than on the reference runner, and scaling it would have judged it 24 % looser. The factor is the faster of two calibrations, so a slow moment during one of them cannot make it larger. The relative gate takes no factor at all. On the evidence, a scaled verdict misses only on the slowest runner class: the EPYC 7763 scaled webhook enqueue to 20.4 µs, a miss that comes from the conservative factor, not from the code.
+
+The gate is robust to a runner that changes speed during the job. CI builds the base and the head once, then runs the targets bench five times for each, in the order base, head, head, base, base, head, head, base, base, head, each on its own checkout. Round n of the base and round n of the head run next to each other, so a change of speed between rounds reaches both. A row regresses when the median of its five paired changes is over 20 %. Every row, the write documents and the container starts included, is a median of five rounds on both sides, so one slow sample cannot decide it. The section 9 verdict is the median of the five head rounds, each scaled by the factor of its own round. The criterion benches take the same design: each bench binary of the base and the head runs five times in the same order, with a 1 s warm up and 1 s of measurement, and a criterion row regresses when the median of its five paired changes of the median time is over 20 %.
+
 ## 10. Risks
 
 | Risk | Answer |
