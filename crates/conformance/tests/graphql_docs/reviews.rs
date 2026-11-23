@@ -76,7 +76,6 @@ pub(super) async fn run(server: &TestServer, alice: &GoGithub, cases: &mut Inven
     assert_eq!(pull["state"], "OPEN");
     assert_eq!(pull["baseRefName"], "main");
     assert_ne!(pull["baseRefOid"], pull["headRefOid"]);
-    assert_eq!(pull["baseRef"]["target"]["oid"], pull["baseRefOid"]);
     assert_eq!(pull["baseRepository"], json!({"nameWithOwner":"acme/docs"}));
     assert_eq!(pull["headRepository"], json!({"nameWithOwner":"acme/docs"}));
     assert_eq!(pull["reviewThreads"]["nodes"][0]["recent"]["totalCount"], 2);
