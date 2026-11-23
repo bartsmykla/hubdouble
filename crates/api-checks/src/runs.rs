@@ -141,6 +141,24 @@ fn validate(input: &RunInput, creating: bool) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn app_settable(input: &RunInput) -> Result<(), ApiError> {
+    if input
+        .status
+        .as_deref()
+        .is_some_and(|s| !matches!(s, "queued" | "in_progress" | "completed"))
+    {
+        return Err(invalid("status"));
+    }
+    if input
+        .conclusion
+        .as_deref()
+        .is_some_and(|c| matches!(c, "stale" | "startup_failure"))
+    {
+        return Err(invalid("conclusion"));
+    }
+    Ok(())
+}
+
 fn apply(run: &mut CheckRun, input: RunInput, now: Timestamp) -> Result<(), ApiError> {
     if let Some(name) = input.name {
         run.name = name;
@@ -271,6 +289,7 @@ fn rest_view<'c>(ctx: &'c Ctx<'_>) -> Result<View<'c>, ApiError> {
 pub fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let (app, bot) = app_actor(ctx.actor())?;
     let input: RunInput = ctx.body()?;
+    app_settable(&input)?;
     if let Some(head) = &input.head_sha
         && head.parse::<ObjectId>().is_err()
     {
@@ -292,6 +311,7 @@ pub fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let run = find(ctx)?;
     let sender = modifier(ctx.actor(), &run)?;
     let input: RunInput = ctx.body()?;
+    app_settable(&input)?;
     validate(&input, false)?;
     let now = ctx.now();
     let mut changed = (*run).clone();

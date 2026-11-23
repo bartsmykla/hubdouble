@@ -289,6 +289,50 @@ async fn check_writes_refuse_what_github_refuses() {
 }
 
 #[tokio::test]
+async fn an_app_cannot_set_the_states_only_github_sets() {
+    // Given an App's in-progress run, and the docs rule that only GitHub Actions sets waiting, requested and pending, only GitHub sets stale, and the write enums leave out startup_failure
+    let server = start(vec![]).await;
+    let client = app_client(&server);
+    let head = sha(&server, "main");
+    let created = checked(
+        &client
+            .post(
+                RUNS,
+                &json!({"name": "x", "head_sha": head, "status": "in_progress"}),
+            )
+            .await,
+        201,
+        "checks/create",
+    );
+    let run = format!("{RUNS}/{}", created["id"]);
+    let reserved = [
+        ("status", "waiting"),
+        ("status", "requested"),
+        ("status", "pending"),
+        ("conclusion", "stale"),
+        ("conclusion", "startup_failure"),
+    ];
+    for (field, value) in reserved {
+        // When the App creates and updates a run with the state
+        let create = client
+            .post(RUNS, &json!({"name": "x", "head_sha": head, field: value}))
+            .await;
+        let update = client
+            .call_json(Method::PATCH, &run, &json!({field: value}))
+            .await;
+        // Then both writes answer 422 for the field and the run keeps its state
+        for answer in [create, update] {
+            assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{value}");
+            assert_eq!(answer.json()["errors"][0]["field"], field, "{value}");
+            assert_eq!(answer.json()["errors"][0]["code"], "invalid", "{value}");
+        }
+    }
+    let read = checked(&client.get(&run).await, 200, "checks/get");
+    assert_eq!(read["status"], "in_progress");
+    assert_eq!(read["conclusion"], Value::Null);
+}
+
+#[tokio::test]
 async fn check_runs_for_ref_honour_the_client_listing_options() {
     // Given runs from two Apps on main, seeded through the check_run kind
     let run = |app: &str, name: &str, state: Value| {
