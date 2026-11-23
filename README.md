@@ -1,6 +1,6 @@
 # hubdouble
 
-hubdouble is a local GitHub API double for end-to-end tests of GitHub Apps. It serves the REST and GraphQL operations that client uses. It also provides App tokens, OAuth, webhooks, and Actions workflow runs and OpenID Connect (OIDC) tokens. It keeps state in memory.
+hubdouble is a local GitHub API double for end-to-end tests of GitHub Apps. It serves the REST and GraphQL operations that its first client uses. It also provides App tokens, OAuth, webhooks, and Actions workflow runs and OpenID Connect (OIDC) tokens. It keeps state in memory.
 
 ## Docker quick start
 
@@ -41,6 +41,7 @@ The task uses a separate kubeconfig and the `kind-hubdouble-smoke` context. If t
 | `hubdouble coverage` | Report the number and share of registered REST operations by category. |
 | `hubdouble coverage --inventory docs/inventory/rest-routes.txt` | Check the REST inventory and its GraphQL endpoint. Return a nonzero exit code if a route is missing. |
 | `mise run check` | Check formatting, Clippy, dependency policy, tests, and doc tests. |
+| `mise run inventory -- --client <path> [--names <file>]` | Write `docs/inventory/` from the client checkout at `<path>`. The optional names file holds `from==>to` lines. The task replaces each literal `from` with `to`, in file order, in every generated text before it writes or compares. Use `mise run inventory:check` with the same arguments to fail on a difference. |
 
 Run the `hubdouble` commands from your PATH or use `target/release/hubdouble` from the repository root.
 
