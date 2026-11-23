@@ -12,9 +12,14 @@ use serde_json::{Map, Value};
 use crate::cursor::{self, Keyed};
 use crate::events::{self, What};
 use crate::shared::{
-    Who, changed_from, created, emit_issue, full_name, invalid, issue_view, label_view,
-    payload_urls, since, to_value, user, who,
+    Who, changed_from, created, emit_issue, full_name, invalid, invalid_value, issue_view,
+    label_view, payload_urls, since, to_value, user, who,
 };
+
+const LIST_DOCS: &str = "https://docs.github.com/v3/issues/#list-issues";
+const REPOSITORY_ISSUES_DOCS: &str =
+    "https://docs.github.com/rest/issues/issues#list-repository-issues";
+const DEFAULT_TYPES: [&str; 3] = ["Task", "Bug", "Feature"];
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -185,15 +190,42 @@ fn view_reply(
 pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?.clone();
     let q = ctx.query();
+    let refuse =
+        |field: &str, value: &str| invalid_value("Issue", field, value).with_docs(LIST_DOCS);
     let state = match q.get("state").unwrap_or("open") {
         "open" => Some(IssueState::Open),
         "closed" => Some(IssueState::Closed),
         "all" => None,
-        _ => return Err(invalid("Issue", "state", "invalid")),
+        other => return Err(refuse("state", other)),
     };
-    let since = since(ctx, "Issue")?;
     let tx = ctx.tx();
     let accounts = tx.table::<Accounts>();
+    let any_milestone = match q.get("milestone") {
+        None | Some("none") => false,
+        Some("*") => true,
+        Some(other) => return Err(refuse("milestone", other)),
+    };
+    let assignee = q.get("assignee");
+    let assignee_id = match assignee {
+        None | Some("none" | "*") => None,
+        Some(login) => Some(
+            accounts
+                .by_login(login)
+                .ok_or_else(|| refuse("assignee", login))?
+                .id,
+        ),
+    };
+    let any_type = match q.get("type") {
+        None | Some("none") => false,
+        Some(t) if t == "*" || DEFAULT_TYPES.iter().any(|d| d.eq_ignore_ascii_case(t)) => true,
+        Some(other) => return Err(refuse("type", other)),
+    };
+    let since = match q.get("since") {
+        Some("") => {
+            return Err(ApiError::unprocessable("Invalid datetime for since").with_docs(LIST_DOCS));
+        }
+        _ => since(ctx, REPOSITORY_ISSUES_DOCS)?,
+    };
     let mut wanted_labels = Vec::new();
     let mut unknown = false;
     for name in q
@@ -211,11 +243,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let creator = q
         .get("creator")
         .map(|login| accounts.by_login(login).map(|a| a.id));
-    let assignee = q.get("assignee");
-    let assignee_id = assignee
-        .filter(|a| !matches!(*a, "none" | "*"))
-        .map(|login| accounts.by_login(login).map(|a| a.id));
-    let issues: Vec<Arc<Issue>> = if unknown {
+    let issues: Vec<Arc<Issue>> = if unknown || any_milestone || any_type {
         Vec::new()
     } else {
         tx.table::<Issues>()
@@ -227,7 +255,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             .filter(|i| match (assignee, assignee_id) {
                 (Some("none"), _) => i.assignee_ids.is_empty(),
                 (Some("*"), _) => !i.assignee_ids.is_empty(),
-                (_, Some(id)) => id.is_some_and(|id| i.assignee_ids.contains(&id)),
+                (_, Some(id)) => i.assignee_ids.contains(&id),
                 _ => true,
             })
             .cloned()

@@ -481,6 +481,10 @@ async fn deep_pages_answer_the_refusals_of_live_github() {
             format!("{repo}/pulls/{pull}/files?per_page=100&page=92233720368547759"),
             overflow,
         ),
+        (
+            format!("{repo}/activity?per_page=100&page=92233720368547759"),
+            overflow,
+        ),
     ] {
         // Then GitHub refuses the deeper page with the list's own answer
         refused(&alice.get(&path).await, docs);

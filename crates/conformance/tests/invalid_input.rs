@@ -176,3 +176,140 @@ async fn a_repeated_body_key_takes_its_last_value_on_every_route() {
         assert_eq!(answer.json()[field], value, "{method} {path}");
     }
 }
+
+#[tokio::test]
+async fn the_issue_list_refuses_a_filter_value_with_the_value_and_the_list_documentation() {
+    // Given
+    let (_server, client) = start().await;
+    let list_docs = "https://docs.github.com/v3/issues/#list-issues";
+
+    // When the issue list gets a value that no issue filter knows, as live cli/cli did
+    for (query, field, value) in [
+        ("state=bogus", "state", "bogus"),
+        ("milestone=bogus", "milestone", "bogus"),
+        ("assignee=nobody-here", "assignee", "nobody-here"),
+        ("assignee=", "assignee", ""),
+        ("type=bogus", "type", "bogus"),
+        ("state=bogus&type=bogus", "state", "bogus"),
+    ] {
+        let answer = client.get(&format!("{REPO}/issues?{query}")).await;
+
+        // Then GitHub names the field and echoes its value
+        let body = answer.json();
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
+        assert_eq!(body["documentation_url"], list_docs, "{query}");
+        assert_eq!(body["errors"][0]["resource"], "Issue", "{query}");
+        assert_eq!(body["errors"][0]["field"], field, "{query}");
+        assert_eq!(body["errors"][0]["code"], "invalid", "{query}");
+        assert_eq!(body["errors"][0]["value"], value, "{query}");
+    }
+    for query in [
+        "milestone=*",
+        "assignee=*",
+        "assignee=none",
+        "type=bug",
+        "type=*",
+    ] {
+        let answer = client.get(&format!("{REPO}/issues?{query}")).await;
+        assert_eq!(answer.status, StatusCode::OK, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn a_list_refuses_a_since_that_is_not_iso_8601_with_its_operation_documentation() {
+    // Given an issue with a comment and a pull request
+    let (_server, client) = start().await;
+    let issue =
+        created(&client, &format!("{REPO}/issues"), &json!({"title": "Bug"})).await["number"]
+            .as_u64()
+            .unwrap();
+    created(
+        &client,
+        &format!("{REPO}/issues/{issue}/comments"),
+        &json!({"body": "first"}),
+    )
+    .await;
+    let number = pull(&client).await;
+    let docs = "https://docs.github.com/rest";
+
+    // When each list gets a since that is not a timestamp, as live cli/cli did
+    for (path, operation) in [
+        (
+            format!("{REPO}/issues?since=yesterday"),
+            format!("{docs}/issues/issues#list-repository-issues"),
+        ),
+        (
+            format!("{REPO}/issues?since="),
+            "https://docs.github.com/v3/issues/#list-issues".to_owned(),
+        ),
+        (
+            format!("{REPO}/issues/{issue}/comments?since=yesterday"),
+            format!("{docs}/issues/comments#list-issue-comments"),
+        ),
+        (
+            format!("{REPO}/issues/comments?since=yesterday"),
+            format!("{docs}/issues/comments#list-issue-comments-for-a-repository"),
+        ),
+        (
+            format!("{REPO}/pulls/comments?since=yesterday"),
+            format!("{docs}/pulls/comments#list-review-comments-in-a-repository"),
+        ),
+        (
+            format!("{REPO}/pulls/{number}/comments?since=yesterday"),
+            format!("{docs}/pulls/comments#list-review-comments-on-a-pull-request"),
+        ),
+    ] {
+        let answer = client.get(&path).await;
+
+        // Then GitHub answers a message with the operation documentation and no errors
+        let body = answer.json();
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+        assert_eq!(body["documentation_url"], operation, "{path}");
+        assert!(body.get("errors").is_none(), "{path} {body}");
+    }
+
+    // When the lists get a date, an empty since or an unknown reaction, as live cli/cli did
+    for path in [
+        format!("{REPO}/issues?since=2020-01-01"),
+        format!("{REPO}/issues?since=2020-01-01T00:00"),
+        format!("{REPO}/issues/{issue}/comments?since="),
+        format!("{REPO}/issues/comments?since=20200101"),
+        format!("{REPO}/pulls/comments?since="),
+    ] {
+        let answer = client.get(&path).await;
+
+        // Then GitHub serves the list
+        assert_eq!(answer.status, StatusCode::OK, "{path}");
+    }
+    let comment = client.get(&format!("{REPO}/issues/comments")).await.json()[0]["id"].clone();
+    created(
+        &client,
+        &format!("{REPO}/issues/comments/{comment}/reactions"),
+        &json!({"content": "heart"}),
+    )
+    .await;
+    let reactions = client
+        .get(&format!(
+            "{REPO}/issues/comments/{comment}/reactions?content=bogus"
+        ))
+        .await;
+    assert_eq!(reactions.status, StatusCode::OK);
+    assert_eq!(reactions.json().as_array().map(Vec::len), Some(1));
+
+    // When the repository's comments are listed by an unknown sort, newest first
+    let newer = created(
+        &client,
+        &format!("{REPO}/issues/{issue}/comments"),
+        &json!({"body": "second"}),
+    )
+    .await["id"]
+        .clone();
+    let ordered = client
+        .get(&format!("{REPO}/issues/comments?sort=bogus&direction=desc"))
+        .await;
+
+    // Then GitHub sorts them by creation, newest first, as live cli/cli did
+    assert_eq!(ordered.status, StatusCode::OK);
+    assert_eq!(ordered.json()[0]["id"], newer);
+    assert_eq!(ordered.json()[1]["id"], comment);
+}

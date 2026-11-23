@@ -152,22 +152,12 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?;
     let tx = ctx.tx();
     let query = ctx.query();
-    let descending = match query.get("direction") {
-        None | Some("desc") => true,
-        Some("asc") => false,
-        Some(_) => return Err(invalid("direction")),
-    };
-    let kind = match query.get("activity_type") {
-        Some(k) if !KINDS.contains(&k) => return Err(invalid("activity_type")),
-        k => k,
-    };
-    let since = match query.get("time_period") {
-        Some(p) => Some(
-            ctx.now()
-                .plus_seconds(-period_seconds(p).ok_or_else(|| invalid("time_period"))?),
-        ),
-        None => None,
-    };
+    let descending = query.get("direction") != Some("asc");
+    let kind = query.get("activity_type").filter(|k| KINDS.contains(k));
+    let since = query
+        .get("time_period")
+        .and_then(period_seconds)
+        .map(|seconds| ctx.now().plus_seconds(-seconds));
     let ref_name = query.get("ref").map(|r| {
         if r.starts_with("refs/") {
             r.to_owned()

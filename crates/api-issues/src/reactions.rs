@@ -19,7 +19,10 @@ fn content(text: Option<&str>) -> Result<Option<ReactionContent>, ApiError> {
 
 pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?.clone();
-    let wanted = content(ctx.query().get("content"))?;
+    let wanted = ctx
+        .query()
+        .get("content")
+        .and_then(ReactionContent::from_rest);
     let tx = ctx.tx();
     let (comment, _) = comment_and_issue(tx, &repo, ctx.param_i64("comment_id")?)?;
     let reactions: Vec<&Arc<Reaction>> = tx

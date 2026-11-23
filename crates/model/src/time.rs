@@ -79,6 +79,94 @@ impl Timestamp {
             days * 86_400 + hour * 3600 + minute * 60 + second - offset,
         ))
     }
+
+    /// Parses a time in a query, such as `since`, as GitHub reads one: an ISO 8601 date
+    /// (`2020-01-01`, `2020-1-1` or `20200101`), optionally followed by `T` or a space and
+    /// `HH:MM`, `HH:MM:SS` or `HH:MM:SS.fff`, and by `Z` or a `+HH:MM`, `+HHMM` or `+HH`
+    /// offset. A time without an offset is UTC, and a date without a time is its midnight.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimestampError`] when the text is not such a time.
+    pub fn parse_query(text: &str) -> Result<Timestamp, TimestampError> {
+        let text = text.trim();
+        let split = text.find(['T', 't', ' ']).unwrap_or(text.len());
+        let (date, rest) = text.split_at(split);
+        let (year, month, day) = query_date(date)?;
+        let (seconds, offset) = match rest.get(1..) {
+            None => (0, 0),
+            Some(time) => query_time(time)?,
+        };
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return Err(TimestampError);
+        }
+        Ok(Timestamp(
+            days_from_civil(year, month, day) * 86_400 + seconds - offset,
+        ))
+    }
+}
+
+fn digits(text: &str, lengths: std::ops::RangeInclusive<usize>) -> Result<i64, TimestampError> {
+    if !lengths.contains(&text.len()) || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(TimestampError);
+    }
+    text.parse().map_err(|_| TimestampError)
+}
+
+fn query_date(date: &str) -> Result<(i64, i64, i64), TimestampError> {
+    let mut parts = date.split('-');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(y), Some(m), Some(d), None) => {
+            Ok((digits(y, 4..=4)?, digits(m, 1..=2)?, digits(d, 1..=2)?))
+        }
+        (Some(compact), None, None, None) if compact.len() == 8 => Ok((
+            digits(&compact[..4], 4..=4)?,
+            digits(&compact[4..6], 2..=2)?,
+            digits(&compact[6..], 2..=2)?,
+        )),
+        _ => Err(TimestampError),
+    }
+}
+
+fn query_time(time: &str) -> Result<(i64, i64), TimestampError> {
+    let zone_at = time.find(['Z', 'z', '+', '-']).unwrap_or(time.len());
+    let (clock, zone) = time.split_at(zone_at);
+    let clock = clock.split_once('.').map_or(clock, |(whole, frac)| {
+        if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+            ""
+        } else {
+            whole
+        }
+    });
+    let mut parts = clock.split(':');
+    let (hour, minute, second) = match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(h), Some(m), s, None) => (
+            digits(h, 2..=2)?,
+            digits(m, 2..=2)?,
+            s.map_or(Ok(0), |s| digits(s, 2..=2))?,
+        ),
+        _ => return Err(TimestampError),
+    };
+    if hour > 23 || minute > 59 || second > 60 {
+        return Err(TimestampError);
+    }
+    let offset = match zone.as_bytes().first() {
+        None => 0,
+        Some(b'Z' | b'z') if zone.len() == 1 => 0,
+        Some(&sign @ (b'+' | b'-')) => {
+            let body = &zone[1..];
+            let (h, m) = match body.len() {
+                2 => (body, "00"),
+                4 => body.split_at(2),
+                5 if &body[2..3] == ":" => (&body[..2], &body[3..]),
+                _ => return Err(TimestampError),
+            };
+            let seconds = digits(h, 2..=2)? * 3600 + digits(m, 2..=2)? * 60;
+            if sign == b'-' { -seconds } else { seconds }
+        }
+        Some(_) => return Err(TimestampError),
+    };
+    Ok((hour * 3600 + minute * 60 + second, offset))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -202,6 +290,39 @@ mod tests {
         );
         assert!(Timestamp::parse("2026-13-01T00:00:00Z").is_err());
         assert!(Timestamp::parse("yesterday").is_err());
+    }
+
+    #[test]
+    fn query_times_read_the_iso_8601_forms_that_live_github_accepts() {
+        // Given the since values live GET /repos/cli/cli/issues accepted and refused, 2026-11-23
+        let midnight = Timestamp(1_577_836_800);
+        let accepted = [
+            ("2020-01-01", midnight),
+            ("2020-1-1", midnight),
+            ("20200101", midnight),
+            (" 2020-01-01", midnight),
+            ("2020-01-01T00:00", midnight),
+            ("2020-01-01 00:00:00", midnight),
+            ("2020-01-01T00:00:00", midnight),
+            ("2020-01-01T00:00:00.123Z", midnight),
+            ("2020-01-01T02:00:00+02:00", midnight),
+            ("2020-01-01T02:00:00+0200", midnight),
+            ("2019-12-31T22:00:00-02", midnight),
+        ];
+        for (text, expected) in accepted {
+            // When / Then
+            assert_eq!(Timestamp::parse_query(text), Ok(expected), "{text}");
+        }
+        for text in [
+            "",
+            "bogus",
+            "2020",
+            "2020-01",
+            "2020-01-01T25:00:00Z",
+            "2020-13-01",
+        ] {
+            assert_eq!(Timestamp::parse_query(text), Err(TimestampError), "{text}");
+        }
     }
 
     #[test]

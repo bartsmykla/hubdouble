@@ -223,17 +223,20 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     } else {
         table.in_repo(repo.id).collect()
     };
+    let docs = if pull.is_some() {
+        "https://docs.github.com/rest/pulls/comments#list-review-comments-on-a-pull-request"
+    } else {
+        "https://docs.github.com/rest/pulls/comments#list-review-comments-in-a-repository"
+    };
     let since = ctx
         .query()
         .get("since")
-        .map(Timestamp::parse)
+        .filter(|s| !s.is_empty())
+        .map(Timestamp::parse_query)
         .transpose()
         .map_err(|_| {
-            invalid(
-                "PullRequestReviewComment",
-                "since",
-                "Expected an RFC 3339 timestamp",
-            )
+            ApiError::unprocessable("Time values must be in ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ")
+                .with_docs(docs)
         })?;
     let mut comments: Vec<_> = comments
         .into_iter()
@@ -426,7 +429,10 @@ fn content(text: &str) -> Result<ReactionContent, ApiError> {
 
 fn reactions(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let comment = target(ctx)?;
-    let content = ctx.query().get("content").map(content).transpose()?;
+    let content = ctx
+        .query()
+        .get("content")
+        .and_then(ReactionContent::from_rest);
     let rows: Vec<_> = ctx
         .tx()
         .table::<Reactions>()

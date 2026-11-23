@@ -48,6 +48,14 @@ pub(crate) fn invalid(resource: &str, field: &str, code: &str) -> ApiError {
     })
 }
 
+pub(crate) fn invalid_value(resource: &str, field: &str, value: &str) -> ApiError {
+    let mut e = invalid(resource, field, "invalid");
+    if let Some(error) = e.errors.first_mut() {
+        error.value = Some(value.into());
+    }
+    e
+}
+
 pub(crate) fn created(body: &impl Serialize, location: &str) -> Result<Reply, ApiError> {
     Reply::json(body)?
         .status(StatusCode::CREATED)
@@ -58,10 +66,18 @@ pub(crate) fn to_value(v: &impl Serialize) -> Result<Value, ApiError> {
     serde_json::to_value(v).map_err(|e| ApiError::internal(e.to_string()))
 }
 
-pub(crate) fn since(ctx: &Ctx<'_>, resource: &str) -> Result<Option<Timestamp>, ApiError> {
+pub(crate) fn since(ctx: &Ctx<'_>, docs: &str) -> Result<Option<Timestamp>, ApiError> {
     ctx.query()
         .get("since")
-        .map(|s| Timestamp::parse(s).map_err(|_| invalid(resource, "since", "invalid")))
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            Timestamp::parse_query(s).map_err(|_| {
+                ApiError::unprocessable(
+                    "The since parameter needs to be in ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ",
+                )
+                .with_docs(docs)
+            })
+        })
         .transpose()
 }
 

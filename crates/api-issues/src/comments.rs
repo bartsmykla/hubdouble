@@ -70,7 +70,10 @@ fn may_change(who: &Who, comment: &IssueComment) -> Result<(), ApiError> {
 pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?.clone();
     let number = ctx.param_i64("issue_number")?;
-    let since = since(ctx, "IssueComment")?;
+    let since = since(
+        ctx,
+        "https://docs.github.com/rest/issues/comments#list-issue-comments",
+    )?;
     let tx = ctx.tx();
     let issue = tx
         .table::<Issues>()
@@ -91,7 +94,10 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 
 pub(crate) fn list_for_repo(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?.clone();
-    let since = since(ctx, "IssueComment")?;
+    let since = since(
+        ctx,
+        "https://docs.github.com/rest/issues/comments#list-issue-comments-for-a-repository",
+    )?;
     let q = ctx.query();
     let tx = ctx.tx();
     let mut comments: Vec<&Arc<IssueComment>> = tx
@@ -99,15 +105,13 @@ pub(crate) fn list_for_repo(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .in_repo(repo.id)
         .filter(|c| since.is_none_or(|s| c.updated_at >= s))
         .collect();
-    if let Some(sort) = q.get("sort") {
-        match sort {
-            "created" => comments.sort_by_key(|c| (c.created_at, c.id)),
-            "updated" => comments.sort_by_key(|c| (c.updated_at, c.id)),
-            _ => return Err(invalid("IssueComment", "sort", "invalid")),
-        }
-        if q.get("direction") == Some("desc") {
-            comments.reverse();
-        }
+    if q.get("sort") == Some("updated") {
+        comments.sort_by_key(|c| (c.updated_at, c.id));
+    } else {
+        comments.sort_by_key(|c| (c.created_at, c.id));
+    }
+    if q.get("direction") == Some("desc") {
+        comments.reverse();
     }
     let issues = tx.table::<Issues>();
     let urls = ctx.urls();

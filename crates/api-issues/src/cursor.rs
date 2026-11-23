@@ -8,7 +8,7 @@ use hubdouble_render::query_escape;
 use hubdouble_rest::{Ctx, Page, PageLimit, Reply};
 use serde::Serialize;
 
-use crate::shared::invalid;
+use crate::shared::invalid_value;
 
 const PREFIX: &[u8] = b"cursor:v2:";
 
@@ -90,11 +90,7 @@ pub(crate) fn page<T, R: Serialize>(
         q.get(field)
             .map(|c| {
                 decode(c).ok_or_else(|| {
-                    let mut e = invalid("Issue", field, "invalid");
-                    if let Some(error) = e.errors.first_mut() {
-                        error.value = Some(c.into());
-                    }
-                    e
+                    invalid_value("Issue", field, c).with_docs(PAGES.documentation_url)
                 })
             })
             .transpose()

@@ -684,15 +684,14 @@ async fn activity_records_each_branch_change_and_pages_with_cursors() {
     let feature_only = alice(&server)
         .get("repos/acme/public/activity?ref=refs/heads/feature&activity_type=force_push")
         .await;
-    let bad_direction = alice(&server)
-        .get("repos/acme/public/activity?direction=up")
-        .await;
-    let bad_type = alice(&server)
-        .get("repos/acme/public/activity?activity_type=merge")
-        .await;
-    let bad_period = alice(&server)
-        .get("repos/acme/public/activity?time_period=decade")
-        .await;
+    let mut unknown_filters = Vec::new();
+    for filter in ["direction=up", "activity_type=merge", "time_period=decade"] {
+        unknown_filters.push(
+            alice(&server)
+                .get(&format!("repos/acme/public/activity?per_page=100&{filter}"))
+                .await,
+        );
+    }
     // Then
     let types = activity_types(&all);
     valid("repos/list-activities", &all);
@@ -716,9 +715,10 @@ async fn activity_records_each_branch_change_and_pages_with_cursors() {
     assert_eq!(forced[0]["before"], json!(feature.to_string()));
     assert_eq!(forced[0]["after"], json!(main.to_string()));
     assert_eq!(forced[0]["actor"]["login"], json!("alice"));
-    assert_eq!(bad_direction.status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(bad_type.status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(bad_period.status, StatusCode::UNPROCESSABLE_ENTITY);
+    for answer in &unknown_filters {
+        assert_eq!(answer.status, StatusCode::OK);
+        assert_eq!(activity_types(answer), types);
+    }
 }
 
 #[tokio::test]
