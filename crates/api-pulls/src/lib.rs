@@ -10,9 +10,10 @@ mod reopen;
 mod state;
 mod timeline;
 
+pub use change::kept;
 pub use reopen::{reopen, reopened};
 pub use state::sync_refs;
-pub use timeline::{StateEvent, StateEvents};
+pub use timeline::{StateEvent, StateEvents, StateKind};
 
 const fn repo_requirement(grants: &'static [Grant]) -> Requirement {
     Requirement {

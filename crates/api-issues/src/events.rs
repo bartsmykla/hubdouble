@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use hubdouble_api_pulls::StateEvents;
+use hubdouble_api_pulls::{StateEvent, StateEvents, StateKind};
 use hubdouble_git::ObjectId;
 use hubdouble_model::{ApiError, Issue, IssueState, StateReason, Timestamp, node_id};
 use hubdouble_rest::{Ctx, Reply};
@@ -20,6 +20,7 @@ pub(crate) enum What {
     Unassigned(i64),
     Renamed { from: String, to: String },
     Merged(Option<String>),
+    PullRef(&'static str),
 }
 
 impl What {
@@ -33,6 +34,7 @@ impl What {
             What::Unassigned(_) => "unassigned",
             What::Renamed { .. } => "renamed",
             What::Merged(_) => "merged",
+            What::PullRef(name) => name,
         }
     }
 
@@ -46,6 +48,7 @@ impl What {
             What::Unassigned(_) => "UAE",
             What::Renamed { .. } => "RTE",
             What::Merged(_) => "ME",
+            What::PullRef(_) => "",
         }
     }
 
@@ -152,6 +155,27 @@ fn synthesized(issue: &Issue, recorded: &[IssueEvent]) -> Vec<IssueEvent> {
     out
 }
 
+fn pull_event(e: &Arc<StateEvent>) -> IssueEvent {
+    IssueEvent {
+        id: e.id,
+        node_id: e.node_id.clone(),
+        repo_id: e.repo_id,
+        issue_id: e.issue_id,
+        actor_id: e.actor_id,
+        via_app: e.via_app,
+        what: match &e.kind {
+            StateKind::Reopened => What::Reopened,
+            StateKind::Closed => What::Closed(None),
+            StateKind::Renamed { from, to } => What::Renamed {
+                from: from.clone(),
+                to: to.clone(),
+            },
+            other => What::PullRef(other.name()),
+        },
+        created_at: e.created_at,
+    }
+}
+
 pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?.clone();
     let number = ctx.param_i64("issue_number")?;
@@ -165,24 +189,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .table::<IssueEvents>()
         .children(issue.id)
         .map(|e| IssueEvent::clone(e))
-        .chain(
-            tx.table::<StateEvents>()
-                .children(issue.id)
-                .map(|e| IssueEvent {
-                    id: e.id,
-                    node_id: e.node_id.clone(),
-                    repo_id: e.repo_id,
-                    issue_id: e.issue_id,
-                    actor_id: e.actor_id,
-                    via_app: e.via_app,
-                    what: if e.reopened {
-                        What::Reopened
-                    } else {
-                        What::Closed(None)
-                    },
-                    created_at: e.created_at,
-                }),
-        )
+        .chain(tx.table::<StateEvents>().children(issue.id).map(pull_event))
         .collect();
     events.sort_by_key(|e| (e.created_at, e.id));
     let extra = synthesized(&issue, &events);
@@ -246,7 +253,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
                 vec![("state_reason", Value::Null), ("intent", Value::Null)]
             }
             What::Reopened => vec![("state_reason", json!("reopened"))],
-            What::Merged(_) => vec![],
+            What::Merged(_) | What::PullRef(_) => vec![],
         };
         for (k, value) in extra {
             v[k] = value;

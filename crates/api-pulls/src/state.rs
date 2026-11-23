@@ -24,6 +24,10 @@ pub(crate) fn pull(issue: &Issue) -> Result<&Pull, ApiError> {
     issue.pull.as_ref().ok_or_else(ApiError::not_found)
 }
 
+pub(crate) fn pull_mut(issue: &mut Issue) -> Result<&mut Pull, ApiError> {
+    issue.pull.as_mut().ok_or_else(ApiError::not_found)
+}
+
 pub(crate) fn numbered(tx: &Tx, repo_id: i64, number: i64) -> Result<&Arc<Issue>, ApiError> {
     tx.table::<Issues>()
         .by_number(repo_id, number)

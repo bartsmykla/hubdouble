@@ -443,6 +443,43 @@ pub(crate) fn apply_state(
     }
 }
 
+type Ordered = (Map<String, Value>, Option<IssueState>, Option<ApiError>);
+
+#[expect(
+    clippy::option_option,
+    reason = "an absent body stays, a null body clears it"
+)]
+fn in_order(
+    tx: &Tx,
+    git: &Git,
+    issue: &mut Issue,
+    (title, body): (Option<String>, Option<Option<String>>),
+    state: Option<IssueState>,
+) -> Result<Ordered, ApiError> {
+    let mut changes = Map::new();
+    if let Some(b) = body.filter(|b| *b != issue.body) {
+        let from = std::mem::replace(&mut issue.body, b);
+        changes.insert("body".to_owned(), Value::from(from.unwrap_or_default()));
+    }
+    let mut to = state.filter(|s| *s != issue.state);
+    let mut refusal = None;
+    if to == Some(IssueState::Open) && issue.pull.is_some() {
+        match hubdouble_api_pulls::reopen(tx, git, issue) {
+            Ok(()) => {}
+            Err(refused) if refused.status == 422 => {
+                to = None;
+                refusal = Some(refused);
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    if let Some(t) = title.filter(|t| *t != issue.title && refusal.is_none()) {
+        let from = std::mem::replace(&mut issue.title, t);
+        changes.insert("title".to_owned(), Value::from(from));
+    }
+    Ok((changes, to, refusal))
+}
+
 pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let Edit {
         title,
@@ -464,24 +501,10 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     }
     let pushes = who.can(RepoRole::Write);
     let mut issue = Issue::clone(&old);
-    let mut changes = Map::new();
-    if let Some(t) = title.filter(|t| *t != old.title) {
-        changes.insert("title".to_owned(), Value::from(old.title.clone()));
-        issue.title = t;
-    }
-    if let Some(b) = body.filter(|b| *b != old.body) {
-        changes.insert(
-            "body".to_owned(),
-            old.body.clone().map_or(Value::Null, Value::from),
-        );
-        issue.body = b;
-    }
+    let (changes, reopened_or_closed, refusal) =
+        in_order(tx, git, &mut issue, (title, body), state)?;
     if !changes.is_empty() {
         issue.last_edited_at = Some(now);
-    }
-    let reopened_or_closed = state.filter(|s| *s != old.state);
-    if reopened_or_closed == Some(IssueState::Open) && issue.pull.is_some() {
-        hubdouble_api_pulls::reopen(tx, git, &mut issue)?;
     }
     apply_state(&mut issue, reopened_or_closed, reason, who.account.id, now);
     let (added_labels, removed_labels) = match names.filter(|_| pushes) {
@@ -506,7 +529,10 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         None => (Vec::new(), Vec::new()),
     };
     if issue == *old {
-        return view_reply(tx, &urls, &repo, &old);
+        return match refusal {
+            Some(refused) => hubdouble_api_pulls::kept(&refused),
+            None => view_reply(tx, &urls, &repo, &old),
+        };
     }
     issue.updated_at = now;
     let issue = Arc::new(issue);
@@ -539,7 +565,10 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     change.labels(tx, &issue, &removed_labels, false)?;
     change.assignees(tx, &issue, &added_assignees, true)?;
     change.assignees(tx, &issue, &removed_assignees, false)?;
-    view_reply(tx, &urls, &repo, &issue)
+    match refusal {
+        Some(refused) => hubdouble_api_pulls::kept(&refused),
+        None => view_reply(tx, &urls, &repo, &issue),
+    }
 }
 
 pub(crate) fn add_labels(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {

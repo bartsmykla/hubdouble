@@ -3,7 +3,8 @@ use hubdouble_model::{ApiError, FieldError, Issue, IssueState, Pull, PullRef};
 use hubdouble_store::{Tx, TxMut};
 use serde_json::json;
 
-use crate::{change, events, state, timeline};
+use crate::timeline::{self, StateKind};
+use crate::{change, events, state};
 
 /// Reopens a closed pull request the way GitHub does for `PATCH .../pulls/{n}`,
 /// `PATCH .../issues/{n}` and `reopenPullRequest` alike.
@@ -83,7 +84,7 @@ pub fn reopened(
     via_app: Option<i64>,
 ) -> Result<(), ApiError> {
     state::sync_refs(tx, git, issue)?;
-    timeline::record(tx, issue, (sender, via_app), true)?;
+    timeline::record(tx, issue, (sender, via_app), StateKind::Reopened)?;
     events::emit(tx, git, issue, sender, "reopened", json!({}))
 }
 

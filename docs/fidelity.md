@@ -30,7 +30,7 @@ hubdouble implements the GitHub operations in the [client inventory](inventory/r
 | Negated search qualifiers | A qualifier such as `-author:octocat` acts as a text term. It does not exclude matches. |
 | Search in comments | Text search checks titles and bodies. `in:comments` alone with a text term finds no matches. If you also specify `title` or `body`, the search uses those fields. |
 | Search order | `sort:created` and `sort:updated` support ascending and descending order. Sorts by comments, reactions, or interactions have no effect. The default order is creation time, newest first. |
-| Refused pull request edits | GitHub writes a `PATCH /repos/{owner}/{repo}/pulls/{pull_number}` in parts, and a refused reopen or base change keeps the parts written before it, such as the `body`. hubdouble writes nothing for a refused request. A refused reopen through GraphQL `reopenPullRequest` answers `Could not open the pull request.`, the only refusal text in public reports, for every reason. |
+| GraphQL reopen refusal | A refused reopen through GraphQL `reopenPullRequest` answers `Could not open the pull request.`, the only refusal text in public reports, for every reason. |
 | Branch deletion | GitHub closes the open pull requests whose head or base branch a push deletes. hubdouble leaves them open, with `mergeable` set to `null`. Close the pull request before you delete its branch. A closed pull request with a deleted branch cannot be reopened in either system. |
 | Pull request state order | `Issue.closedByPullRequestsReferences` accepts `orderByState`. The argument has no effect. The [GitHub schema](https://docs.github.com/en/graphql/reference/issues#issue) gives no sort direction, and the client omits the argument. |
 

@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use http::{Method, StatusCode};
 use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
-use hubdouble_testkit::fixture::{ALICE_ID, ALICE_TOKEN, PUBLIC_REPO_ID};
-use hubdouble_testkit::{GoGithub, Graphql, TestServer};
+use hubdouble_testkit::fixture::{ALICE_ID, ALICE_TOKEN, PUBLIC_REPO_ID, WEBHOOK_SECRET};
+use hubdouble_testkit::validate::webhook_payload;
+use hubdouble_testkit::{Delivery, GoGithub, Graphql, TestServer};
 use serde_json::{Value, json};
 
 const PULL: &str = "repos/acme/public/pulls/1";
@@ -107,6 +108,295 @@ async fn parents(client: &GoGithub, sha: &str) -> Vec<Value> {
     commit["parents"]
         .as_array()
         .map_or_default(|all| all.iter().map(|p| p["sha"].clone()).collect())
+}
+
+async fn deliveries(server: &TestServer) -> Vec<Delivery> {
+    let drained = server.admin(Method::POST, "hooks/drain", None).await;
+    assert_eq!(drained.status, StatusCode::NO_CONTENT);
+    server.receiver.received().await
+}
+
+fn pull_hooks(all: &[Delivery], number: i64) -> Vec<(String, Value)> {
+    all.iter()
+        .filter(|d| d.header("x-github-event") == "pull_request")
+        .map(|d| {
+            assert!(d.signed_with(WEBHOOK_SECRET));
+            let payload = d.json();
+            let action = payload["action"].as_str().unwrap_or_default().to_owned();
+            webhook_payload("pull_request", Some(&action), &payload)
+                .unwrap_or_else(|errors| panic!("pull_request.{action}: {errors:?}"));
+            (action, payload)
+        })
+        .filter(|(_, payload)| payload["number"] == number)
+        .collect()
+}
+
+async fn events(client: &GoGithub, number: i64) -> Vec<Value> {
+    let answer = client
+        .get(&format!("repos/acme/public/issues/{number}/events"))
+        .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.json());
+    answer.json().as_array().cloned().unwrap_or_default()
+}
+
+fn names(events: &[Value]) -> Vec<&str> {
+    events.iter().filter_map(|e| e["event"].as_str()).collect()
+}
+
+fn assert_refused(answer: &hubdouble_testkit::Answer, field: &str, code: &str) {
+    assert_eq!(
+        answer.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        answer.json()
+    );
+    let errors = answer.json()["errors"].clone();
+    assert_eq!(errors.as_array().map(Vec::len), Some(1), "{errors}");
+    let error = &errors[0];
+    assert_eq!(
+        (&error["resource"], &error["field"], &error["code"]),
+        (&json!("PullRequest"), &json!(field), &json!(code)),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_reopen_keeps_only_the_body_on_both_edit_endpoints() {
+    for path in [PULL, ISSUE] {
+        // Given a closed pull request while another one is open from the same head into the same base
+        let server = server(&[pull_request("feature", "main")]).await;
+        let client = alice(&server);
+        let closed = client
+            .call_json(Method::PATCH, PULL, &json!({"state": "closed"}))
+            .await;
+        assert_eq!(closed.status, StatusCode::OK);
+        let other = client
+            .call_json(
+                Method::POST,
+                "repos/acme/public/pulls",
+                &json!({"title": "again", "head": "feature", "base": "main"}),
+            )
+            .await;
+        assert_eq!(other.status, StatusCode::CREATED, "{}", other.json());
+        deliveries(&server).await;
+        // When a reopen is sent with a new title and a new body
+        let answer = client
+            .call_json(
+                Method::PATCH,
+                path,
+                &json!({"state": "open", "title": "New title", "body": "New body"}),
+            )
+            .await;
+        // Then the reopen is refused, and only the body is written
+        assert_refused(&answer, "state", "custom");
+        let pull = client.get(PULL).await.json();
+        assert_eq!(
+            (&pull["state"], &pull["title"], &pull["body"]),
+            (
+                &json!("closed"),
+                &json!("feature into main"),
+                &json!("New body")
+            ),
+            "{path}"
+        );
+        // And the kept body sends its edited webhook, with no rename or reopen
+        let all = deliveries(&server).await;
+        let hooks = pull_hooks(&all, 1);
+        let issue_hooks: Vec<_> = all
+            .iter()
+            .filter(|d| d.header("x-github-event") == "issues")
+            .map(|d| d.json()["changes"].clone())
+            .collect();
+        let changes: Vec<_> = hooks
+            .iter()
+            .map(|(action, payload)| (action.as_str(), payload["changes"].clone()))
+            .chain(
+                issue_hooks
+                    .iter()
+                    .map(|changes| ("edited", changes.clone())),
+            )
+            .collect();
+        assert_eq!(
+            changes,
+            [("edited", json!({"body": {"from": ""}}))],
+            "{path}"
+        );
+        assert!(
+            !names(&events(&client, 1).await).contains(&"renamed"),
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_blank_title_is_refused_before_anything_is_written() {
+    // Given an open pull request
+    let server = server(&[pull_request("feature", "main")]).await;
+    let client = alice(&server);
+    // When a blank title is sent with a new body and a close
+    let answer = client
+        .call_json(
+            Method::PATCH,
+            PULL,
+            &json!({"title": " ", "body": "New body", "state": "closed"}),
+        )
+        .await;
+    // Then it is refused and the pull request is unchanged
+    assert_refused(&answer, "title", "missing_field");
+    let pull = client.get(PULL).await.json();
+    assert_eq!(
+        (&pull["state"], &pull["body"]),
+        (&json!("open"), &Value::Null)
+    );
+}
+
+#[tokio::test]
+async fn a_refused_base_keeps_the_other_writes_of_the_edit() {
+    let cases = [
+        json!({"state": "closed", "base": "develop"}),
+        json!({"base": "missing"}),
+        json!({"base": "feature"}),
+        json!({"base": "develop"}),
+    ];
+    for case in cases {
+        // Given an open pull request from feature into main, and another from feature into develop
+        let server = server(&[
+            pull_request("feature", "main"),
+            pull_request("feature", "develop"),
+        ])
+        .await;
+        let client = alice(&server);
+        deliveries(&server).await;
+        // When a base change that GitHub refuses is sent with a new title and body
+        let mut body = case.clone();
+        body["title"] = json!("New title");
+        body["body"] = json!("New body");
+        let answer = client.call_json(Method::PATCH, PULL, &body).await;
+        // Then the base is refused and stays, while the title, the body and the state change are kept
+        assert_refused(&answer, "base", "invalid");
+        let pull = client.get(PULL).await.json();
+        let state = case["state"].as_str().unwrap_or("open");
+        assert_eq!(
+            (
+                &pull["base"]["ref"],
+                &pull["title"],
+                &pull["body"],
+                &pull["state"]
+            ),
+            (
+                &json!("main"),
+                &json!("New title"),
+                &json!("New body"),
+                &json!(state)
+            ),
+            "{case}"
+        );
+        // And the kept parts send their webhooks and record their events
+        let hooks = pull_hooks(&deliveries(&server).await, 1);
+        let actions: Vec<_> = hooks.iter().map(|(action, _)| action.as_str()).collect();
+        let expected: &[&str] = if state == "closed" {
+            &["edited", "closed"]
+        } else {
+            &["edited"]
+        };
+        assert_eq!(actions, expected, "{case}");
+        assert_eq!(
+            hooks[0].1["changes"],
+            json!({"title": {"from": "feature into main"}, "body": {"from": ""}}),
+            "{case}"
+        );
+        let recorded = events(&client, 1).await;
+        let expected: &[&str] = if state == "closed" {
+            &["renamed", "closed"]
+        } else {
+            &["renamed"]
+        };
+        assert_eq!(names(&recorded), expected, "{case}");
+    }
+}
+
+#[tokio::test]
+async fn a_reopen_with_a_refused_base_answers_the_base_refusal_and_keeps_the_body() {
+    // Given a merged pull request, which cannot be reopened
+    let server = server(&[pull_request("feature", "main")]).await;
+    let client = alice(&server);
+    let merged = client
+        .call_json(Method::PUT, &format!("{PULL}/merge"), &json!({}))
+        .await;
+    assert_eq!(merged.status, StatusCode::OK);
+    // When a reopen is sent with a base change and a new body
+    let answer = client
+        .call_json(
+            Method::PATCH,
+            PULL,
+            &json!({"state": "open", "base": "develop", "body": "New body"}),
+        )
+        .await;
+    // Then the base, judged against the pull request left closed, is the refusal, and the body is kept
+    assert_refused(&answer, "base", "invalid");
+    let pull = client.get(PULL).await.json();
+    assert_eq!(
+        (&pull["state"], &pull["base"]["ref"], &pull["body"]),
+        (&json!("closed"), &json!("main"), &json!("New body"))
+    );
+}
+
+#[tokio::test]
+async fn a_reopen_with_a_rename_and_a_new_base_records_them_in_github_order() {
+    // Given a closed pull request from feature into main
+    let server = server(&[pull_request("feature", "main")]).await;
+    let client = alice(&server);
+    let closed = client
+        .call_json(Method::PATCH, PULL, &json!({"state": "closed"}))
+        .await;
+    assert_eq!(closed.status, StatusCode::OK);
+    deliveries(&server).await;
+    // When it is reopened with a new title and the base develop
+    let answer = client
+        .call_json(
+            Method::PATCH,
+            PULL,
+            &json!({"state": "open", "title": "New title", "base": "develop"}),
+        )
+        .await;
+    // Then all three are written, and the timeline has the rename, the reopen and the base change in that order
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.json());
+    assert_eq!(answer.json()["base"]["ref"], "develop");
+    let recorded = events(&client, 1).await;
+    let tail: Vec<_> = names(&recorded).into_iter().skip(1).collect();
+    assert_eq!(tail, ["renamed", "reopened", "base_ref_changed"]);
+    let changed = &recorded[3];
+    assert_eq!(changed["actor"]["login"], "alice");
+    assert_eq!(
+        changed.as_object().map(|o| {
+            let mut keys: Vec<_> = o.keys().cloned().collect();
+            keys.sort();
+            keys
+        }),
+        Some(
+            [
+                "actor",
+                "commit_id",
+                "commit_url",
+                "created_at",
+                "event",
+                "id",
+                "node_id",
+                "performed_via_github_app",
+                "url"
+            ]
+            .map(String::from)
+            .to_vec()
+        )
+    );
+    // And the edited webhook names the old title and the old base
+    let hooks = pull_hooks(&deliveries(&server).await, 1);
+    let edited = hooks
+        .iter()
+        .find(|(action, _)| action == "edited")
+        .map_or_default(|(_, payload)| payload["changes"].clone());
+    assert_eq!(edited["title"], json!({"from": "feature into main"}));
+    assert_eq!(edited["base"]["ref"], json!({"from": "main"}));
 }
 
 #[tokio::test]

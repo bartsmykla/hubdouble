@@ -12,7 +12,8 @@ use hubdouble_store::{Accounts, Counters, Issues, Repos, Sequence, Tx, TxMut};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::{events, read, render, reopen, state, timeline};
+use crate::timeline::{self, StateKind};
+use crate::{events, read, render, reopen, state};
 
 #[derive(Deserialize)]
 struct Create {
@@ -287,9 +288,9 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let via_app = timeline::via_app(ctx.actor());
     let now = ctx.now();
     let (tx, git) = ctx.tx_mut_and_git()?;
-    let changed = edit(tx, git, &mut issue, input, author, now)?;
+    let edited = edit(tx, git, &mut issue, input, author, now)?;
     if before != issue.state
-        || !changed.is_empty()
+        || !edited.changes.is_empty()
         || tx
             .table::<Issues>()
             .get(issue.id)
@@ -299,25 +300,59 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         tx.table_mut::<Issues>().replace(issue.clone())?;
         state::sync_refs(tx, git, &issue)?;
     }
-    if !changed.is_empty() {
+    let who = (author, via_app);
+    if let Some((from, to)) = edited.renamed {
+        timeline::record(tx, &issue, who, StateKind::Renamed { from, to })?;
+    }
+    if !edited.changes.is_empty() {
         events::emit(
             tx,
             git,
             &issue,
             author,
             "edited",
-            json!({"changes": changed}),
+            json!({"changes": edited.changes}),
         )?;
     }
     if before != issue.state {
         if issue.state == IssueState::Closed {
-            timeline::record(tx, &issue, (author, via_app), false)?;
+            timeline::record(tx, &issue, who, StateKind::Closed)?;
             events::emit(tx, git, &issue, author, "closed", json!({}))?;
         } else {
             reopen::reopened(tx, git, &issue, author, via_app)?;
         }
     }
-    Reply::json(&render::detail(ctx.git(), ctx.tx(), ctx.urls(), &issue)?)
+    if edited.rebased {
+        timeline::record(tx, &issue, who, StateKind::BaseRefChanged)?;
+    }
+    match edited.refusal {
+        Some(refusal) => kept(&refusal),
+        None => Reply::json(&render::detail(ctx.git(), ctx.tx(), ctx.urls(), &issue)?),
+    }
+}
+
+/// GitHub's error answer for a refusal that keeps the writes made before it, so the handler
+/// answers it without the rollback an `Err` makes.
+///
+/// # Errors
+///
+/// A serialization error.
+pub fn kept(refusal: &ApiError) -> Result<Reply, ApiError> {
+    let status = StatusCode::from_u16(refusal.status).unwrap_or(StatusCode::UNPROCESSABLE_ENTITY);
+    Ok(Reply::json(&json!({
+        "message": refusal.message,
+        "errors": refusal.errors,
+        "documentation_url": refusal.documentation_url,
+        "status": refusal.status.to_string(),
+    }))?
+    .status(status))
+}
+
+struct Edited {
+    changes: Map<String, Value>,
+    renamed: Option<(String, String)>,
+    rebased: bool,
+    refusal: Option<ApiError>,
 }
 
 fn can_push(tx: &Tx, actor: &Actor, repo: &Repo) -> bool {
@@ -363,27 +398,19 @@ fn edit(
     input: Edit,
     actor: i64,
     now: Timestamp,
-) -> Result<Map<String, Value>, ApiError> {
-    let mut changes = Map::new();
+) -> Result<Edited, ApiError> {
+    let mut edited = Edited {
+        changes: Map::new(),
+        renamed: None,
+        rebased: false,
+        refusal: None,
+    };
     if issue.pull.is_none() {
         return Err(ApiError::not_found());
     }
-    if let Some(title) = input.title.filter(|title| *title != issue.title) {
-        if title.trim().is_empty() {
-            return Err(validation("title", "missing_field"));
-        }
-        changes.insert("title".into(), json!({"from": issue.title}));
-        issue.title = title;
-    }
-    if let BodyEdit::Set(body) = input.body
-        && body != issue.body
-    {
-        changes.insert(
-            "body".into(),
-            json!({"from": issue.body.as_deref().unwrap_or_default()}),
-        );
-        issue.body = body;
-        issue.last_edited_at = Some(now);
+    let title = input.title.filter(|title| *title != issue.title);
+    if title.as_ref().is_some_and(|title| title.trim().is_empty()) {
+        return Err(validation("title", "missing_field"));
     }
     let target = input
         .state
@@ -391,55 +418,107 @@ fn edit(
         .map(|state| IssueState::from_rest(state).ok_or_else(|| validation("state", "invalid")))
         .transpose()?
         .unwrap_or(issue.state);
-    if target == IssueState::Open && issue.state == IssueState::Closed {
-        reopen::reopen(tx, git, issue)?;
-    }
-    let p = issue.pull.as_mut().ok_or_else(ApiError::not_found)?;
-    if let Some(name) = input.base.filter(|base| *base != p.base.ref_name) {
-        if target != IssueState::Open {
-            return Err(validation("base", "invalid"));
-        }
-        let head_repo = p
-            .head
-            .repo_id
-            .ok_or_else(|| validation("head", "invalid"))?;
-        if p.merged_at.is_some() || (head_repo == issue.repo_id && p.head.ref_name == name) {
-            return Err(validation("state", "invalid"));
-        }
-        ensure_unique(
-            tx,
-            issue.repo_id,
-            &name,
-            head_repo,
-            &p.head.ref_name,
-            Some(issue.id),
-        )?;
-        let base = state::branch(git, tx, issue.repo_id, &name)
-            .map_err(|_| validation("base", "invalid"))?;
-        let head = state::branch(git, tx, head_repo, &p.head.ref_name)
-            .map_err(|_| validation("head", "invalid"))?;
-        changes.insert(
-            "base".into(),
-            json!({"ref": {"from": p.base.ref_name}, "sha": {"from": p.base.sha}}),
+    if let BodyEdit::Set(body) = input.body
+        && body != issue.body
+    {
+        edited.changes.insert(
+            "body".into(),
+            json!({"from": issue.body.as_deref().unwrap_or_default()}),
         );
-        p.base.ref_name = name;
-        p.base.sha = base.to_string();
-        p.head.sha = head.to_string();
-        state::test_merge(git, tx, (issue.repo_id, issue.user_id), p, (base, head))?;
+        issue.body = body;
+        issue.last_edited_at = Some(now);
     }
     if let Some(allow) = input.maintainer_can_modify {
-        p.maintainer_can_modify = allow;
+        state::pull_mut(issue)?.maintainer_can_modify = allow;
     }
-    if target != issue.state {
-        let closed = target == IssueState::Closed;
-        issue.state = target;
-        issue.closed_at = closed.then_some(now);
-        issue.closed_by = closed.then_some(actor);
-        if closed {
-            p.mergeable = None;
+    if target == IssueState::Open && issue.state == IssueState::Closed {
+        match reopen::reopen(tx, git, issue) {
+            Ok(()) => {}
+            Err(refused) if refused.status == 422 => edited.refusal = Some(refused),
+            Err(other) => return Err(other),
         }
     }
-    Ok(changes)
+    if edited.refusal.is_none() {
+        if let Some(title) = title {
+            edited
+                .changes
+                .insert("title".into(), json!({"from": issue.title}));
+            let from = std::mem::replace(&mut issue.title, title);
+            edited.renamed = Some((from, issue.title.clone()));
+        }
+        if target == IssueState::Closed && issue.state == IssueState::Open {
+            issue.state = IssueState::Closed;
+            issue.closed_at = Some(now);
+            issue.closed_by = Some(actor);
+            state::pull_mut(issue)?.mergeable = None;
+        }
+    }
+    let base = &state::pull(issue)?.base.ref_name;
+    if let Some(name) = input.base.filter(|name| name != base) {
+        match retarget(tx, git, issue, name)? {
+            Ok(from) => {
+                edited.changes.insert("base".into(), from);
+                edited.rebased = true;
+            }
+            Err(refused) => edited.refusal = Some(refused),
+        }
+    }
+    Ok(edited)
+}
+
+fn retarget(
+    tx: &Tx,
+    git: &Git,
+    issue: &mut Issue,
+    name: String,
+) -> Result<Result<Value, ApiError>, ApiError> {
+    let (id, repo, author) = (issue.id, issue.repo_id, issue.user_id);
+    let open = issue.state == IssueState::Open;
+    let p = state::pull_mut(issue)?;
+    let refused = |message: String| {
+        Ok(Err(ApiError::unprocessable("Validation Failed")
+            .with_error(FieldError {
+                resource: "PullRequest".into(),
+                field: "base".into(),
+                code: "invalid".into(),
+                message: Some(message),
+                value: None,
+            })))
+    };
+    if !open {
+        return refused("Cannot change the base branch of a closed pull request.".into());
+    }
+    let base = match state::branch(git, tx, repo, &name) {
+        Ok(base) => base,
+        Err(GitError::NotFound) => {
+            return refused(format!("Proposed base branch '{name}' was not found"));
+        }
+        Err(other) => return Err(other.into()),
+    };
+    let head_repo = p
+        .head
+        .repo_id
+        .ok_or_else(|| validation("head", "invalid"))?;
+    let head = state::branch(git, tx, head_repo, &p.head.ref_name)
+        .map_err(|_| validation("head", "invalid"))?;
+    if git.compare(tx, repo, base, head)?.ahead_by == 0 {
+        return refused(format!(
+            "There are no new commits between base branch '{name}' and head branch '{}'",
+            p.head.ref_name
+        ));
+    }
+    if open_between(tx, repo, &name, head_repo, &p.head.ref_name, Some(id)) {
+        return refused(format!(
+            "A pull request already exists for base branch '{name}' and head branch '{}'",
+            p.head.ref_name
+        ));
+    }
+    let from = json!({"ref": {"from": p.base.ref_name}, "sha": {"from": p.base.sha}});
+    p.base.ref_name = name;
+    p.base.sha = base.to_string();
+    p.head.sha = head.to_string();
+    state::test_merge(git, tx, (repo, author), p, (base, head))?;
+    Ok(Ok(from))
 }
 
 #[derive(Deserialize)]
