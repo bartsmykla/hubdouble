@@ -41,6 +41,7 @@ apollo-compiler = "=1.33.1"
 base64 = "=0.23.1"
 bytes = "=1.12.2"
 criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+fancy-regex = "=0.20.2"
 gix-actor = "=0.44.1"
 gix-config = "=0.63.0"
 gix-hash = "=0.28.1"

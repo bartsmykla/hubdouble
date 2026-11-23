@@ -232,12 +232,18 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .query()
         .get("since")
         .filter(|s| !s.is_empty())
-        .map(Timestamp::parse_query)
-        .transpose()
-        .map_err(|_| {
-            ApiError::unprocessable("Time values must be in ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ")
-                .with_docs(docs)
-        })?;
+        .map(|s| match Timestamp::parse_query(s, ctx.now()) {
+            Ok(t) if t.is_datetime() => Ok(t),
+            Ok(_) => Err(ApiError::unprocessable(
+                "Time values must be in the range 1000-01-01T00:00:00Z to 9999-12-31T23:59:59Z",
+            )
+            .with_docs(docs)),
+            Err(_) => Err(ApiError::unprocessable(
+                "Time values must be in ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ",
+            )
+            .with_docs(docs)),
+        })
+        .transpose()?;
     let mut comments: Vec<_> = comments
         .into_iter()
         .filter(|c| since.is_none_or(|since| c.updated_at > since) && visible(ctx.tx(), viewer, c))

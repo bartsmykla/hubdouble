@@ -1,4 +1,5 @@
 use http::{Method, StatusCode};
+use hubdouble_render::query_escape;
 use hubdouble_testkit::{GoGithub, TestServer, fixture};
 use serde_json::{Value, json};
 
@@ -312,4 +313,143 @@ async fn a_list_refuses_a_since_that_is_not_iso_8601_with_its_operation_document
     assert_eq!(ordered.status, StatusCode::OK);
     assert_eq!(ordered.json()[0]["id"], newer);
     assert_eq!(ordered.json()[1]["id"], comment);
+}
+
+async fn titles_since(client: &GoGithub, since: &str) -> (StatusCode, Vec<String>) {
+    let answer = client
+        .get(&format!(
+            "{REPO}/issues?state=all&per_page=100&since={}",
+            query_escape(since)
+        ))
+        .await;
+    let titles = answer
+        .json()
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| i["title"].as_str().map(str::to_owned))
+        .collect();
+    (answer.status, titles)
+}
+
+#[tokio::test]
+async fn every_since_reads_free_text_as_ruby_time_parse_in_pacific_time() {
+    // Given an issue and its comment at 2026-01-01T00:00:00Z, and a newer issue, comment
+    // and pull request at 2026-01-03T00:00:00Z, which is Jan 2 16:00 in Pacific time
+    let (server, client) = start().await;
+    let old = created(&client, &format!("{REPO}/issues"), &json!({"title": "old"})).await["number"]
+        .clone();
+    created(
+        &client,
+        &format!("{REPO}/issues/{old}/comments"),
+        &json!({"body": "old"}),
+    )
+    .await;
+    server.clock.advance(2 * 86_400);
+    let new = created(&client, &format!("{REPO}/issues"), &json!({"title": "new"})).await["number"]
+        .clone();
+    created(
+        &client,
+        &format!("{REPO}/issues/{new}/comments"),
+        &json!({"body": "new"}),
+    )
+    .await;
+    let number = pull(&client).await;
+
+    // When the issue list reads each since form that live microsoft/vscode read, 2026-11-23
+    for (since, has_old, has_new) in [
+        ("Jan 2 2026", false, true),
+        ("2 January 2026", false, true),
+        ("Fri Jan 2 2026", false, true),
+        ("Jan 2nd, 26", false, true),
+        ("02/01/2026", false, true),
+        ("2026/01/02", false, true),
+        ("2.1.2026", false, true),
+        ("20260102", false, true),
+        ("2026-002", false, true),
+        ("R8.1.2", false, true),
+        ("issues since Jan 2 2026, please", false, true),
+        ("2025-12-31 17:00", false, true),
+        ("2025-12-31T17:00:00", false, true),
+        ("2025-12-31 17:00 CET", false, true),
+        ("2025-12-31 16:00 PST", true, true),
+        ("2025-12-31 19:00 EST", true, true),
+        ("2025-12-31 17:00 -0700", true, true),
+        ("2025-12-31 5 pm", false, true),
+        ("Dec 31 2025 24:00", false, true),
+        ("2025-12-31 23:59:60", false, true),
+        ("2025-11-31", true, true),
+        ("16:00", false, true),
+        ("Jan", false, true),
+        ("1970-01-01 00:00 PST", true, true),
+    ] {
+        let (status, titles) = titles_since(&client, since).await;
+
+        // Then GitHub reads it as Ruby's Time.parse in America/Los_Angeles
+        assert_eq!(status, StatusCode::OK, "{since}");
+        assert_eq!(titles.iter().any(|t| t == "old"), has_old, "{since}");
+        assert_eq!(titles.iter().any(|t| t == "new"), has_new, "{since}");
+    }
+
+    // When the issue list reads a since before 1970-01-01T08:00:00Z, as live did
+    let (status, titles) = titles_since(&client, "1970-01-01T07:59:59Z").await;
+
+    // Then GitHub lists no issue
+    assert_eq!(status, StatusCode::OK);
+    assert!(titles.is_empty(), "{titles:?}");
+
+    // When every list reads a since that Ruby cannot read or a SQL DATETIME cannot hold
+    let too_long = format!("2026-01-02 {}", "x".repeat(118));
+    let refused = [
+        "Friday",
+        "yesterday",
+        "2026-01-02 25:00",
+        "2026-13-01",
+        "01/13/2026",
+        "2025-11-62",
+        "Jan 1 0999",
+        "Jan 1 10000",
+        too_long.as_str(),
+    ];
+    let lists = [
+        format!("{REPO}/issues"),
+        format!("{REPO}/issues/comments"),
+        format!("{REPO}/issues/{new}/comments"),
+        format!("{REPO}/pulls/comments"),
+        format!("{REPO}/pulls/{number}/comments"),
+    ];
+    for list in &lists {
+        for since in refused {
+            let answer = client
+                .get(&format!("{list}?since={}", query_escape(since)))
+                .await;
+
+            // Then GitHub refuses it with 422
+            assert_eq!(
+                answer.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{list} {since}"
+            );
+        }
+
+        // When the list reads free text with trailing words
+        let answer = client
+            .get(&format!(
+                "{list}?since={}",
+                query_escape("Jan 2 2026 and later")
+            ))
+            .await;
+
+        // Then GitHub serves it
+        assert_eq!(answer.status, StatusCode::OK, "{list}");
+    }
+    let comments = client
+        .get(&format!(
+            "{REPO}/issues/comments?since={}",
+            query_escape("Jan 2 2026 and later")
+        ))
+        .await
+        .json();
+    assert_eq!(comments.as_array().map(Vec::len), Some(1));
+    assert_eq!(comments[0]["body"], "new");
 }

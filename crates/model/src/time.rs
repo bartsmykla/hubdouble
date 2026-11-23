@@ -80,100 +80,35 @@ impl Timestamp {
         ))
     }
 
-    /// Parses a time in a query, such as `since`, as GitHub reads one: an ISO 8601 date
-    /// (`2020-01-01`, `2020-1-1` or `20200101`), optionally followed by `T` or a space and
-    /// `HH:MM`, `HH:MM:SS` or `HH:MM:SS.fff`, and by `Z` or a `+HH:MM`, `+HHMM` or `+HH`
-    /// offset. A time without an offset is UTC, and a date without a time is its midnight.
+    /// Reads a query time, such as `since`, as GitHub does: Ruby's `Time.parse` with
+    /// two-digit years completed, in the `America/Los_Angeles` zone. It takes the first
+    /// date and time that `Date._parse` finds in free text and ignores the rest. A missing
+    /// leading field comes from `now`, a missing trailing field is its lowest value, a day
+    /// past the month's end rolls over, and a zone that Ruby does not name is local time.
+    /// Daylight saving time follows the US rules from 1967.
     ///
     /// # Errors
     ///
-    /// Returns [`TimestampError`] when the text is not such a time.
-    pub fn parse_query(text: &str) -> Result<Timestamp, TimestampError> {
-        let text = text.trim();
-        let split = text.find(['T', 't', ' ']).unwrap_or(text.len());
-        let (date, rest) = text.split_at(split);
-        let (year, month, day) = query_date(date)?;
-        let (seconds, offset) = match rest.get(1..) {
-            None => (0, 0),
-            Some(time) => query_time(time)?,
-        };
-        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-            return Err(TimestampError);
-        }
-        Ok(Timestamp(
-            days_from_civil(year, month, day) * 86_400 + seconds - offset,
-        ))
+    /// Returns [`TimestampError`] where Ruby raises: no date or time, a field out of
+    /// range, or more than 128 characters.
+    pub fn parse_query(text: &str, now: Timestamp) -> Result<Timestamp, TimestampError> {
+        crate::ruby_time::time_parse(text, now.0)
+            .map(Timestamp)
+            .ok_or(TimestampError)
     }
-}
 
-fn digits(text: &str, lengths: std::ops::RangeInclusive<usize>) -> Result<i64, TimestampError> {
-    if !lengths.contains(&text.len()) || !text.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(TimestampError);
+    /// Whether a SQL `DATETIME` holds the time: `1000-01-01T00:00:00Z` to `9999-12-31T23:59:59Z`.
+    #[must_use]
+    pub fn is_datetime(self) -> bool {
+        (-30_610_224_000..=253_402_300_799).contains(&self.0)
     }
-    text.parse().map_err(|_| TimestampError)
-}
-
-fn query_date(date: &str) -> Result<(i64, i64, i64), TimestampError> {
-    let mut parts = date.split('-');
-    match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some(y), Some(m), Some(d), None) => {
-            Ok((digits(y, 4..=4)?, digits(m, 1..=2)?, digits(d, 1..=2)?))
-        }
-        (Some(compact), None, None, None) if compact.len() == 8 => Ok((
-            digits(&compact[..4], 4..=4)?,
-            digits(&compact[4..6], 2..=2)?,
-            digits(&compact[6..], 2..=2)?,
-        )),
-        _ => Err(TimestampError),
-    }
-}
-
-fn query_time(time: &str) -> Result<(i64, i64), TimestampError> {
-    let zone_at = time.find(['Z', 'z', '+', '-']).unwrap_or(time.len());
-    let (clock, zone) = time.split_at(zone_at);
-    let clock = clock.split_once('.').map_or(clock, |(whole, frac)| {
-        if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
-            ""
-        } else {
-            whole
-        }
-    });
-    let mut parts = clock.split(':');
-    let (hour, minute, second) = match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some(h), Some(m), s, None) => (
-            digits(h, 2..=2)?,
-            digits(m, 2..=2)?,
-            s.map_or(Ok(0), |s| digits(s, 2..=2))?,
-        ),
-        _ => return Err(TimestampError),
-    };
-    if hour > 23 || minute > 59 || second > 60 {
-        return Err(TimestampError);
-    }
-    let offset = match zone.as_bytes().first() {
-        None => 0,
-        Some(b'Z' | b'z') if zone.len() == 1 => 0,
-        Some(&sign @ (b'+' | b'-')) => {
-            let body = &zone[1..];
-            let (h, m) = match body.len() {
-                2 => (body, "00"),
-                4 => body.split_at(2),
-                5 if &body[2..3] == ":" => (&body[..2], &body[3..]),
-                _ => return Err(TimestampError),
-            };
-            let seconds = digits(h, 2..=2)? * 3600 + digits(m, 2..=2)? * 60;
-            if sign == b'-' { -seconds } else { seconds }
-        }
-        Some(_) => return Err(TimestampError),
-    };
-    Ok((hour * 3600 + minute * 60 + second, offset))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("not an RFC 3339 timestamp")]
 pub struct TimestampError;
 
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
@@ -183,7 +118,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
+pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -293,35 +228,96 @@ mod tests {
     }
 
     #[test]
-    fn query_times_read_the_iso_8601_forms_that_live_github_accepts() {
-        // Given the since values live GET /repos/cli/cli/issues accepted and refused, 2026-11-23
-        let midnight = Timestamp(1_577_836_800);
+    fn query_times_read_free_text_as_live_github_does() {
+        // Given the since values that live GET /repos/microsoft/vscode/issues read, 2026-11-23,
+        // and a clock at 2026-11-23T12:00:00Z
+        let now = Timestamp(1_795_435_200);
         let accepted = [
-            ("2020-01-01", midnight),
-            ("2020-1-1", midnight),
-            ("20200101", midnight),
-            (" 2020-01-01", midnight),
-            ("2020-01-01T00:00", midnight),
-            ("2020-01-01 00:00:00", midnight),
-            ("2020-01-01T00:00:00", midnight),
-            ("2020-01-01T00:00:00.123Z", midnight),
-            ("2020-01-01T02:00:00+02:00", midnight),
-            ("2020-01-01T02:00:00+0200", midnight),
-            ("2019-12-31T22:00:00-02", midnight),
+            ("2025-11-20T10:00:00Z", "2025-11-20T10:00:00Z"),
+            ("Nov 20 2025", "2025-11-20T08:00:00Z"),
+            ("20 Nov 2025", "2025-11-20T08:00:00Z"),
+            ("November 20, 2025", "2025-11-20T08:00:00Z"),
+            ("2025 Nov 20", "2025-11-20T08:00:00Z"),
+            ("Mon Nov 20 2025", "2025-11-20T08:00:00Z"),
+            ("20th Nov 2025", "2025-11-20T08:00:00Z"),
+            ("Nov 20th, 2025", "2025-11-20T08:00:00Z"),
+            ("20-Nov-2025", "2025-11-20T08:00:00Z"),
+            ("20/11/2025", "2025-11-20T08:00:00Z"),
+            ("2025/11/20", "2025-11-20T08:00:00Z"),
+            ("20.11.2025", "2025-11-20T08:00:00Z"),
+            ("20251120", "2025-11-20T08:00:00Z"),
+            ("2025-324", "2025-11-20T08:00:00Z"),
+            ("H27.11.20", "2015-11-20T08:00:00Z"),
+            ("Nov 20 25", "2025-11-20T08:00:00Z"),
+            ("'25-11-20", "2025-11-20T08:00:00Z"),
+            ("20 Nov 99", "1999-11-20T08:00:00Z"),
+            ("20 Nov 68", "2068-11-20T08:00:00Z"),
+            ("x2025-11-20", "2025-11-20T08:00:00Z"),
+            ("2025-11-20 foo", "2025-11-20T08:00:00Z"),
+            ("abc 2025-11-20 def 10:00", "2025-11-20T18:00:00Z"),
+            ("2025-11-20T10:00:00Zjunk", "2025-11-20T18:00:00Z"),
+            ("2025-11-20 10:00", "2025-11-20T18:00:00Z"),
+            ("2025-07-01 10:00", "2025-07-01T17:00:00Z"),
+            ("2025-03-09 02:30", "2025-03-09T10:30:00Z"),
+            ("2025-11-02 01:30", "2025-11-02T09:30:00Z"),
+            ("Nov 20 2025 10am", "2025-11-20T18:00:00Z"),
+            ("Nov 20 2025 10:00 pm", "2025-11-21T06:00:00Z"),
+            ("Nov 20 2025 24:00", "2025-11-21T08:00:00Z"),
+            ("Nov 20 2025 23:59:60", "2025-11-21T08:00:00Z"),
+            ("2025-11-20 10:00 PST", "2025-11-20T18:00:00Z"),
+            ("2025-11-20 10:00 EDT", "2025-11-20T14:00:00Z"),
+            ("2025-11-20 10:00 UTC", "2025-11-20T10:00:00Z"),
+            ("2025-11-20 10:00 a", "2025-11-20T09:00:00Z"),
+            ("2025-11-20 10:00 +01:30", "2025-11-20T08:30:00Z"),
+            ("2025-11-20 10:00 -0130", "2025-11-20T11:30:00Z"),
+            ("2025-11-20 10:00 CET", "2025-11-20T18:00:00Z"),
+            ("2025-11-20 10:00 GMT+1", "2025-11-20T18:00:00Z"),
+            ("Sat, 20 Nov 2025 10:00:00 GMT", "2025-11-20T10:00:00Z"),
+            ("2025-02-30", "2025-03-02T08:00:00Z"),
+            ("Nov 31 2025", "2025-12-01T08:00:00Z"),
+            ("10:00", "2026-11-23T18:00:00Z"),
+            ("Nov", "2026-11-01T07:00:00Z"),
+            ("20 November", "2026-11-20T08:00:00Z"),
         ];
         for (text, expected) in accepted {
             // When / Then
-            assert_eq!(Timestamp::parse_query(text), Ok(expected), "{text}");
+            let read = Timestamp::parse_query(text, now).map(|t| t.to_string());
+            assert_eq!(read.as_deref(), Ok(expected), "{text}");
         }
+        let too_long = format!("2025-11-20 {}", "x".repeat(118));
         for text in [
             "",
             "bogus",
-            "2020",
-            "2020-01",
-            "2020-01-01T25:00:00Z",
-            "2020-13-01",
+            "yesterday",
+            "Thursday",
+            "1700000000",
+            "2025",
+            "2025-11",
+            "2025-W47-4",
+            "11/20/2025",
+            "2025-02-32",
+            "2025-11-20 25:00",
+            "2025-11-20 10:61",
+            "2025-13-01",
+            &too_long,
         ] {
-            assert_eq!(Timestamp::parse_query(text), Err(TimestampError), "{text}");
+            assert_eq!(
+                Timestamp::parse_query(text, now),
+                Err(TimestampError),
+                "{text}"
+            );
+        }
+        for (text, held) in [
+            ("1000-01-01T00:00:00Z", true),
+            ("9999-12-31T23:59:59Z", true),
+            ("Dec 31 0999", false),
+            ("Jan 1 10000", false),
+            ("2025-11-20 BC", false),
+            ("1000-01-01T00:00:00+01:00", false),
+            ("9999-12-31T23:00:00-02:00", false),
+        ] {
+            let read = Timestamp::parse_query(text, now).map(Timestamp::is_datetime);
+            assert_eq!(read, Ok(held), "{text}");
         }
     }
 

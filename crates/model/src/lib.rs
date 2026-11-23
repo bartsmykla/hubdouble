@@ -4,6 +4,7 @@ mod entity;
 mod error;
 mod event;
 pub mod node_id;
+mod ruby_time;
 mod ruleset;
 mod time;
 

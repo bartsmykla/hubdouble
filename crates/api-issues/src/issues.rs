@@ -20,6 +20,7 @@ const LIST_DOCS: &str = "https://docs.github.com/v3/issues/#list-issues";
 const REPOSITORY_ISSUES_DOCS: &str =
     "https://docs.github.com/rest/issues/issues#list-repository-issues";
 const DEFAULT_TYPES: [&str; 3] = ["Task", "Bug", "Feature"];
+const LOCAL_EPOCH: Timestamp = Timestamp(8 * 3600);
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -243,7 +244,8 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let creator = q
         .get("creator")
         .map(|login| accounts.by_login(login).map(|a| a.id));
-    let issues: Vec<Arc<Issue>> = if unknown || any_milestone || any_type {
+    let before_local_epoch = since.is_some_and(|s| s < LOCAL_EPOCH);
+    let issues: Vec<Arc<Issue>> = if unknown || any_milestone || any_type || before_local_epoch {
         Vec::new()
     } else {
         tx.table::<Issues>()

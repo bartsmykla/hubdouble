@@ -71,12 +71,15 @@ pub(crate) fn since(ctx: &Ctx<'_>, docs: &str) -> Result<Option<Timestamp>, ApiE
         .get("since")
         .filter(|s| !s.is_empty())
         .map(|s| {
-            Timestamp::parse_query(s).map_err(|_| {
-                ApiError::unprocessable(
-                    "The since parameter needs to be in ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ",
-                )
-                .with_docs(docs)
-            })
+            Timestamp::parse_query(s, ctx.now())
+                .ok()
+                .filter(|t| t.is_datetime())
+                .ok_or_else(|| {
+                    ApiError::unprocessable(
+                        "The since parameter needs to be in ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ",
+                    )
+                    .with_docs(docs)
+                })
         })
         .transpose()
 }
