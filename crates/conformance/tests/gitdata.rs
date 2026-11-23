@@ -1305,3 +1305,25 @@ async fn update_refs_moves_every_ref_or_none() {
     assert_eq!(head(&s, "refs/heads/develop").to_string(), feature);
     assert_eq!(head(&s, "refs/heads/made").to_string(), main);
 }
+
+#[tokio::test]
+async fn a_repeated_query_parameter_takes_its_last_value_as_github_does() {
+    // Given a branch of two commits, as cli/cli lists answer per_page=1&per_page=3 with 3 items
+    let s = server().await;
+    let client = alice(&s);
+    let feature = head(&s, "refs/heads/feature").to_string();
+    let main = head(&s, "refs/heads/main").to_string();
+    // When
+    let wide_last = client
+        .get("repos/acme/public/commits?per_page=1&per_page=2&sha=main&sha=feature")
+        .await;
+    let narrow_last = client
+        .get("repos/acme/public/commits?per_page=2&per_page=1&sha=feature&sha=main")
+        .await;
+    // Then
+    assert_eq!(
+        shas("repos/list-commits", &wide_last),
+        [feature.as_str(), main.as_str()]
+    );
+    assert_eq!(shas("repos/list-commits", &narrow_last), [main.as_str()]);
+}

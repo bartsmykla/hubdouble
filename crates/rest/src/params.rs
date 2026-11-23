@@ -52,12 +52,12 @@ impl Query {
         )
     }
 
-    /// The first value of `name`.
+    /// The last value of `name`, as GitHub reads a repeated parameter.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&str> {
         self.0
             .iter()
-            .find(|(n, _)| n == name)
+            .rfind(|(n, _)| n == name)
             .map(|(_, v)| v.as_str())
     }
 
