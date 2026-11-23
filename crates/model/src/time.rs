@@ -85,7 +85,8 @@ impl Timestamp {
     /// date and time that `Date._parse` finds in free text and ignores the rest. A missing
     /// leading field comes from `now`, a missing trailing field is its lowest value, a day
     /// past the month's end rolls over, and a zone that Ruby does not name is local time.
-    /// Daylight saving time follows the US rules from 1967.
+    /// Local time follows the zone's full history, from local mean time before 1883, and
+    /// resolves a gap, a repeated hour or a `:60` second as Ruby's `Time.local` does on Linux.
     ///
     /// # Errors
     ///
@@ -260,6 +261,13 @@ mod tests {
             ("2025-07-01 10:00", "2025-07-01T17:00:00Z"),
             ("2025-03-09 02:30", "2025-03-09T10:30:00Z"),
             ("2025-11-02 01:30", "2025-11-02T09:30:00Z"),
+            ("2025-11-02 01:30:60", "2025-11-02T08:31:00Z"),
+            ("1950-09-24 01:30:60", "1950-09-24T08:31:00Z"),
+            ("1950-07-01 10:00", "1950-07-01T17:00:00Z"),
+            ("1943-01-15 10:00", "1943-01-15T17:00:00Z"),
+            ("1883-01-01 10:00", "1883-01-01T17:52:58Z"),
+            ("2040-03-11 02:30", "2040-03-11T10:30:00Z"),
+            ("2040-11-04 01:30", "2040-11-04T09:30:00Z"),
             ("Nov 20 2025 10am", "2025-11-20T18:00:00Z"),
             ("Nov 20 2025 10:00 pm", "2025-11-21T06:00:00Z"),
             ("Nov 20 2025 24:00", "2025-11-21T08:00:00Z"),
@@ -311,6 +319,8 @@ mod tests {
             ("1000-01-01T00:00:00Z", true),
             ("9999-12-31T23:59:59Z", true),
             ("Dec 31 0999", false),
+            ("0999-12-31T16:07:02", true),
+            ("0999-12-31T16:07:01", false),
             ("Jan 1 10000", false),
             ("2025-11-20 BC", false),
             ("1000-01-01T00:00:00+01:00", false),

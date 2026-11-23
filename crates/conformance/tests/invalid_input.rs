@@ -1,4 +1,5 @@
 use http::{Method, StatusCode};
+use hubdouble_model::Timestamp;
 use hubdouble_render::query_escape;
 use hubdouble_testkit::{GoGithub, TestServer, fixture};
 use serde_json::{Value, json};
@@ -452,4 +453,36 @@ async fn every_since_reads_free_text_as_ruby_time_parse_in_pacific_time() {
         .json();
     assert_eq!(comments.as_array().map(Vec::len), Some(1));
     assert_eq!(comments[0]["body"], "new");
+}
+
+#[tokio::test]
+async fn every_since_maps_local_time_through_the_pacific_zone_history() {
+    // Given an issue at 2025-11-02T09:00:00Z, in the hour that repeats at the end of
+    // daylight saving time
+    let (server, client) = start().await;
+    server
+        .clock
+        .set(Timestamp::parse("2025-11-02T09:00:00Z").unwrap());
+    created(
+        &client,
+        &format!("{REPO}/issues"),
+        &json!({"title": "repeated"}),
+    )
+    .await;
+
+    // When the issue list reads 01:30:60 in that hour
+    let (status, titles) = titles_since(&client, "2025-11-02 01:30:60").await;
+
+    // Then Ruby's Time.local reads the earlier hour, 08:31:00Z
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(titles, ["repeated"]);
+
+    // When the issue list reads the last local times before 1000-01-01T00:00:00Z, which
+    // the zone keeps in local mean time, -07:52:58, as live octocat/Hello-World did, 2026-11-23
+    let (before, _) = titles_since(&client, "0999-12-31T16:07:01").await;
+    let (at, _) = titles_since(&client, "0999-12-31T16:07:02").await;
+
+    // Then GitHub refuses only the one before the DATETIME range
+    assert_eq!(before, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(at, StatusCode::OK);
 }

@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::sync::LazyLock;
 
 use fancy_regex::Regex;
@@ -9,6 +10,73 @@ const FIELD_LIMIT: i64 = 1_000_000_000_000_000;
 const YEAR_LIMIT: i64 = 1_000_000;
 const STANDARD: i64 = -8 * 3600;
 const DAYLIGHT: i64 = -7 * 3600;
+const MEAN_SOLAR: i64 = -(7 * 3600 + 52 * 60 + 58);
+const STANDARD_SINCE: i64 = -2_717_640_000;
+const RULE_SINCE: i64 = 2007;
+const LOCALTIME_LIMIT: i64 = 1_000_000_000_000_000;
+const DAYLIGHT_HISTORY: [(i64, i64); 61] = [
+    (-1_633_269_600, -1_615_129_200),
+    (-1_601_820_000, -1_583_679_600),
+    (-880_207_200, -765_385_200),
+    (-687_967_140, -662_655_600),
+    (-620_838_000, -608_137_200),
+    (-589_388_400, -576_082_800),
+    (-557_938_800, -544_633_200),
+    (-526_489_200, -513_183_600),
+    (-495_039_600, -481_734_000),
+    (-463_590_000, -450_284_400),
+    (-431_535_600, -418_230_000),
+    (-400_086_000, -386_780_400),
+    (-368_636_400, -355_330_800),
+    (-337_186_800, -323_881_200),
+    (-305_737_200, -292_431_600),
+    (-273_682_800, -260_982_000),
+    (-242_233_200, -226_508_400),
+    (-210_783_600, -195_058_800),
+    (-179_334_000, -163_609_200),
+    (-147_884_400, -131_554_800),
+    (-116_434_800, -100_105_200),
+    (-84_376_800, -68_655_600),
+    (-52_927_200, -37_206_000),
+    (-21_477_600, -5_756_400),
+    (9_972_000, 25_693_200),
+    (41_421_600, 57_747_600),
+    (73_476_000, 89_197_200),
+    (104_925_600, 120_646_800),
+    (126_698_400, 152_096_400),
+    (162_381_600, 183_546_000),
+    (199_274_400, 215_600_400),
+    (230_724_000, 247_050_000),
+    (262_778_400, 278_499_600),
+    (294_228_000, 309_949_200),
+    (325_677_600, 341_398_800),
+    (357_127_200, 372_848_400),
+    (388_576_800, 404_902_800),
+    (420_026_400, 436_352_400),
+    (452_080_800, 467_802_000),
+    (483_530_400, 499_251_600),
+    (514_980_000, 530_701_200),
+    (544_615_200, 562_150_800),
+    (576_064_800, 594_205_200),
+    (607_514_400, 625_654_800),
+    (638_964_000, 657_104_400),
+    (671_018_400, 688_554_000),
+    (702_468_000, 720_003_600),
+    (733_917_600, 752_058_000),
+    (765_367_200, 783_507_600),
+    (796_816_800, 814_957_200),
+    (828_871_200, 846_406_800),
+    (860_320_800, 877_856_400),
+    (891_770_400, 909_306_000),
+    (923_220_000, 941_360_400),
+    (954_669_600, 972_810_000),
+    (986_119_200, 1_004_259_600),
+    (1_018_173_600, 1_035_709_200),
+    (1_049_623_200, 1_067_158_800),
+    (1_081_072_800, 1_099_213_200),
+    (1_112_522_400, 1_130_662_800),
+    (1_143_972_000, 1_162_112_400),
+];
 
 const ALPHA: u8 = 1;
 const DIGIT: u8 = 2;
@@ -661,44 +729,141 @@ fn sunday(year: i64, month: i64, nth: i64) -> i64 {
     first + (3 - first).rem_euclid(7) + 7 * (nth - 1)
 }
 
-fn last_sunday(year: i64, month: i64) -> i64 {
-    let last = days_from_civil(year, month + 1, 1) - 1;
-    last - (last - 3).rem_euclid(7)
-}
-
-fn daylight_days(year: i64) -> Option<(i64, i64)> {
-    let start = match year {
-        2007.. => sunday(year, 3, 2),
-        1987..=2006 => sunday(year, 4, 1),
-        1976..=1986 | 1967..=1973 => last_sunday(year, 4),
-        1975 => days_from_civil(1975, 2, 23),
-        1974 => days_from_civil(1974, 1, 6),
-        _ => return None,
-    };
-    let end = if year >= 2007 {
-        sunday(year, 11, 1)
-    } else {
-        last_sunday(year, 10)
-    };
-    Some((start, end))
-}
-
 fn year_of(seconds: i64) -> i64 {
     civil_from_days(seconds.div_euclid(86_400)).0
 }
 
 fn local_offset(utc: i64) -> i64 {
-    let daylight = daylight_days(year_of(utc + STANDARD)).is_some_and(|(start, end)| {
-        (start * 86_400 + 2 * 3600 - STANDARD..end * 86_400 + 2 * 3600 - DAYLIGHT).contains(&utc)
-    });
+    if utc < STANDARD_SINCE {
+        return MEAN_SOLAR;
+    }
+    let year = year_of(utc + STANDARD);
+    let daylight = if year >= RULE_SINCE {
+        let start = sunday(year, 3, 2) * 86_400 + 2 * 3600 - STANDARD;
+        let end = sunday(year, 11, 1) * 86_400 + 2 * 3600 - DAYLIGHT;
+        (start..end).contains(&utc)
+    } else {
+        DAYLIGHT_HISTORY
+            .iter()
+            .any(|&(start, end)| (start..end).contains(&utc))
+    };
     if daylight { DAYLIGHT } else { STANDARD }
 }
 
-fn local_to_utc(wall: i64) -> i64 {
-    let daylight = daylight_days(year_of(wall)).is_some_and(|(start, end)| {
-        (start * 86_400 + 3 * 3600..end * 86_400 + 3600).contains(&wall)
-    });
-    wall - if daylight { DAYLIGHT } else { STANDARD }
+type Tm = [i64; 6];
+
+fn localtime(utc: i64) -> Option<Tm> {
+    (-LOCALTIME_LIMIT..=LOCALTIME_LIMIT)
+        .contains(&utc)
+        .then(|| now_fields(utc + local_offset(utc)))
+}
+
+fn timegm_noleapsecond([year, mon, day, hour, min, sec]: Tm) -> i64 {
+    days_from_civil(year, mon, day) * 86_400 + hour * 3600 + min * 60 + sec
+}
+
+fn local_to_utc((year, mon, day, hour, min, sec): Fields) -> Option<i64> {
+    let (year, mon, day) = civil_from_days(days_from_civil(
+        year.clamp(-YEAR_LIMIT, YEAR_LIMIT),
+        mon,
+        day,
+    ));
+    find_time_t([year, mon, day, hour, min, sec])
+}
+
+fn find_time_t(wanted: Tm) -> Option<i64> {
+    let mut first = wanted;
+    if first[3] > 23 {
+        first[3..].copy_from_slice(&[23, 59, 60]);
+    }
+    let guess0 = timegm_noleapsecond(first);
+    let (mut lo, mut hi, mut guess) = (i64::MIN, i64::MAX, guess0);
+    if let Some(tm) = localtime(guess) {
+        match wanted.cmp(&tm) {
+            Ordering::Equal => return Some(found(wanted, guess)),
+            Ordering::Less => {
+                hi = guess;
+                guess -= 86_400;
+            }
+            Ordering::Greater => {
+                lo = guess;
+                guess += 86_400;
+            }
+        }
+        if lo < guess
+            && guess < hi
+            && let Some(tm) = localtime(guess)
+        {
+            match wanted.cmp(&tm) {
+                Ordering::Equal => return Some(found(wanted, guess)),
+                Ordering::Less => hi = guess,
+                Ordering::Greater => lo = guess,
+            }
+        }
+    }
+    let mut tm_lo = localtime(lo)?;
+    match wanted.cmp(&tm_lo) {
+        Ordering::Less => return None,
+        Ordering::Equal => return Some(found(wanted, lo)),
+        Ordering::Greater => {}
+    }
+    let mut tm_hi = localtime(hi)?;
+    match wanted.cmp(&tm_hi) {
+        Ordering::Greater => return None,
+        Ordering::Equal => return Some(found(wanted, hi)),
+        Ordering::Less => {}
+    }
+    let mut status = 1;
+    while lo + 1 < hi {
+        loop {
+            if status == 0 {
+                guess = (lo / 2 + hi / 2).clamp(lo + 1, hi - 1);
+                status = 1;
+                break;
+            }
+            if status == 1 {
+                guess = hi - (timegm_noleapsecond(tm_hi) - guess0);
+                if guess == hi {
+                    guess -= 1;
+                }
+                status = 2;
+            } else {
+                guess = lo + (guess0 - timegm_noleapsecond(tm_lo));
+                if guess == lo {
+                    guess += 1;
+                }
+                status = 0;
+            }
+            if lo < guess && guess < hi {
+                break;
+            }
+            status = 0;
+        }
+        let tm = localtime(guess)?;
+        match wanted.cmp(&tm) {
+            Ordering::Less => (hi, tm_hi) = (guess, tm),
+            Ordering::Greater => (lo, tm_lo) = (guess, tm),
+            Ordering::Equal => return Some(found(wanted, guess)),
+        }
+    }
+    Some(lo + timegm_noleapsecond(wanted) - timegm_noleapsecond(tm_lo))
+}
+
+fn found(wanted: Tm, guess: i64) -> i64 {
+    let mut later = guess + 2 * 3600;
+    let Some(tm) = localtime(later) else {
+        return guess;
+    };
+    if (wanted[3] + 2) % 24 != tm[3] || wanted[4] != tm[4] || wanted[5] != tm[5] {
+        later -= (tm[3] - wanted[3]) * 3600 + (tm[4] - wanted[4]) * 60 + (tm[5] - wanted[5]);
+        if wanted[2] != tm[2] {
+            later -= 86_400;
+        }
+        if later != guess && localtime(later) == Some(wanted) {
+            return guess.max(later);
+        }
+    }
+    guess
 }
 
 fn month_days(year: i64, mon: i64) -> Option<i64> {
@@ -895,7 +1060,7 @@ fn make_time(wanted: Wanted, offset: Option<i64>, now: i64) -> Option<i64> {
     );
     match offset {
         Some(offset) => timegm(apply_offset(fields, offset)),
-        None => timegm(fields).map(local_to_utc),
+        None => timegm(fields).and_then(|_| local_to_utc(fields)),
     }
 }
 
