@@ -13,6 +13,7 @@ base64.workspace = true
 http.workspace = true
 hubdouble-admin.workspace = true
 hubdouble-auth.workspace = true
+hubdouble-git.workspace = true
 hubdouble-gql.workspace = true
 hubdouble-hooks.workspace = true
 hubdouble-model.workspace = true

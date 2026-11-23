@@ -399,7 +399,7 @@ impl Edit {
     }
 }
 
-fn apply_state(
+pub(crate) fn apply_state(
     issue: &mut Issue,
     to: Option<IssueState>,
     reason: Option<StateReason>,

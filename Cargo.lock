@@ -2340,6 +2340,7 @@ dependencies = [
  "http",
  "hubdouble-admin",
  "hubdouble-auth",
+ "hubdouble-git",
  "hubdouble-gql",
  "hubdouble-hooks",
  "hubdouble-model",

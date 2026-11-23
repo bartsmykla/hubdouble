@@ -37,6 +37,22 @@ fn closes(text: &str, full_name: &str, number: i64, local: bool) -> bool {
     })
 }
 
+pub(crate) fn keyword_link(
+    source: &Repo,
+    pull: &Issue,
+    issue_repo: i64,
+    full_name: &str,
+    number: i64,
+) -> bool {
+    pull.pull
+        .as_ref()
+        .is_some_and(|p| p.base.ref_name == source.default_branch)
+        && pull
+            .body
+            .as_deref()
+            .is_some_and(|body| closes(body, full_name, number, source.id == issue_repo))
+}
+
 fn leaf(v: &impl Serialize) -> Result<Resolved, GqlError> {
     match serde_json::to_value(v) {
         Ok(serde_json::Value::Null) => Ok(Resolved::Null),
@@ -114,14 +130,9 @@ fn closed_by(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError
             .iter()
             .filter(|source| source.id == repo.id || read_repo(ctx, source.id, &PULLS_READ).is_ok())
             .flat_map(|source| {
-                issues.in_repo(source.id).filter(move |i| {
-                    i.pull
-                        .as_ref()
-                        .is_some_and(|p| p.base.ref_name == source.default_branch)
-                        && i.body.as_deref().is_some_and(|body| {
-                            closes(body, full, issue.number, source.id == repo.id)
-                        })
-                })
+                issues
+                    .in_repo(source.id)
+                    .filter(move |i| keyword_link(source, i, repo.id, full, issue.number))
             })
             .collect()
     };

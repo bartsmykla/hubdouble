@@ -632,3 +632,84 @@ async fn graphql_links_nodes_refs_commits_reviews_and_draft_transitions() {
     .await;
     assert_eq!(payloads[3]["changes"]["body"]["from"], "original");
 }
+
+#[tokio::test]
+async fn a_merge_into_the_default_branch_closes_the_issues_the_pull_request_links() {
+    // Given PR 1 into main and PR 2 into develop, issue 3 named by PR 1's closing keyword,
+    // issue 4 linked to PR 1 by hand, and issue 5 named by PR 2's closing keyword
+    let server = fixture()
+        .register(hubdouble_api_issues::register)
+        .entry(seeded("main", false))
+        .entry(seeded("develop", false))
+        .start()
+        .await;
+    let client = writer(&server);
+    for title in ["keyword", "by hand", "other branch"] {
+        let opened = client
+            .post("repos/acme/public/issues", &json!({"title": title}))
+            .await;
+        checked("issues/create", StatusCode::CREATED, &opened);
+    }
+    edit(&client, NUM, json!({"body": "Fixes #3"})).await;
+    edit(
+        &client,
+        "repos/acme/public/pulls/2",
+        json!({"body": "Fixes #5"}),
+    )
+    .await;
+    let link = json!({"repository": "acme/public", "issue_number": 4, "pull_number": 1});
+    let linked = server.admin(Method::POST, "issue_link", Some(&link)).await;
+    assert_eq!(linked.status, StatusCode::CREATED);
+    server.admin(Method::POST, "hooks/drain", None).await;
+    server.receiver.received().await;
+    server.clock.advance(60);
+    // When both pull requests merge
+    for number in [2, 1] {
+        let path = format!("{PULLS}/{number}/merge");
+        let merged = client
+            .call_json(Method::PUT, &path, &json!({"merge_method": "merge"}))
+            .await;
+        checked("pulls/merge", StatusCode::OK, &merged);
+    }
+    // Then the issues PR 1 links are closed as completed by the merger, and issue 5 stays open
+    for number in [3, 4] {
+        let issue = get(
+            &client,
+            &format!("repos/acme/public/issues/{number}"),
+            "issues/get",
+        )
+        .await;
+        assert_eq!(issue["state"], "closed");
+        assert_eq!(issue["state_reason"], "completed");
+        assert_eq!(issue["closed_at"], json!(server.clock.now()));
+        assert_eq!(issue["closed_by"]["login"], "alice");
+    }
+    let other = get(&client, "repos/acme/public/issues/5", "issues/get").await;
+    assert_eq!(other["state"], "open");
+    // And each closed issue sends issues.closed
+    assert_eq!(
+        server.admin(Method::POST, "hooks/drain", None).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let mut closed: Vec<_> = server
+        .receiver
+        .received()
+        .await
+        .into_iter()
+        .filter(|d| d.header("x-github-event") == "issues")
+        .map(|d| {
+            let payload = d.json();
+            validate::webhook_payload("issues", Some("closed"), &payload)
+                .unwrap_or_else(|errors| panic!("issues.closed: {errors:?}"));
+            (
+                payload["action"].clone(),
+                payload["issue"]["number"].clone(),
+            )
+        })
+        .collect();
+    closed.sort_by_key(|(_, number)| number.as_i64());
+    assert_eq!(
+        closed,
+        [(json!("closed"), json!(3)), (json!("closed"), json!(4))]
+    );
+}
