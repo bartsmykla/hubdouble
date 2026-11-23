@@ -3,7 +3,7 @@ mod params;
 mod registry;
 mod reply;
 
-pub use ctx::{Access, Ctx, Page, Parts};
+pub use ctx::{Access, Ctx, Page, PageLimit, Parts};
 pub use params::{Params, Query};
 pub use registry::{Entry, OperationInfo, Registry, Route};
 pub use reply::{JSON, Reply};

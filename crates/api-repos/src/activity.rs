@@ -5,7 +5,7 @@ use http::header::LINK;
 use hubdouble_admin::Registrar;
 use hubdouble_git::{Git, ObjectId, RefChange};
 use hubdouble_model::{ApiError, Timestamp, node_id};
-use hubdouble_render::{SimpleUser, escape};
+use hubdouble_render::{SimpleUser, query_escape};
 use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::{Accounts, Entity, Issues, Rows, Tx, TxMut};
 use serde::Serialize;
@@ -140,10 +140,10 @@ fn link(ctx: &Ctx<'_>, rel: &str, name: &str, cursor: i64) -> Result<String, Api
     );
     for (k, v) in ctx
         .query()
-        .iter()
+        .distinct()
         .filter(|(k, _)| !matches!(*k, "before" | "after"))
     {
-        let _ = write!(url, "{}={}&", escape(k), escape(v));
+        let _ = write!(url, "{}={}&", query_escape(k), query_escape(v));
     }
     Ok(format!("<{url}{name}={cursor}>; rel=\"{rel}\""))
 }
@@ -190,7 +190,7 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     if descending {
         items.reverse();
     }
-    let per_page = ctx.page_params().per_page;
+    let per_page = ctx.page_params()?.per_page;
     let (start, end) = match (query.get("after"), query.get("before")) {
         (Some(after), _) => {
             let start = cursor_position(&items, after)? + 1;

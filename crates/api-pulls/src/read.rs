@@ -123,7 +123,7 @@ fn page<'a, T, R: Serialize>(
     items: &'a [T],
     render: impl FnMut(&'a T) -> Result<R, ApiError>,
 ) -> Result<Reply, ApiError> {
-    let Page { page, per_page } = ctx.page_params();
+    let Page { page, per_page } = ctx.page_params()?;
     let start = (page - 1).saturating_mul(per_page).min(items.len());
     let end = start.saturating_add(per_page).min(items.len());
     let answer: Vec<_> = items[start..end]

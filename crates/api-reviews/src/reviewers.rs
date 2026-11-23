@@ -24,7 +24,7 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let issue = view::pull(ctx)?;
     let pull = view::pull_fields(&issue)?;
     let view = view::rest_view(ctx)?;
-    let page = ctx.page_params();
+    let page = ctx.page_params()?;
     let skip = (page.page - 1).saturating_mul(page.per_page);
     let reviewers = pull
         .requested_reviewers

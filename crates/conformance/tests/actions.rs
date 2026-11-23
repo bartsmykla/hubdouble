@@ -272,6 +272,48 @@ async fn a_filtered_run_list_ends_at_the_page_that_starts_at_result_1000() {
 }
 
 #[tokio::test]
+async fn an_unfiltered_run_list_counts_at_most_40000_runs() {
+    // Given 40 001 runs of one workflow
+    let server = server("none").await;
+    let client = client(&server);
+    let first = dispatch(&client, "main").await["workflow_run_id"]
+        .as_i64()
+        .unwrap();
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            let run = tx
+                .table::<WorkflowRuns>()
+                .get(first)
+                .unwrap()
+                .as_ref()
+                .clone();
+            for _ in 1..40_001 {
+                let mut copy = run.clone();
+                copy.id = tx.next_id();
+                copy.node_id = node_id::entity(node_id::WORKFLOW_RUN, copy.id);
+                tx.table_mut::<WorkflowRuns>().insert(copy)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    // When the runs are listed 7 to a page, as live microsoft/vscode was
+    let answer = client
+        .get(&format!("{ACTIONS}/runs?per_page=7&page=2"))
+        .await;
+
+    // Then the total stops at 40 000 and the last page follows it
+    assert_eq!(
+        valid("list-workflow-runs-for-repo", &answer)["total_count"],
+        40_000
+    );
+    assert!(answer.header("link").contains("page=5715>; rel=\"last\""));
+}
+
+#[tokio::test]
 async fn a_filtered_run_list_counts_at_most_2500_runs() {
     // Given 2 600 queued runs of one workflow, 300 of them from a push
     let server = server("none").await;

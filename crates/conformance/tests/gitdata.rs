@@ -648,6 +648,62 @@ async fn commits_list_by_branch_and_by_path_with_pages() {
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
 }
 
+fn rels(answer: &Answer) -> Vec<(String, String)> {
+    answer
+        .header("link")
+        .split(", ")
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let (url, rel) = l.split_once("; rel=").unwrap();
+            let page = url.trim_end_matches('>').rsplit_once("page=").unwrap().1;
+            (rel.trim_matches('"').to_owned(), page.to_owned())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_commit_list_and_compare_order_their_links_as_github_does() {
+    // Given feature two commits deep and a branch two commits ahead of main
+    let s = server().await;
+    let client = alice(&s);
+    commit_on(&s, PUBLIC_REPO_ID, ALICE_ID, "two", "one.txt");
+    commit_on(&s, PUBLIC_REPO_ID, ALICE_ID, "two", "two.txt");
+    let list = "repos/acme/public/commits?sha=feature&per_page=1";
+    let compare = "repos/acme/public/compare/main...two?per_page=1";
+    let r = |rel: &str, page: &str| (rel.to_owned(), page.to_owned());
+
+    // When the first, the last and a later page of each are read
+    for (path, expected) in [
+        (list.to_owned(), vec![r("next", "2"), r("last", "2")]),
+        (
+            format!("{list}&page=2"),
+            vec![r("first", "1"), r("prev", "1")],
+        ),
+        (
+            format!("{list}&page=5"),
+            vec![r("first", "1"), r("prev", "4")],
+        ),
+        (
+            compare.to_owned(),
+            vec![r("last", "2"), r("next", "2"), r("first", "1")],
+        ),
+        (
+            format!("{compare}&page=2"),
+            vec![r("last", "2"), r("first", "1"), r("prev", "1")],
+        ),
+        (
+            format!("{compare}&page=9"),
+            vec![r("last", "2"), r("first", "1"), r("prev", "8")],
+        ),
+    ] {
+        let answer = client.get(&path).await;
+
+        // Then the links come in live cli/cli's order for commits and compare/v2.0.0...v2.1.0
+        assert_eq!(answer.status, StatusCode::OK, "{path}");
+        assert_eq!(rels(&answer), expected, "{path}");
+    }
+}
+
 #[tokio::test]
 async fn a_commit_reads_with_its_files_and_as_a_sha_with_a_conditional_answer() {
     // Given

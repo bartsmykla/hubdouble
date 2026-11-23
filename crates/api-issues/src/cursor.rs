@@ -4,13 +4,21 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE;
 use http::header::LINK;
 use hubdouble_model::ApiError;
-use hubdouble_render::escape;
-use hubdouble_rest::{Ctx, Reply};
+use hubdouble_render::query_escape;
+use hubdouble_rest::{Ctx, Page, PageLimit, Reply};
 use serde::Serialize;
 
 use crate::shared::invalid;
 
 const PREFIX: &[u8] = b"cursor:v2:";
+
+const PAGES: PageLimit = PageLimit {
+    results: 10_000,
+    lookahead: 1,
+    message: "Pagination with the page parameter is not supported for large datasets, please use cursor based pagination (after/before)",
+    documentation_url: "https://docs.github.com/rest/issues/issues#list-repository-issues",
+    before_overflow: false,
+};
 
 pub(crate) struct Keyed<T> {
     pub(crate) key: u64,
@@ -78,7 +86,6 @@ pub(crate) fn page<T, R: Serialize>(
     render: impl FnMut(&T) -> R,
 ) -> Result<Reply, ApiError> {
     let q = ctx.query();
-    let per_page = ctx.page_params().per_page;
     let cursor = |field: &str| {
         q.get(field)
             .map(|c| {
@@ -93,6 +100,14 @@ pub(crate) fn page<T, R: Serialize>(
             .transpose()
     };
     let (after, before) = (cursor("after")?, cursor("before")?);
+    let Page {
+        page: asked,
+        per_page,
+    } = if after.is_some() || before.is_some() {
+        ctx.page_params()?
+    } else {
+        ctx.page_params_within(&PAGES)?
+    };
     let passed = |e: &Keyed<T>, c: (u64, u64)| {
         let at = (e.key, e.id);
         if descending { at > c } else { at < c }
@@ -104,9 +119,7 @@ pub(crate) fn page<T, R: Serialize>(
         let end = items.partition_point(|e| passed(e, c));
         (end.saturating_sub(per_page), end)
     } else {
-        let start = (ctx.page_params().page - 1)
-            .saturating_mul(per_page)
-            .min(items.len());
+        let start = (asked - 1).saturating_mul(per_page).min(items.len());
         (start, start.saturating_add(per_page).min(items.len()))
     };
     let shown = &items[start..end];
@@ -115,7 +128,7 @@ pub(crate) fn page<T, R: Serialize>(
     let (Some(first), Some(last)) = (shown.first(), shown.last()) else {
         return Ok(reply);
     };
-    let page = q.get("page").and_then(|p| p.parse::<usize>().ok());
+    let page = q.get("page").map(|_| asked);
     let mut rels = Vec::with_capacity(2);
     if end < items.len() {
         let next_page = match page {
@@ -170,7 +183,7 @@ fn link(
     let other = if field == "after" { "before" } else { "after" };
     let mut pairs: Vec<(String, String)> = Vec::new();
     let mut placed = false;
-    for (name, value) in ctx.query().iter().filter(|(n, _)| *n != other) {
+    for (name, value) in ctx.query().distinct().filter(|(n, _)| *n != other) {
         let value = match name {
             _ if name == field => {
                 placed = true;
@@ -194,7 +207,7 @@ fn link(
         if i > 0 {
             url.push('&');
         }
-        let _ = write!(url, "{}={}", escape(name), escape(value));
+        let _ = write!(url, "{}={}", query_escape(name), query_escape(value));
     }
     url
 }

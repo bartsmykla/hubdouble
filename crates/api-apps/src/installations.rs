@@ -74,7 +74,7 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .table::<Installations>()
         .children(app.id)
         .filter(|i| since.is_none_or(|time| i.updated_at > time));
-    let params = ctx.page_params();
+    let params = ctx.page_params()?;
     let (items, total) = page(params, items, |i| render(ctx.tx(), ctx.urls(), i))?;
     paged_reply(ctx, params, total, &items)
 }
@@ -227,7 +227,7 @@ fn repositories(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let ids = token.repo_ids.as_deref();
     let selection = selection(installation, ids);
     let items = repos(ctx.tx(), installation, ids);
-    let params = ctx.page_params();
+    let params = ctx.page_params()?;
     let (repositories, total_count) = page(params, items, |repo| {
         Ok(render::Repository::new(ctx.urls(), repo, owner))
     })?;

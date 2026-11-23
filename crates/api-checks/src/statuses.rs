@@ -111,7 +111,7 @@ pub fn combined(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let all = statuses_on(ctx.tx(), ctx.repo()?.id, &sha);
     let latest = latest_statuses(&all);
     let view = rest_view(ctx)?;
-    let (shown, link) = window(ctx, &latest);
+    let (shown, link) = window(ctx, &latest)?;
     let statuses = shown
         .iter()
         .map(|status| {

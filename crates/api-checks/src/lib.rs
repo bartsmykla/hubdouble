@@ -123,12 +123,12 @@ pub fn leading_integer(text: &str) -> i64 {
     if negative { -value } else { value }
 }
 
-fn window<'i, T>(ctx: &Ctx<'_>, items: &'i [T]) -> (&'i [T], Option<String>) {
-    let Page { page, per_page } = ctx.page_params();
+fn window<'i, T>(ctx: &Ctx<'_>, items: &'i [T]) -> Result<(&'i [T], Option<String>), ApiError> {
+    let Page { page, per_page } = ctx.page_params()?;
     let start = (page - 1).saturating_mul(per_page).min(items.len());
     let end = start.saturating_add(per_page).min(items.len());
     let last = items.len().div_ceil(per_page).max(1);
-    (&items[start..end], ctx.link_header(page, last))
+    Ok((&items[start..end], ctx.link_header(page, last)))
 }
 
 fn page_object<T, R: Serialize>(
@@ -137,7 +137,7 @@ fn page_object<T, R: Serialize>(
     items: &[T],
     render: impl FnMut(&T) -> R,
 ) -> Result<Reply, ApiError> {
-    let (shown, link) = window(ctx, items);
+    let (shown, link) = window(ctx, items)?;
     let rendered: Vec<R> = shown.iter().map(render).collect();
     let reply = Reply::json(&json!({ "total_count": items.len(), key: rendered }))?;
     match link {

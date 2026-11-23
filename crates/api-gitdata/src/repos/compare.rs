@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
+use http::header::LINK;
 use hubdouble_git::{Commit, ObjectData, ObjectId};
 use hubdouble_model::ApiError;
-use hubdouble_rest::{Ctx, Reply};
+use hubdouble_rest::{Ctx, Page, Reply};
 use serde::Serialize;
 
-use super::{COMMIT_FILES, DiffEntry, RepoCommit, View, explicit_page, slice, with_link};
+use super::{COMMIT_FILES, DiffEntry, RepoCommit, View, explicit_page, slice};
 use crate::common::{commit_at, network_repo};
 
 const COMPARE_COMMITS: usize = 250;
@@ -65,7 +66,7 @@ pub(crate) fn compare(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         (0, _) => "behind",
         _ => "diverged",
     };
-    let page = explicit_page(ctx);
+    let page = explicit_page(ctx)?;
     let commits = match page {
         Some(p) => slice(&cmp.commits, p),
         None => &cmp.commits[cmp.commits.len().saturating_sub(COMPARE_COMMITS)..],
@@ -94,8 +95,20 @@ pub(crate) fn compare(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         files,
     };
     let reply = Reply::json(&body)?;
-    match page {
-        Some(p) => with_link(ctx, reply, p, cmp.commits.len()),
-        None => Ok(reply),
+    let Some(Page { page, per_page }) = page else {
+        return Ok(reply);
+    };
+    let last = cmp.commits.len().div_ceil(per_page).max(1);
+    if last <= 1 && page <= 1 {
+        return Ok(reply);
     }
+    let mut rels = vec![(last, "last")];
+    if page < last {
+        rels.push((page + 1, "next"));
+    }
+    rels.push((1, "first"));
+    if page > 1 {
+        rels.push((page - 1, "prev"));
+    }
+    reply.header(LINK, &ctx.links(&rels))
 }

@@ -5,6 +5,8 @@
 
 use http::header::ACCEPT;
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
+use hubdouble_model::node_id;
+use hubdouble_store::IssueComments;
 use hubdouble_testkit::fixture::{ALICE_ID, ALICE_TOKEN, ORG_ID, PRIVATE_REPO_ID, PUBLIC_REPO_ID};
 use hubdouble_testkit::{Answer, GoGithub, TestServer};
 use serde_json::json;
@@ -301,6 +303,238 @@ async fn the_issue_list_pages_with_githubs_after_and_before_cursors() {
     assert_eq!(bogus.json()["errors"][0]["field"], "after");
     assert_eq!(bogus.json()["errors"][0]["code"], "invalid");
     assert_eq!(bogus.json()["errors"][0]["value"], "bogus");
+}
+
+fn queries(answer: &Answer, list: &str) -> Vec<(String, String)> {
+    answer
+        .header("link")
+        .split(", ")
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let (url, rel) = l.split_once("; rel=").unwrap();
+            let (_, query) = url.trim_matches(['<', '>']).split_once(list).unwrap();
+            (rel.trim_matches('"').to_owned(), shape(query))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn links_write_each_query_name_once_in_its_first_place_with_its_last_value() {
+    // Given 12 labels and four issues on acme/public
+    let (_server, alice) = repo_with_labels(12).await;
+    for n in 0..4 {
+        let made = alice
+            .post(
+                "repos/acme/public/issues",
+                &json!({"title": format!("issue {n}")}),
+            )
+            .await;
+        assert_eq!(made.status, StatusCode::CREATED);
+    }
+    let s = |rel: &str, q: &str| (rel.to_owned(), q.to_owned());
+
+    // When lists are read with repeated names and with names and values to escape
+    let repeated = alice
+        .get(&format!(
+            "{LABELS}?per_page=2&page=2&per_page=3&page=3&foo=1&foo=2"
+        ))
+        .await;
+    let issues = alice
+        .get("repos/acme/public/issues?per_page=1&per_page=3")
+        .await;
+    let escaped = alice
+        .get(&format!(
+            "{LABELS}?per_page=3&a%20b=c+d&x=%2F&v=a~b*c:d@e,f!g"
+        ))
+        .await;
+    let past_the_end = alice.get(&format!("{LABELS}?per_page=3&page=100")).await;
+
+    // Then each link holds what live cli/cli answered for the same queries
+    assert_eq!(
+        queries(&repeated, "/labels?"),
+        [
+            s("prev", "per_page=3&page=2&foo=2"),
+            s("next", "per_page=3&page=4&foo=2"),
+            s("last", "per_page=3&page=4&foo=2"),
+            s("first", "per_page=3&page=1&foo=2"),
+        ]
+    );
+    assert_eq!(
+        queries(&issues, "/issues?"),
+        [s("next", "per_page=3&after=*&page=2")]
+    );
+    assert_eq!(
+        queries(&escaped, "/labels?")[0],
+        s(
+            "next",
+            "per_page=3&a+b=c+d&x=%2F&v=a~b%2Ac%3Ad%40e%2Cf%21g&page=2"
+        )
+    );
+    assert_eq!(
+        queries(&past_the_end, "/labels?"),
+        [
+            s("prev", "per_page=3&page=4"),
+            s("last", "per_page=3&page=4"),
+            s("first", "per_page=3&page=1"),
+        ]
+    );
+}
+
+fn refused(answer: &Answer, docs: &str) {
+    assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let body = answer.json();
+    assert_eq!(body["documentation_url"], docs);
+    assert_eq!(body["status"], "422");
+    assert!(body.get("errors").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn deep_pages_answer_the_refusals_of_live_github() {
+    // Given two issues on acme/public and every route
+    let server = TestServer::builder()
+        .frame(hubdouble_api::register_all)
+        .fixture()
+        .start()
+        .await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    for title in ["one", "two"] {
+        let made = alice
+            .post("repos/acme/public/issues", &json!({"title": title}))
+            .await;
+        assert_eq!(made.status, StatusCode::CREATED);
+    }
+    let pull = alice
+        .post(
+            "repos/acme/public/pulls",
+            &json!({"title": "Feature", "head": "feature", "base": "main"}),
+        )
+        .await
+        .json()["number"]
+        .clone();
+    let first = alice.get("repos/acme/public/issues?per_page=1").await;
+    let after = rel_queries(&alice, &first)[0]
+        .1
+        .split('&')
+        .find(|p| p.starts_with("after="))
+        .unwrap()
+        .to_owned();
+    let repo = "repos/acme/public";
+    let overflow = "https://docs.github.com/rest/guides/using-pagination-in-the-rest-api";
+    let issues = "https://docs.github.com/rest/issues/issues#list-repository-issues";
+    let fast = "https://docs.github.com/v3/#pagination";
+    let releases = "https://docs.github.com/rest/releases/releases#list-releases";
+
+    // When each list is read at its deepest page and one page deeper, as live cli/cli was
+    for served in [
+        format!("{repo}/issues?per_page=1&page=5000"),
+        format!("{repo}/issues?per_page=100&page=99"),
+        format!("{repo}/issues?per_page=1&page=5001&{after}"),
+        format!("{repo}/issues/comments?per_page=100&page=300"),
+        format!("{repo}/releases?per_page=100&page=100"),
+        format!("{repo}/actions/runs?per_page=100&page=400"),
+        format!("{repo}/labels?per_page=1&page=9223372036854775807"),
+        format!("{repo}/labels?per_page=100&page=92233720368547758"),
+        format!("{repo}/pulls?per_page=100&page=100000"),
+    ] {
+        // Then GitHub serves the page
+        assert_eq!(alice.get(&served).await.status, StatusCode::OK, "{served}");
+    }
+    for (path, docs) in [
+        (format!("{repo}/issues?per_page=1&page=5001"), issues),
+        (format!("{repo}/issues?per_page=100&page=100"), issues),
+        (
+            format!("{repo}/issues?per_page=1&page=99999999999999999999"),
+            overflow,
+        ),
+        (
+            format!("{repo}/issues/comments?per_page=100&page=301"),
+            fast,
+        ),
+        (
+            format!("{repo}/issues/comments?per_page=100&page=92233720368547759"),
+            fast,
+        ),
+        (format!("{repo}/releases?per_page=100&page=101"), releases),
+        (
+            format!("{repo}/releases?per_page=100&page=92233720368547759"),
+            overflow,
+        ),
+        (format!("{repo}/actions/runs?per_page=100&page=401"), fast),
+        (
+            format!("{repo}/labels?per_page=1&page=9223372036854775808"),
+            overflow,
+        ),
+        (
+            format!("{repo}/labels?per_page=100&page=92233720368547759"),
+            overflow,
+        ),
+        (format!("{repo}/pulls?page=99999999999999999999"), overflow),
+        (
+            format!("{repo}/commits?per_page=100&page=92233720368547759"),
+            overflow,
+        ),
+        (
+            format!("{repo}/compare/main...feature?per_page=100&page=92233720368547759"),
+            overflow,
+        ),
+        (
+            format!("{repo}/pulls/{pull}/files?per_page=100&page=92233720368547759"),
+            overflow,
+        ),
+    ] {
+        // Then GitHub refuses the deeper page with the list's own answer
+        refused(&alice.get(&path).await, docs);
+    }
+}
+
+#[tokio::test]
+async fn the_repository_comment_list_links_its_last_page_within_30000_comments() {
+    // Given 30 100 comments on one issue of acme/public
+    let (server, alice) = repo_with_labels(1).await;
+    let issue = alice
+        .post("repos/acme/public/issues", &json!({"title": "busy"}))
+        .await
+        .json();
+    let comment = alice
+        .post(
+            &format!("repos/acme/public/issues/{}/comments", issue["number"]),
+            &json!({"body": "first"}),
+        )
+        .await
+        .json();
+    let services = server.server.services();
+    services
+        .store
+        .update(|tx| {
+            let id = comment["id"].as_i64().unwrap();
+            let one = tx
+                .table::<IssueComments>()
+                .get(id)
+                .unwrap()
+                .as_ref()
+                .clone();
+            for _ in 1..30_100 {
+                let mut copy = one.clone();
+                copy.id = tx.next_id();
+                copy.node_id = node_id::entity(node_id::ISSUE_COMMENT, copy.id);
+                tx.table_mut::<IssueComments>().insert(copy)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    // When the repository's comments are listed 7 to a page
+    let answer = alice
+        .get("repos/acme/public/issues/comments?per_page=7&page=2")
+        .await;
+
+    // Then the last page is the one live cli/cli links for 7 to a page, past 30 000 comments
+    assert_eq!(answer.status, StatusCode::OK);
+    assert!(
+        links(&answer).contains(&("last".to_owned(), "4286".to_owned())),
+        "{}",
+        answer.header("link")
+    );
 }
 
 #[tokio::test]

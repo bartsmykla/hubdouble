@@ -248,9 +248,11 @@ fn added_patch(data: &[u8]) -> (u64, Option<String>) {
     (count, Some(patch))
 }
 
-fn explicit_page(ctx: &Ctx<'_>) -> Option<Page> {
+fn explicit_page(ctx: &Ctx<'_>) -> Result<Option<Page>, ApiError> {
     let q = ctx.query();
-    (q.get("page").is_some() || q.get("per_page").is_some()).then(|| ctx.page_params())
+    (q.get("page").is_some() || q.get("per_page").is_some())
+        .then(|| ctx.page_params())
+        .transpose()
 }
 
 fn slice<T>(items: &[T], page: Page) -> &[T] {
@@ -277,18 +279,8 @@ fn no_commit(reference: &str) -> ApiError {
     )
 }
 
-fn commit_page(ctx: &Ctx<'_>) -> Page {
-    let query = ctx.query();
-    let positive = |name| {
-        query
-            .get(name)
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|&value| value > 0)
-    };
-    Page {
-        page: positive("page").unwrap_or(1),
-        per_page: positive("per_page").map_or(COMMIT_FILES, |n| n.min(COMMIT_FILES)),
-    }
+fn commit_page(ctx: &Ctx<'_>) -> Result<Page, ApiError> {
+    ctx.page_params_sized(COMMIT_FILES, COMMIT_FILES)
 }
 
 pub(crate) fn get_commit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
@@ -306,7 +298,7 @@ pub(crate) fn get_commit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     }
     let files = view.files(id, &commit)?;
     let pageable = &files[..files.len().min(MAX_COMMIT_FILES)];
-    let page = commit_page(ctx);
+    let page = commit_page(ctx)?;
     let body = view.with_files(id, &commit, &files, slice(pageable, page));
     with_link(ctx, Reply::json(&body)?, page, pageable.len())
 }
@@ -348,7 +340,25 @@ pub(crate) fn list_commits(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     {
         log.retain(|(id, c)| touches(view.git, view.tx, view.repo.id, *id, c, path));
     }
-    ctx.page(&log, |(id, c)| view.commit(*id, c))
+    let page = ctx.page_params()?;
+    let rendered: Vec<_> = slice(&log, page)
+        .iter()
+        .map(|(id, c)| view.commit(*id, c))
+        .collect();
+    let reply = Reply::json(&rendered)?;
+    let Page { page, per_page } = page;
+    let last = log.len().div_ceil(per_page).max(1);
+    let mut rels = Vec::with_capacity(4);
+    if page < last {
+        rels.extend([(page + 1, "next"), (last, "last")]);
+    }
+    if page > 1 {
+        rels.extend([(1, "first"), (page - 1, "prev")]);
+    }
+    if rels.is_empty() {
+        return Ok(reply);
+    }
+    reply.header(LINK, &ctx.links(&rels))
 }
 
 #[derive(Deserialize)]

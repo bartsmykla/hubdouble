@@ -7,24 +7,30 @@ use http::header::LINK;
 use hubdouble_auth::Actor;
 use hubdouble_git::Git;
 use hubdouble_model::{ApiError, Clock, Repo, Timestamp};
-use hubdouble_render::Urls;
+use hubdouble_render::{Urls, query_escape};
 use hubdouble_store::{Tx, TxMut};
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::params::{Params, Query};
 use crate::reply::Reply;
 
-const QUERY_VALUE: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'#')
-    .add(b'&')
-    .add(b'+')
-    .add(b'<')
-    .add(b'=')
-    .add(b'>');
+const OVERFLOW_DOCS: &str = "https://docs.github.com/rest/guides/using-pagination-in-the-rest-api";
+
+/// How deep `page` reaches into one list: GitHub answers `422` for a deeper page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageLimit {
+    /// The most results GitHub serves: a page is refused when
+    /// `page * (per_page + lookahead)` passes it, and [`Ctx::page_within`] counts at most this
+    /// many results for the last page.
+    pub results: usize,
+    /// `1` for a list that reads one result past the page to see whether another page follows.
+    pub lookahead: usize,
+    pub message: &'static str,
+    pub documentation_url: &'static str,
+    /// Whether GitHub checks this limit before the limit of `page * per_page` to `i64::MAX`.
+    pub before_overflow: bool,
+}
 
 /// The store access of a request: `GET` and `HEAD` read, every other method writes.
 pub enum Access<'a> {
@@ -208,28 +214,122 @@ impl<'a> Ctx<'a> {
         self.p.urls
     }
 
+    /// The `per_page` of a list request, without the checks of [`Ctx::page_params`], for a list
+    /// that pages by cursor only.
     #[must_use]
-    pub fn page_params(&self) -> Page {
-        let number = |name: &str| self.p.query.get(name).and_then(|v| v.parse::<usize>().ok());
-        Page {
-            page: number("page").filter(|p| *p > 0).unwrap_or(1),
-            per_page: number("per_page")
-                .filter(|p| *p > 0)
-                .map_or(30, |p| p.min(100)),
+    pub fn per_page(&self) -> usize {
+        self.sized_per_page(30, 100)
+    }
+
+    fn sized_per_page(&self, default: usize, most: usize) -> usize {
+        match self.p.query.get("per_page").map(str::parse::<u128>) {
+            Some(Ok(0)) | None => default,
+            Some(Ok(n)) => usize::try_from(n).map_or(most, |n| n.min(most)),
+            Some(Err(e)) if *e.kind() == std::num::IntErrorKind::PosOverflow => most,
+            Some(Err(_)) => default,
         }
+    }
+
+    /// The `page` and `per_page` of a list request.
+    ///
+    /// # Errors
+    ///
+    /// `422` when `page * per_page` passes `i64::MAX`, as GitHub refuses it on every list.
+    pub fn page_params(&self) -> Result<Page, ApiError> {
+        self.checked_page(None, 30, 100)
+    }
+
+    /// The `page` and `per_page` of a list request that GitHub serves only to `limit`.
+    ///
+    /// # Errors
+    ///
+    /// `422` with the list's own answer for a page past `limit`, and as [`Ctx::page_params`].
+    pub fn page_params_within(&self, limit: &PageLimit) -> Result<Page, ApiError> {
+        self.checked_page(Some(limit), 30, 100)
+    }
+
+    /// [`Ctx::page_params`] of a list whose `per_page` defaults to `default` and stops at `most`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Ctx::page_params`].
+    pub fn page_params_sized(&self, default: usize, most: usize) -> Result<Page, ApiError> {
+        self.checked_page(None, default, most)
+    }
+
+    fn checked_page(
+        &self,
+        limit: Option<&PageLimit>,
+        default: usize,
+        most: usize,
+    ) -> Result<Page, ApiError> {
+        let page = match self.p.query.get("page").map(str::parse::<u128>) {
+            Some(Ok(n)) => n.max(1),
+            Some(Err(e)) if *e.kind() == std::num::IntErrorKind::PosOverflow => u128::MAX,
+            Some(Err(_)) | None => 1,
+        };
+        let per_page = self.sized_per_page(default, most);
+        let past = |l: &PageLimit| {
+            let width = u128::try_from(per_page + l.lookahead).unwrap_or(u128::MAX);
+            page.saturating_mul(width) > u128::try_from(l.results).unwrap_or(u128::MAX)
+        };
+        let refuse =
+            |l: &PageLimit| ApiError::unprocessable(l.message).with_docs(l.documentation_url);
+        if let Some(l) = limit.filter(|l| l.before_overflow && past(l)) {
+            return Err(refuse(l));
+        }
+        let width = u128::try_from(per_page).unwrap_or(u128::MAX);
+        if page.saturating_mul(width) > i64::MAX.unsigned_abs().into() {
+            return Err(ApiError::unprocessable(format!(
+                "Pagination exceeds maximum limit of {}",
+                i64::MAX
+            ))
+            .with_docs(OVERFLOW_DOCS));
+        }
+        if let Some(l) = limit.filter(|l| past(l)) {
+            return Err(refuse(l));
+        }
+        Ok(Page {
+            page: usize::try_from(page).unwrap_or(usize::MAX),
+            per_page,
+        })
     }
 
     /// One page of `items` as a JSON array with GitHub's `Link` header; an empty page is `[]`.
     ///
     /// # Errors
     ///
-    /// `500` when an item cannot be serialized.
+    /// `500` when an item cannot be serialized, and as [`Ctx::page_params`].
     pub fn page<T, R: Serialize>(
         &self,
         items: &[T],
         render: impl FnMut(&T) -> R,
     ) -> Result<Reply, ApiError> {
-        let Page { page, per_page } = self.page_params();
+        let page = self.page_params()?;
+        self.page_of(page, items, render)
+    }
+
+    /// [`Ctx::page`] of a list that GitHub serves only to `limit`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Ctx::page`] and [`Ctx::page_params_within`].
+    pub fn page_within<T, R: Serialize>(
+        &self,
+        limit: &PageLimit,
+        items: &[T],
+        render: impl FnMut(&T) -> R,
+    ) -> Result<Reply, ApiError> {
+        let page = self.page_params_within(limit)?;
+        self.page_of(page, &items[..items.len().min(limit.results)], render)
+    }
+
+    fn page_of<T, R: Serialize>(
+        &self,
+        Page { page, per_page }: Page,
+        items: &[T],
+        render: impl FnMut(&T) -> R,
+    ) -> Result<Reply, ApiError> {
         let start = (page - 1).saturating_mul(per_page).min(items.len());
         let end = start.saturating_add(per_page).min(items.len());
         let rendered: Vec<R> = items[start..end].iter().map(render).collect();
@@ -241,7 +341,8 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// GitHub's `Link` header for page `page` of `last`, or `None` for a single page.
+    /// GitHub's `Link` header for page `page` of `last`, or `None` for a single page. A page past
+    /// the last has `prev` and `last` at the last page.
     #[must_use]
     pub fn link_header(&self, page: usize, last: usize) -> Option<String> {
         if last <= 1 && page <= 1 {
@@ -249,31 +350,54 @@ impl<'a> Ctx<'a> {
         }
         let mut rels: Vec<(usize, &str)> = Vec::with_capacity(4);
         if page > 1 {
-            rels.push((page - 1, "prev"));
+            rels.push(((page - 1).min(last), "prev"));
         }
         if page < last {
             rels.push((page + 1, "next"));
+        }
+        if page != last {
             rels.push((last, "last"));
         }
         if page > 1 {
             rels.push((1, "first"));
         }
+        Some(self.links(&rels))
+    }
+
+    /// A `Link` header with one entry for each `(page, rel)`, in order.
+    #[must_use]
+    pub fn links(&self, rels: &[(usize, &str)]) -> String {
         let mut out = String::new();
         for (i, (target, rel)) in rels.iter().enumerate() {
             if i > 0 {
                 out.push_str(", ");
             }
             let _ = write!(out, "<{}{}?", self.p.urls.api, self.p.path);
-            for (name, value) in self.p.query.iter().filter(|(n, _)| *n != "page") {
-                let _ = write!(
-                    out,
-                    "{}={}&",
-                    utf8_percent_encode(name, QUERY_VALUE),
-                    utf8_percent_encode(value, QUERY_VALUE)
-                );
-            }
-            let _ = write!(out, "page={target}>; rel=\"{rel}\"");
+            out.push_str(&self.link_query("page", &target.to_string()));
+            let _ = write!(out, ">; rel=\"{rel}\"");
         }
-        Some(out)
+        out
+    }
+
+    /// The request's query as GitHub writes it into a `Link` header: each name once at its first
+    /// place with its last value, `name` set to `value` in its place or added at the end.
+    #[must_use]
+    pub fn link_query(&self, name: &str, value: &str) -> String {
+        let mut out = String::new();
+        let mut placed = false;
+        for (n, v) in self.p.query.distinct() {
+            let v = if n == name {
+                placed = true;
+                value
+            } else {
+                v
+            };
+            let _ = write!(out, "{}={}&", query_escape(n), query_escape(v));
+        }
+        if !placed {
+            let _ = write!(out, "{}={}&", query_escape(name), query_escape(value));
+        }
+        out.pop();
+        out
     }
 }

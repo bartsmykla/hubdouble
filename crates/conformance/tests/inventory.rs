@@ -36,27 +36,7 @@ const DESCRIBED_NOT_SENT: &[(&str, Case, &str)] = &[
         APP_ONLY_422,
     ),
     (
-        "GET /repos/{owner}/{repo}/commits",
-        Case::Invalid,
-        NO_GITHUB_422,
-    ),
-    (
-        "GET /repos/{owner}/{repo}/compare/{basehead}",
-        Case::Invalid,
-        NO_GITHUB_422,
-    ),
-    (
-        "GET /repos/{owner}/{repo}/pulls",
-        Case::Invalid,
-        NO_GITHUB_422,
-    ),
-    (
         "GET /repos/{owner}/{repo}/pulls/{pull_number}",
-        Case::Invalid,
-        NO_GITHUB_422,
-    ),
-    (
-        "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
         Case::Invalid,
         NO_GITHUB_422,
     ),

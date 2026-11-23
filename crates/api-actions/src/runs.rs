@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use http::StatusCode;
 use hubdouble_model::{ApiError, Conclusion, RunStatus, Timestamp, WorkflowJob, WorkflowRun};
-use hubdouble_rest::{Ctx, Query, Registry, Reply};
+use hubdouble_rest::{Ctx, Page, PageLimit, Query, Registry, Reply};
 use hubdouble_store::{Accounts, Entity, Rows, Tx, WorkflowJobs, WorkflowRuns};
 
 use crate::lifecycle::Rerun;
@@ -176,6 +176,13 @@ fn list_workflow(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     list_runs(ctx, Some(workflow.id))
 }
 
+const RUNS: PageLimit = PageLimit {
+    results: 40_000,
+    lookahead: 0,
+    message: "In order to keep the API fast for everyone, pagination is limited for this resource.",
+    documentation_url: "https://docs.github.com/v3/#pagination",
+    before_overflow: true,
+};
 const SEARCH_LIMIT: usize = 1000;
 const SEARCH_TOTAL_LIMIT: usize = 2500;
 const SEARCH_PARAMETERS: [&str; 7] = [
@@ -198,10 +205,11 @@ fn list_runs(ctx: &Ctx<'_>, workflow: Option<i64>) -> Result<Reply, ApiError> {
         }
     };
     let filters = Filters::new(ctx.tx(), ctx.query(), docs)?;
+    let Page { page, per_page } = ctx.page_params_within(&RUNS)?;
+    let (start, limit) = ((page - 1).saturating_mul(per_page), per_page);
     let Some(created) = filters.created else {
         return crate::page::<hubdouble_render::WorkflowRun>(ctx, "workflow_runs", 0, &[]);
     };
-    let (start, limit) = crate::window(ctx);
     let filtered = SEARCH_PARAMETERS
         .iter()
         .any(|p| ctx.query().get(p).is_some());
@@ -221,7 +229,13 @@ fn list_runs(ctx: &Ctx<'_>, workflow: Option<i64>) -> Result<Reply, ApiError> {
             page.push(render(ctx, run)?);
         }
         count += 1;
-        if filtered && count == SEARCH_TOTAL_LIMIT {
+        if count
+            == if filtered {
+                SEARCH_TOTAL_LIMIT
+            } else {
+                RUNS.results
+            }
+        {
             break;
         }
     }
@@ -343,7 +357,7 @@ fn list_attempt_jobs(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 }
 
 fn jobs(ctx: &Ctx<'_>, run: &WorkflowRun, number: Option<i64>) -> Result<Reply, ApiError> {
-    let (start, size) = crate::window(ctx);
+    let (start, size) = crate::window(ctx)?;
     let (name, _) = workflows::repo_name(ctx.tx(), ctx.repo()?)?;
     let table = ctx.tx().table::<WorkflowJobs>();
     let mut count = 0;

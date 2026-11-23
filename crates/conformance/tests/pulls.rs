@@ -116,7 +116,7 @@ async fn list_filters_pages_and_sorts_before_render() {
     assert_eq!(pulls[0]["number"], 1);
     assert_eq!(pulls[0]["title"], "Changed");
     assert!(first.header("link").contains("rel=\"next\""));
-    assert!(first.header("link").contains("head=Acme:feature"));
+    assert!(first.header("link").contains("head=Acme%3Afeature"));
     assert_eq!(
         checked("pulls/list", StatusCode::OK, &second)[0]["number"],
         2

@@ -9,7 +9,7 @@ use hubdouble_model::{
     ApiError, AssetState, Grant, Release, ReleaseAsset, Repo, Requirement, Scope, node_id,
 };
 use hubdouble_render::{self as render, SimpleUser, Urls};
-use hubdouble_rest::{Ctx, Page, Reply};
+use hubdouble_rest::{Ctx, Page, PageLimit, Reply};
 use hubdouble_store::{Accounts, Blob, Blobs, ReleaseAssets, Releases, Tx, TxMut};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -72,6 +72,14 @@ fn visible(tx: &Tx, actor: &Actor, repo: &std::sync::Arc<Repo>, r: &Release) -> 
     !r.draft || hubdouble_auth::authorize(tx, actor, &CONTENTS_WRITE, Target::Repo(repo)).is_ok()
 }
 
+const RELEASES: PageLimit = PageLimit {
+    results: 10_000,
+    lookahead: 0,
+    message: "Only the first 10000 results are available.",
+    documentation_url: "https://docs.github.com/rest/releases/releases#list-releases",
+    before_overflow: false,
+};
+
 fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?;
     let tx = ctx.tx();
@@ -81,7 +89,7 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .filter(|r| visible(tx, ctx.actor(), repo, r))
         .collect();
     releases.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
-    let Page { page, per_page } = ctx.page_params();
+    let Page { page, per_page } = ctx.page_params_within(&RELEASES)?;
     let start = (page - 1).saturating_mul(per_page).min(releases.len());
     let end = start.saturating_add(per_page).min(releases.len());
     let rendered = releases[start..end]

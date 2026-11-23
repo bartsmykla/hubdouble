@@ -79,6 +79,12 @@ pub fn escape(segment: &str) -> String {
     utf8_percent_encode(segment, SEGMENT).to_string()
 }
 
+/// Escapes one query name or value, as GitHub writes them into a `Link` header: a space is `+`.
+#[must_use]
+pub fn query_escape(part: &str) -> String {
+    escape(part).replace("%20", "+")
+}
+
 fn escaped(segment: &str) -> impl std::fmt::Display {
     utf8_percent_encode(segment, SEGMENT)
 }

@@ -247,7 +247,7 @@ fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?;
     let (full_name, _) = repo_name(ctx.tx(), repo)?;
-    let (start, size) = crate::window(ctx);
+    let (start, size) = crate::window(ctx)?;
     let workflows = ctx.tx().table::<Workflows>();
     let active = || workflows.in_repo(repo.id).filter(|w| w.blob.is_some());
     let rows: Vec<_> = active()

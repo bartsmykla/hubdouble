@@ -43,7 +43,8 @@ GitHub documents redirect responses for the [repository endpoint](https://docs.g
 ## REST, IDs, and commits
 
 - Errors use `message`, `documentation_url`, and a string `status`. A validation error can include `errors` entries with `resource`, `field`, and `code`.
-- Page-based lists accept `page` and `per_page` (default 30, maximum 100). Responses include `Link` when there are other pages. Operations with cursors, such as App deliveries, use cursor pagination. An empty list is `[]`.
+- Page-based lists accept `page` and `per_page` (default 30, maximum 100). Responses include `Link` when there are other pages. A `Link` repeats each query name once, with its last value. Operations with cursors, such as App deliveries, use cursor pagination. An empty list is `[]`.
+- A page list answers `422` when `page * per_page` is larger than `9223372036854775807`. The repository issue list without `after` or `before` answers `422` when `page * (per_page + 1)` is larger than 10 000, the repository comment list past 30 000 results, releases past 10 000 and workflow runs past 40 000.
 - Successful API GET responses use a weak `ETag` derived from the media type and response body. A match with `If-None-Match` returns `304`.
 - API responses include GitHub request, media type, version, and rate-limit headers. Rate-limit counters are fixed and the remaining count stays above zero unless a fault overrides it. User tokens can receive `X-OAuth-Scopes`.
 - The API accepts `X-GitHub-Api-Version` values `2022-11-28` and `2026-03-10`. It defaults to `2022-11-28` and returns `400` for other versions.

@@ -83,7 +83,7 @@ fn page<T: Serialize>(
 ) -> Result<Reply, ApiError> {
     let body = Collection { key, count, values };
     let reply = Reply::json(&body)?;
-    let Page { page, per_page } = ctx.page_params();
+    let Page { page, per_page } = ctx.page_params()?;
     match ctx.link_header(page, count.div_ceil(per_page).max(1)) {
         Some(link) => reply.header(LINK, &link),
         None => Ok(reply),
@@ -105,7 +105,7 @@ impl<T: Serialize> Serialize for Collection<'_, T> {
     }
 }
 
-fn window(ctx: &Ctx<'_>) -> (usize, usize) {
-    let Page { page, per_page } = ctx.page_params();
-    ((page - 1).saturating_mul(per_page), per_page)
+fn window(ctx: &Ctx<'_>) -> Result<(usize, usize), ApiError> {
+    let Page { page, per_page } = ctx.page_params()?;
+    Ok(((page - 1).saturating_mul(per_page), per_page))
 }

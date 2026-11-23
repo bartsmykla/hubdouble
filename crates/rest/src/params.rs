@@ -72,4 +72,13 @@ impl Query {
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.0.iter().map(|(n, v)| (n.as_str(), v.as_str()))
     }
+
+    /// Each name once, at its first place, with its last value, as GitHub writes a query back
+    /// into a `Link` header.
+    pub fn distinct(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0.iter().enumerate().filter_map(|(i, (n, _))| {
+            let first = !self.0[..i].iter().any(|(m, _)| m == n);
+            first.then(|| (n.as_str(), self.get(n).unwrap_or_default()))
+        })
+    }
 }

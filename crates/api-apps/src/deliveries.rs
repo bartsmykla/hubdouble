@@ -82,7 +82,7 @@ fn decode_cursor(cursor: &str, app: &App, filter: Filter) -> Result<i64, ApiErro
 fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let app = app(ctx)?;
     let filter = Filter::parse(ctx.query().get("status"))?;
-    let per_page = ctx.page_params().per_page;
+    let per_page = ctx.per_page();
     let rows = ctx.tx().table::<Deliveries>();
     let before = ctx
         .query()

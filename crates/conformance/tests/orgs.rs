@@ -133,7 +133,7 @@ async fn org_and_team_reads_use_members_grants_and_the_team_hierarchy() {
     assert_status(&client, "orgs/acme/members/carol", 404).await;
     let first = client.get(&format!("{TEAM_PATH}?page=1&per_page=1")).await;
     let next = format!(
-        "<{}organizations/{}/teams?per_page=1&page=2>; rel=\"next\"",
+        "<{}organizations/{}/teams?page=2&per_page=1>; rel=\"next\"",
         client.base(),
         fixture::ORG_ID
     );

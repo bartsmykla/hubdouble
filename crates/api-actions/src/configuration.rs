@@ -378,7 +378,7 @@ fn list(ctx: &Ctx<'_>, variable: bool, org: bool) -> Result<Reply, ApiError> {
         .collect();
     items.sort_unstable_by(|a, b| a.name.cmp(&b.name));
     let count = items.len();
-    let (start, size) = crate::window(ctx);
+    let (start, size) = crate::window(ctx)?;
     let start = start.min(count);
     let end = start.saturating_add(size).min(count);
     crate::page(

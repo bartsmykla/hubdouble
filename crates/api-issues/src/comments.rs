@@ -3,7 +3,7 @@ use std::sync::Arc;
 use hubdouble_model::{
     ApiError, Issue, IssueComment, ReactionSubjectKind, Repo, RepoRole, node_id,
 };
-use hubdouble_rest::{Ctx, Reply};
+use hubdouble_rest::{Ctx, PageLimit, Reply};
 use hubdouble_store::{IssueComments, Issues, Reactions, Tx, TxMut};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -119,10 +119,18 @@ pub(crate) fn list_for_repo(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             Some((Arc::clone(c), Arc::clone(issue)))
         })
         .collect();
-    ctx.page(&rendered, |(c, issue)| {
+    ctx.page_within(&REPOSITORY_COMMENTS, &rendered, |(c, issue)| {
         comment_view(tx, urls, &repo, &full, issue, c)
     })
 }
+
+const REPOSITORY_COMMENTS: PageLimit = PageLimit {
+    results: 30_000,
+    lookahead: 0,
+    message: "In order to keep the API fast for everyone, pagination is limited for this resource.",
+    documentation_url: "https://docs.github.com/v3/#pagination",
+    before_overflow: true,
+};
 
 pub(crate) fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?.clone();
