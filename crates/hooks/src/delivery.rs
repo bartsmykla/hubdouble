@@ -15,7 +15,9 @@ use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::{Duration, Instant};
 
-pub(crate) const IDLE_REUSE: Duration = Duration::from_secs(30);
+/// How long a pooled webhook connection stays fit for reuse after its last attempt; an
+/// attempt after that opens a new connection.
+pub const IDLE_REUSE: Duration = Duration::from_secs(30);
 
 /// A byte stream a webhook request is written to.
 pub trait Io: AsyncRead + AsyncWrite + Send + Unpin + 'static {}

@@ -7,8 +7,8 @@ use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -181,18 +181,48 @@ impl Client {
     }
 }
 
+#[derive(Default)]
+struct Opened {
+    last_use: Option<Instant>,
+    in_stretch: usize,
+    most: usize,
+}
+
+impl Opened {
+    fn connection(&mut self) {
+        let now = Instant::now();
+        if self
+            .last_use
+            .is_none_or(|t| now - t >= hubdouble_hooks::IDLE_REUSE)
+        {
+            self.in_stretch = 0;
+        }
+        self.in_stretch += 1;
+        self.most = self.most.max(self.in_stretch);
+        self.last_use = Some(now);
+    }
+
+    fn answered(&mut self) {
+        self.last_use = Some(Instant::now());
+    }
+}
+
+fn opened(o: &Mutex<Opened>) -> MutexGuard<'_, Opened> {
+    o.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 struct Receiver {
     runtime: Runtime,
     url: String,
     payload_bytes: Arc<AtomicUsize>,
-    accepted: Arc<AtomicUsize>,
+    accepted: Arc<Mutex<Opened>>,
 }
 
 impl Receiver {
     fn start(delay: Duration) -> Receiver {
         let runtime = runtime(1);
         let payload_bytes = Arc::new(AtomicUsize::new(0));
-        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted = Arc::new(Mutex::new(Opened::default()));
         let listener = runtime
             .block_on(TcpListener::bind("127.0.0.1:0"))
             .unwrap_or_else(|e| fail("bind the receiver", e));
@@ -203,12 +233,12 @@ impl Receiver {
         let count = accepted.clone();
         runtime.spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                count.fetch_add(1, Ordering::Relaxed);
-                let size = size.clone();
+                opened(&count).connection();
+                let (size, count) = (size.clone(), count.clone());
                 tokio::spawn(async move {
                     let service =
                         hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
-                            let size = size.clone();
+                            let (size, count) = (size.clone(), count.clone());
                             async move {
                                 let body = req.into_body().collect().await.map_or_else(
                                     |_| Bytes::new(),
@@ -218,6 +248,7 @@ impl Receiver {
                                 if !delay.is_zero() {
                                     tokio::time::sleep(delay).await;
                                 }
+                                opened(&count).answered();
                                 Ok::<_, Infallible>(Response::new(Full::new(Bytes::new())))
                             }
                         });
@@ -239,12 +270,14 @@ impl Receiver {
         let pool = hubdouble_hooks::Options::default().workers;
         Row::new(
             format!("{load}: webhook connections opened"),
-            Some(float(self.accepted.load(Ordering::Relaxed))),
+            Some(float(opened(&self.accepted).most)),
             "conns",
             Goal::Below(float(pool) + 0.5),
         )
         .note(format!(
-            "delivery attempts share a pool of {pool} keep-alive connections"
+            "delivery attempts share a pool of {pool} keep-alive connections; most opened \
+             between two pauses of {} s, after which the pool drops idle connections",
+            hubdouble_hooks::IDLE_REUSE.as_secs()
         ))
     }
 }
