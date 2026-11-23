@@ -430,6 +430,68 @@ async fn check_runs_for_ref_honour_the_client_listing_options() {
 }
 
 #[tokio::test]
+async fn check_lists_read_filter_values_as_github_does() {
+    // Given a re-run review and a lint run of the fixture App, and a review of another App, on main
+    let run = |app: &str, name: &str| {
+        json!({"kind": "check_run", "repository": "acme/public", "app": app,
+            "name": name, "head_sha": "main", "conclusion": "success"})
+    };
+    let server = start(vec![
+        run("fixture-app", "AGENT review"),
+        run("fixture-app", "AGENT review"),
+        run("fixture-app", "lint"),
+        run("other-checks", "AGENT review"),
+    ])
+    .await;
+    let client = app_client(&server);
+    let head = sha(&server, "main");
+    let app = fixture::APP_ID;
+    let count = async |list: &str, query: String| {
+        let path = format!("repos/acme/public/commits/{head}/{list}?{query}");
+        checked(&client.get(&path).await, 200, &path)["total_count"].clone()
+    };
+    // When the lists get the values that live GitHub answered with 200 on a hashicorp/terraform commit
+    let runs = [
+        ("filter=all", 4),
+        ("filter=latest", 3),
+        ("filter=nonsense", 3),
+        ("filter=", 3),
+        ("status=completed", 3),
+        ("status=success", 0),
+        ("status=bogus", 0),
+        ("status=COMPLETED", 0),
+        ("status=%20", 3),
+        ("app_id=abc", 0),
+        (&format!("app_id={app}abc"), 2),
+        (&format!("app_id={app}.0"), 2),
+        ("app_id=", 3),
+        ("check_name=%20", 3),
+    ];
+    let suites = [
+        ("app_id=abc".to_owned(), 0),
+        (format!("app_id={OTHER_APP_ID}abc"), 1),
+        ("app_id=".to_owned(), 2),
+        ("check_name=".to_owned(), 2),
+        ("status=bogus&filter=bogus".to_owned(), 2),
+    ];
+    // Then an unknown status and an unparsable app_id match nothing, an unknown filter is latest, and a blank value is no filter
+    for (query, expected) in runs {
+        assert_eq!(
+            count("check-runs", query.to_owned()).await,
+            expected,
+            "{query}"
+        );
+    }
+    for (query, expected) in suites {
+        assert_eq!(
+            count("check-suites", query.clone()).await,
+            expected,
+            "{query}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_push_asks_each_checks_app_for_a_suite() {
     // Given
     let server = start(vec![]).await;

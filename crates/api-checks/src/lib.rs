@@ -1,7 +1,7 @@
 use http::header::LINK;
 use hubdouble_admin::Registrar;
 use hubdouble_model::{ApiError, FieldError, Grant, Requirement, Scope};
-use hubdouble_rest::{Ctx, Page, Reply};
+use hubdouble_rest::{Ctx, Page, Query, Reply};
 use serde::Serialize;
 use serde_json::json;
 
@@ -90,6 +90,35 @@ fn missing(field: &str) -> ApiError {
     field_error(field, "missing_field")
 }
 
+fn filter<'q>(query: &'q Query, name: &str) -> Option<&'q str> {
+    query.get(name).filter(|v| !v.trim().is_empty())
+}
+
+fn app_filter(query: &Query) -> Option<i64> {
+    filter(query, "app_id").map(leading_integer)
+}
+
+fn leading_integer(text: &str) -> i64 {
+    let text = text.trim_start();
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let mut value: i64 = 0;
+    let mut after_digit = false;
+    for c in digits.chars() {
+        match c.to_digit(10) {
+            Some(d) => {
+                value = value.saturating_mul(10).saturating_add(i64::from(d));
+                after_digit = true;
+            }
+            None if c == '_' && after_digit => after_digit = false,
+            None => break,
+        }
+    }
+    if negative { -value } else { value }
+}
+
 fn window<'i, T>(ctx: &Ctx<'_>, items: &'i [T]) -> (&'i [T], Option<String>) {
     let Page { page, per_page } = ctx.page_params();
     let start = (page - 1).saturating_mul(per_page).min(items.len());
@@ -110,5 +139,35 @@ fn page_object<T, R: Serialize>(
     match link {
         Some(link) => reply.header(LINK, &link),
         None => Ok(reply),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::leading_integer;
+
+    #[test]
+    fn an_app_id_filter_reads_the_leading_integer_as_github_does() {
+        // Given the values live GitHub matched on a commit's check run list
+        let read = [
+            ("15368", 15368),
+            ("15368abc", 15368),
+            ("15368.0", 15368),
+            ("015368", 15368),
+            ("+15368", 15368),
+            (" 15368", 15368),
+            ("15_368", 15368),
+            ("abc", 0),
+            ("1e3", 1),
+            ("1.5", 1),
+            ("-1", -1),
+            ("1__2", 1),
+        ];
+        for (text, expected) in read {
+            // When
+            let read = leading_integer(text);
+            // Then
+            assert_eq!(read, expected, "{text}");
+        }
     }
 }

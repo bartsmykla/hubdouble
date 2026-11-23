@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::actions;
 use crate::events::{self, To};
 use crate::view::{self, View, latest, no_commit};
-use crate::{invalid, missing, page_object, suites};
+use crate::{app_filter, filter, invalid, missing, page_object, suites};
 
 const MAX_ANNOTATIONS: usize = 50;
 const MAX_ACTIONS: usize = 3;
@@ -332,10 +332,6 @@ pub fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     Reply::json(&rest_view(ctx)?.run(&changed))
 }
 
-fn parse_app_id(text: &str) -> Result<i64, ApiError> {
-    text.parse().map_err(|_| invalid("app_id"))
-}
-
 pub fn list_for_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?.id;
     let reference = ctx.param("ref")?;
@@ -343,17 +339,10 @@ pub fn list_for_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .ok_or_else(|| no_commit(reference))?
         .to_string();
     let query = ctx.query();
-    let name = query.get("check_name");
-    let status = query
-        .get("status")
-        .map(|s| RunStatus::from_rest(s).ok_or_else(|| invalid("status")))
-        .transpose()?;
-    let app = query.get("app_id").map(parse_app_id).transpose()?;
-    let all = match query.get("filter") {
-        None | Some("latest") => false,
-        Some("all") => true,
-        Some(_) => return Err(invalid("filter")),
-    };
+    let name = filter(query, "check_name");
+    let status = filter(query, "status");
+    let app = app_filter(query);
+    let all = query.get("filter") == Some("all");
     let matching = view::runs_on(ctx.tx(), repo, &sha)
         .filter(|run| name.is_none_or(|n| run.name == n) && app.is_none_or(|a| run.app_id == a));
     let mut runs: Vec<_> = if all {
@@ -361,7 +350,7 @@ pub fn list_for_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     } else {
         latest(matching)
     };
-    runs.retain(|run| status.is_none_or(|s| run.status == s));
+    runs.retain(|run| status.is_none_or(|s| run.status.as_str() == s));
     runs.sort_unstable_by_key(|run| std::cmp::Reverse(run.id));
     let view = rest_view(ctx)?;
     let pulls = view.pulls(&sha);

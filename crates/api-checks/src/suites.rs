@@ -14,7 +14,7 @@ use crate::events::{self, To};
 use crate::pushes;
 use crate::runs::app_actor;
 use crate::view::{self, View, latest, no_commit};
-use crate::{invalid, page_object};
+use crate::{app_filter, filter, page_object};
 
 const PRIORITY: [Conclusion; 9] = [
     Conclusion::ActionRequired,
@@ -207,12 +207,8 @@ pub fn list_for_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let sha = view::commit(ctx.tx(), ctx.git(), repo, reference)
         .ok_or_else(|| no_commit(reference))?
         .to_string();
-    let app = ctx
-        .query()
-        .get("app_id")
-        .map(|a| a.parse::<i64>().map_err(|_| invalid("app_id")))
-        .transpose()?;
-    let name = ctx.query().get("check_name");
+    let app = app_filter(ctx.query());
+    let name = filter(ctx.query(), "check_name");
     let runs = ctx.tx().table::<CheckRuns>();
     let suites: Vec<_> = ctx
         .tx()
