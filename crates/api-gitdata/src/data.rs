@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use http::StatusCode;
@@ -6,6 +5,7 @@ use http::header::LOCATION;
 use hubdouble_auth::Actor;
 use hubdouble_git::{
     Commit, EntryMode, Git, GitError, ObjectData, ObjectId, ObjectKind, Tag, TreeEntry,
+    check_tree_depth,
 };
 use hubdouble_model::ApiError;
 use hubdouble_rest::{Ctx, Reply};
@@ -17,6 +17,7 @@ use crate::common::{
     object_node_id, parse_oid, sender, signature_of, unprocessable, wrapped_base64,
 };
 use crate::refs::RefObject;
+use crate::tree_edit::{Leaves, build, flatten};
 use crate::tree_view::{entry_kind, render_tree};
 
 pub(crate) const RAW: &str = "application/vnd.github.raw; charset=utf-8";
@@ -165,8 +166,6 @@ struct NewTree {
     base_tree: Option<String>,
 }
 
-type Leaves = BTreeMap<String, (EntryMode, ObjectId)>;
-
 fn parse_mode(mode: &str) -> Option<EntryMode> {
     Some(match mode {
         "100644" => EntryMode::File,
@@ -176,32 +175,6 @@ fn parse_mode(mode: &str) -> Option<EntryMode> {
         "160000" => EntryMode::Submodule,
         _ => return None,
     })
-}
-
-fn flatten(
-    git: &Git,
-    tx: &Tx,
-    repo: i64,
-    prefix: &str,
-    tree: ObjectId,
-    out: &mut Leaves,
-) -> Result<(), GitError> {
-    let ObjectData::Tree(entries) = git.object(tx, repo, tree)?.data else {
-        return Err(GitError::WrongKind);
-    };
-    for e in entries.iter() {
-        let path = if prefix.is_empty() {
-            e.name.clone()
-        } else {
-            format!("{prefix}/{}", e.name)
-        };
-        if e.mode == EntryMode::Tree {
-            flatten(git, tx, repo, &path, e.id, out)?;
-        } else {
-            out.insert(path, (e.mode, e.id));
-        }
-    }
-    Ok(())
 }
 
 fn holds(leaves: &Leaves, path: &str) -> bool {
@@ -223,38 +196,15 @@ fn clear(leaves: &mut Leaves, path: &str) {
     }
 }
 
-fn build(git: &Git, tx: &Tx, repo: i64, leaves: &Leaves) -> Result<ObjectId, GitError> {
-    let mut entries = Vec::new();
-    let mut dirs: BTreeMap<&str, Leaves> = BTreeMap::new();
-    for (path, (mode, id)) in leaves {
-        match path.split_once('/') {
-            Some((dir, rest)) => {
-                dirs.entry(dir)
-                    .or_default()
-                    .insert(rest.to_owned(), (*mode, *id));
-            }
-            None => entries.push(TreeEntry {
-                name: path.clone(),
-                mode: *mode,
-                id: *id,
-            }),
+fn path_directories(path: &str) -> Option<usize> {
+    let mut components = 0;
+    for part in path.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return None;
         }
+        components += 1;
     }
-    for (dir, inner) in dirs {
-        entries.push(TreeEntry {
-            name: dir.to_owned(),
-            mode: EntryMode::Tree,
-            id: build(git, tx, repo, &inner)?,
-        });
-    }
-    git.write_tree(tx, repo, &entries)
-}
-
-fn valid_path(path: &str) -> bool {
-    !path.is_empty()
-        && path
-            .split('/')
-            .all(|p| !p.is_empty() && p != "." && p != "..")
+    Some(components - 1)
 }
 
 pub(crate) fn create_tree(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
@@ -265,15 +215,15 @@ pub(crate) fn create_tree(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     if let Some(base) = &body.base_tree {
         let base = parse_oid(base)
             .ok_or_else(|| unprocessable("Tree", "base_tree", "base_tree is not a valid tree"))?;
-        flatten(git, tx, repo, "", base, &mut leaves)
+        flatten(git, tx, repo, "", 0, base, &mut leaves)
             .map_err(|_| unprocessable("Tree", "base_tree", "base_tree is not a valid tree"))?;
     }
     for e in body.tree {
         let bad = |field: &str| unprocessable("Tree", field, &format!("tree.{field} is invalid"));
-        if !valid_path(&e.path) {
-            return Err(bad("path"));
-        }
+        let directories = path_directories(&e.path).ok_or_else(|| bad("path"))?;
         let mode = parse_mode(&e.mode).ok_or_else(|| bad("mode"))?;
+        let depth = directories + usize::from(mode == EntryMode::Tree);
+        check_tree_depth(depth).map_err(|_| bad("path"))?;
         if e.kind
             .as_deref()
             .is_some_and(|k| k != kind_name(entry_kind(mode)))
@@ -307,7 +257,8 @@ pub(crate) fn create_tree(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
                     .kind();
                 match (kind, mode) {
                     (ObjectKind::Tree, EntryMode::Tree) => {
-                        flatten(git, tx, repo, &e.path, id, &mut leaves)?;
+                        flatten(git, tx, repo, &e.path, depth, id, &mut leaves)
+                            .map_err(|_| bad("path"))?;
                     }
                     (ObjectKind::Blob, m) if m != EntryMode::Tree => {
                         leaves.insert(e.path, (mode, id));

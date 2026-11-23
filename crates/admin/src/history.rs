@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use hubdouble_git::{
     Commit, EntryMode, Git, GitError, Object, ObjectData, ObjectId, ObjectKind, Ref, Signature,
-    Tag, TreeEntry,
+    Tag, TreeEntry, check_tree_depth,
 };
 use hubdouble_model::{ApiError, Timestamp};
 use hubdouble_store::{Accounts, Repos, Tx, TxMut};
@@ -317,6 +317,7 @@ fn write_tree(vcs: &impl Vcs, tx: &Tx, repo: i64, files: &Files) -> Result<Objec
     for (path, (mode, id)) in files {
         let mut dir = &mut root;
         let mut parts = path.split('/').filter(|p| !p.is_empty()).peekable();
+        check_tree_depth(parts.clone().count().saturating_sub(1))?;
         while let Some(part) = parts.next() {
             if parts.peek().is_none() {
                 dir.insert(part.to_owned(), Node::File(*mode, *id));

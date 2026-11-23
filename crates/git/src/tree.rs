@@ -5,6 +5,20 @@ use std::sync::Arc;
 use crate::contract::{EntryMode, FileChange, GitError, ObjectData, ObjectId, TreeEntry};
 use crate::odb::Odb;
 
+/// Maximum number of directories below the root of a stored tree.
+pub const MAX_TREE_DEPTH: usize = 50;
+
+/// # Errors
+/// Returns [`GitError::Invalid`] when `depth` exceeds [`MAX_TREE_DEPTH`].
+pub fn check_tree_depth(depth: usize) -> Result<(), GitError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(GitError::Invalid(format!(
+            "tree exceeds {MAX_TREE_DEPTH} directory levels"
+        )));
+    }
+    Ok(())
+}
+
 enum Slot {
     Leaf(EntryMode, ObjectId),
     Dir(BTreeMap<String, Slot>),
@@ -58,6 +72,7 @@ pub(crate) fn write_entries(odb: &Odb, mut entries: Vec<TreeEntry>) -> Result<Ob
 
 pub(crate) fn split(path: &str) -> Result<Vec<&str>, GitError> {
     let parts: Vec<&str> = path.split('/').collect();
+    check_tree_depth(parts.len().saturating_sub(1))?;
     if parts.iter().all(|p| valid_entry_name(p)) {
         Ok(parts)
     } else {

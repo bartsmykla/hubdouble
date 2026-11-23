@@ -3,19 +3,25 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::contract::{Commit, GitError, ObjectData, ObjectId, TreeEntry};
+use crate::contract::{Commit, EntryMode, GitError, ObjectData, ObjectId, TreeEntry};
 use crate::encode;
+use crate::tree::check_tree_depth;
 
 const SHARDS: usize = 16;
 const MAX_PEEL: usize = 16;
 
+struct StoredObject {
+    data: ObjectData,
+    tree_depth: usize,
+}
+
 #[derive(Default)]
 pub(crate) struct Odb {
-    shards: [RwLock<HashMap<ObjectId, ObjectData>>; SHARDS],
+    shards: [RwLock<HashMap<ObjectId, StoredObject>>; SHARDS],
 }
 
 impl Odb {
-    fn shard(&self, id: ObjectId) -> &RwLock<HashMap<ObjectId, ObjectData>> {
+    fn shard(&self, id: ObjectId) -> &RwLock<HashMap<ObjectId, StoredObject>> {
         &self.shards[usize::from(id.0[0]) % SHARDS]
     }
 
@@ -23,7 +29,7 @@ impl Odb {
         self.shard(id)
             .read()
             .get(&id)
-            .cloned()
+            .map(|object| object.data.clone())
             .ok_or(GitError::NotFound)
     }
 
@@ -32,9 +38,28 @@ impl Odb {
     }
 
     pub(crate) fn put(&self, data: ObjectData) -> Result<ObjectId, GitError> {
+        let mut tree_depth = 0;
+        if let ObjectData::Tree(entries) = &data {
+            for entry in entries.iter().filter(|entry| entry.mode == EntryMode::Tree) {
+                tree_depth = tree_depth.max(self.tree_depth(entry.id)? + 1);
+            }
+            check_tree_depth(tree_depth)?;
+        }
         let id = encode::hash(&data)?;
-        self.shard(id).write().entry(id).or_insert(data);
+        self.shard(id)
+            .write()
+            .entry(id)
+            .or_insert(StoredObject { data, tree_depth });
         Ok(id)
+    }
+
+    fn tree_depth(&self, id: ObjectId) -> Result<usize, GitError> {
+        let shard = self.shard(id).read();
+        let object = shard.get(&id).ok_or(GitError::NotFound)?;
+        match object.data {
+            ObjectData::Tree(_) => Ok(object.tree_depth),
+            _ => Err(GitError::WrongKind),
+        }
     }
 
     pub(crate) fn commit(&self, id: ObjectId) -> Result<Arc<Commit>, GitError> {

@@ -4,6 +4,7 @@ mod data;
 mod graphql;
 mod refs;
 mod repos;
+mod tree_edit;
 mod tree_view;
 
 use hubdouble_admin::Registrar;

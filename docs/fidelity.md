@@ -13,6 +13,7 @@ hubdouble implements the GitHub operations in the [client inventory](inventory/r
 | Release asset download | A download with `Accept: application/octet-stream` answers `302` to an unguessable `/_blobs/` URL on hubdouble, after the access check. GitHub redirects to a signed URL that expires after a few minutes. The hubdouble URL does not expire. |
 | Actions job log download | After the access check, hubdouble redirects to an unguessable `/_blobs/` URL with no time limit. GitHub's URL expires after one minute. |
 | Tree deletion of an absent path | GitHub's docs say that `POST /repos/{owner}/{repo}/git/trees` returns an error when an entry with `sha: null` deletes a file that does not exist, but they give no status or message. hubdouble answers `422` with a validation error on `tree.sha`. |
+| Git tree depth | GitHub recommends a maximum of 50 directory levels. hubdouble enforces the limit to protect recursive tree operations. The Git Trees API returns `422` for a deeper tree. |
 | Webhook ID | A webhook payload or delivery record with a `hook_id` uses the App ID as that value. The `X-GitHub-Hook-ID` header also uses the App ID. |
 | Admin writes | Most seed kinds have no direct update or delete route. An unsupported admin method and path return `404`. See the [admin route list](admin-api.md). |
 | Repository renames | The old owner and name return `404` through REST, with no `301` redirect. GraphQL accepts the schema's `followRenames` argument but has no rename lookup. An old name returns a null repository with `NOT_FOUND`, regardless of that argument. |

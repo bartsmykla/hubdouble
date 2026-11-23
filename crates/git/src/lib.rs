@@ -10,6 +10,7 @@ mod sign;
 mod tree;
 
 pub use contract::*;
+pub use tree::{MAX_TREE_DEPTH, check_tree_depth};
 
 #[cfg(test)]
 mod tests;
