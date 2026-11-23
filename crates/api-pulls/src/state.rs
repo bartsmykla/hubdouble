@@ -169,7 +169,12 @@ fn deleted(tx: &mut TxMut<'_>, git: &Git, change: &RefChange, name: &str) -> Res
         if !head && !open {
             continue;
         }
-        p.mergeable = None;
+        if open && head {
+            p.mergeable = None;
+        } else if open {
+            p.mergeable = Some(false);
+            p.merge_commit_sha = None;
+        }
         issue.updated_at = now;
         if head {
             tx.table_mut::<Issues>().replace(issue.clone())?;

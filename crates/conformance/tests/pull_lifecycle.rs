@@ -974,6 +974,68 @@ async fn an_unknown_state_on_a_pull_request_edit_is_ignored_and_the_rest_is_writ
     }
 }
 
+async fn mergeability(client: &GoGithub) -> Value {
+    let pull = client.get(PULL).await.json();
+    json!([
+        pull["mergeable"],
+        pull["mergeable_state"],
+        pull["rebaseable"]
+    ])
+}
+
+#[tokio::test]
+async fn a_closed_pull_request_keeps_the_mergeability_it_had_when_it_closed() {
+    for (path, conflict) in [(PULL, false), (ISSUE, false), (PULL, true), (ISSUE, true)] {
+        // Given an open pull request, clean or with a conflict
+        let server = server(&[pull_request("feature", "main")]).await;
+        let client = alice(&server);
+        if conflict {
+            push(&server, "main", "README.md", "# from main\n");
+            push(&server, "feature", "README.md", "# from the feature\n");
+        }
+        let open = mergeability(&client).await;
+        assert_eq!(open[0], json!(!conflict), "{path}");
+        // When it is closed
+        let closed = client
+            .call_json(Method::PATCH, path, &json!({"state": "closed"}))
+            .await;
+        assert_eq!(closed.status, StatusCode::OK, "{path}");
+        // Then mergeable and mergeable_state stay as they were, and rebaseable is false
+        let expected = if conflict {
+            json!([false, "dirty", false])
+        } else {
+            json!([true, "clean", false])
+        };
+        assert_eq!(mergeability(&client).await, expected, "{path}");
+        // When its head branch is deleted after the close
+        delete_branch(&client, Deletion::Rest, "feature").await;
+        // Then they still stay as they were
+        assert_eq!(mergeability(&client).await, expected, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn a_base_deletion_closes_a_pull_request_as_not_mergeable_and_a_merge_as_unknown() {
+    // Given an open pull request into develop
+    let server = server(&[pull_request("feature", "develop")]).await;
+    let client = alice(&server);
+    // When develop is deleted
+    delete_branch(&client, Deletion::Rest, "develop").await;
+    // Then the closed pull request is not mergeable and has no merge_commit_sha
+    assert_eq!(mergeability(&client).await, json!([false, "dirty", false]));
+    assert_eq!(merge_commit_sha(&client).await, Value::Null);
+    // Given another open pull request
+    let server = self::server(&[pull_request("feature", "main")]).await;
+    let client = alice(&server);
+    // When it is merged
+    let merged = client
+        .call_json(Method::PUT, &format!("{PULL}/merge"), &json!({}))
+        .await;
+    assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
+    // Then its mergeability is unknown
+    assert_eq!(mergeability(&client).await, json!([null, "unknown", null]));
+}
+
 #[tokio::test]
 async fn a_repeated_state_takes_its_last_value_and_an_unknown_last_value_is_ignored() {
     // Given an open pull request and a closed one

@@ -450,7 +450,6 @@ fn edit(
             issue.state = IssueState::Closed;
             issue.closed_at = Some(now);
             issue.closed_by = Some(actor);
-            state::pull_mut(issue)?.mergeable = None;
         }
     }
     let base = &state::pull(issue)?.base.ref_name;
