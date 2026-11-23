@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use hubdouble_auth::Actor;
-use hubdouble_model::{MembershipState, OrgRole, RepoRole, Team, TeamPrivacy, TeamRole};
+use hubdouble_model::{MembershipState, OrgRole, Repo, RepoRole, Team, TeamPrivacy, TeamRole};
 use hubdouble_store::{Memberships, Teams, Tx};
 
 pub fn org_role(tx: &Tx, org_id: i64, user_id: i64) -> Option<OrgRole> {
@@ -68,6 +68,16 @@ impl TeamViewer {
             }
             Self::Outside => false,
         }
+    }
+}
+
+pub fn pushes(tx: &Tx, actor: &Actor, repo: &Repo) -> bool {
+    match actor {
+        Actor::User { user, .. } => {
+            hubdouble_auth::repo_role(tx, user.id, repo) >= Some(RepoRole::Write)
+        }
+        Actor::Installation { .. } => true,
+        Actor::Anonymous | Actor::App { .. } => false,
     }
 }
 

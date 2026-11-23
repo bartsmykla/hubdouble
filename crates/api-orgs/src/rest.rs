@@ -8,7 +8,7 @@ use hubdouble_render::{RepoPermissions, Repository, TeamMembership};
 use hubdouble_rest::{Ctx, Registry, Reply};
 use hubdouble_store::{Accounts, Memberships, Teams, Tx};
 
-use crate::hierarchy::TeamViewer;
+use crate::hierarchy::{TeamViewer, pushes};
 use crate::{MEMBERS, METADATA, PublicMemberships, TEAM_REPOSITORY, hierarchy, view};
 
 pub fn register(rest: &mut Registry) {
@@ -31,6 +31,21 @@ pub fn register(rest: &mut Registry) {
         METADATA,
         permission,
     );
+    rest.extra(
+        http::Method::GET,
+        "/organizations/{org_id}/public_members/{username}",
+        "orgs/check-public-membership-for-user-by-id",
+        Requirement::public(),
+        check_public_member_by_id,
+    );
+}
+
+fn signed_in(ctx: &Ctx<'_>) -> Result<(), ApiError> {
+    if matches!(ctx.actor(), Actor::Anonymous) {
+        Err(ApiError::new(401, "Requires authentication"))
+    } else {
+        Ok(())
+    }
 }
 
 pub fn organization<'a>(tx: &'a Tx, login: &str) -> Result<&'a Arc<Account>, ApiError> {
@@ -57,9 +72,9 @@ fn check_member(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let login = ctx.param("username")?;
     if !requester_is_member {
         return Reply::redirect(&format!(
-            "{}/orgs/{}/public_members/{}",
+            "{}/organizations/{}/public_members/{}",
             ctx.urls().api,
-            org.login,
+            org.id,
             hubdouble_render::escape(login)
         ));
     }
@@ -69,8 +84,22 @@ fn check_member(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 }
 
 fn check_public_member(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    let org = organization(ctx.tx(), ctx.param("org")?)?;
+    public_member(ctx, org)
+}
+
+fn check_public_member_by_id(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    let org = ctx
+        .tx()
+        .table::<Accounts>()
+        .get(ctx.param_i64("org_id")?)
+        .filter(|org| org.kind == AccountKind::Organization)
+        .ok_or_else(ApiError::not_found)?;
+    public_member(ctx, org)
+}
+
+fn public_member(ctx: &Ctx<'_>, org: &Account) -> Result<Reply, ApiError> {
     let tx = ctx.tx();
-    let org = organization(tx, ctx.param("org")?)?;
     let user = user(tx, ctx.param("username")?)?;
     tx.table::<Memberships>()
         .of(org.id, user.id)
@@ -81,9 +110,14 @@ fn check_public_member(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 }
 
 fn list_teams(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    signed_in(ctx)?;
     let org = organization(ctx.tx(), ctx.param("org")?)?;
     let teams = ctx.tx().table::<Teams>();
     let viewer = TeamViewer::new(ctx.tx(), ctx.actor(), org.id);
+    if matches!(viewer, TeamViewer::Outside) {
+        return Err(ApiError::forbidden("Must have admin rights to Repository.")
+            .with_docs("https://docs.github.com/rest/teams/teams#list-teams"));
+    }
     let items: Vec<_> = teams
         .children(org.id)
         .filter(|t| viewer.can_see(t))
@@ -101,11 +135,13 @@ fn team<'a>(ctx: &'a Ctx<'_>, org: &Account) -> Result<&'a Team, ApiError> {
 }
 
 fn get_team(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    signed_in(ctx)?;
     let org = organization(ctx.tx(), ctx.param("org")?)?;
     Reply::json(&view::full_team(ctx, org, team(ctx, org)?))
 }
 
 fn membership(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    signed_in(ctx)?;
     let org = organization(ctx.tx(), ctx.param("org")?)?;
     let t = team(ctx, org)?;
     let u = user(ctx.tx(), ctx.param("username")?)?;
@@ -122,6 +158,7 @@ fn membership(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 }
 
 fn team_repo(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    signed_in(ctx)?;
     let org = organization(ctx.tx(), ctx.param("org")?)?;
     auth::authorize(ctx.tx(), ctx.actor(), &MEMBERS, Target::Org(org))?;
     let t = team(ctx, org)?;
@@ -159,10 +196,14 @@ fn repository_owner<'a>(tx: &'a Tx, repo: &Repo) -> Result<&'a Account, ApiError
 }
 
 fn permission(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
-    if matches!(ctx.actor(), Actor::Anonymous) {
-        return Err(ApiError::unauthorized());
-    }
+    signed_in(ctx)?;
     let repo = ctx.repo()?;
+    if !pushes(ctx.tx(), ctx.actor(), repo) {
+        return Err(ApiError::forbidden(
+            "Must have push access to view collaborator permission.",
+        )
+        .with_docs("https://docs.github.com/rest/collaborators/collaborators#get-repository-permissions-for-a-user"));
+    }
     let user = user(ctx.tx(), ctx.param("username")?)?;
     let role = auth::repo_role(ctx.tx(), user.id, repo);
     Reply::json(&view::collaborator(ctx.urls(), user, role))

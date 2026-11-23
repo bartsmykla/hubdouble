@@ -145,6 +145,12 @@ fn collaborators(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlE
         .get(obj.get::<Repo>()?.id)
         .ok_or_else(not_found)?;
     auth::authorize(ctx.tx, ctx.actor, &METADATA, AuthTarget::Repo(repo))?;
+    if !hierarchy::pushes(ctx.tx, ctx.actor, repo) {
+        return Err(GqlError::new(
+            ErrorType::Forbidden,
+            "You do not have permission to view repository collaborators.",
+        ));
+    }
     let accounts = ctx.tx.table::<Accounts>();
     let mut matches = Vec::new();
     let affiliation = arg_text(args, "affiliation");

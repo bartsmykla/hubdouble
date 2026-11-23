@@ -206,7 +206,10 @@ async fn organization_membership_redirect_ends_at_public_membership() {
             .header("location")
             .strip_prefix(client.base())
             .unwrap();
-        assert_eq!(path, format!("orgs/acme/public_members/{user}"));
+        assert_eq!(
+            path,
+            format!("organizations/{}/public_members/{user}", fixture::ORG_ID)
+        );
         assert_status(&client, path, status).await;
     }
     let anonymous = GoGithub::enterprise(&server);
@@ -220,6 +223,87 @@ async fn organization_membership_redirect_ends_at_public_membership() {
         .await;
     assert_eq!(update.status, StatusCode::NO_CONTENT);
     assert_status(&anonymous, "orgs/acme/public_members/alice", 404).await;
+}
+
+#[tokio::test]
+async fn team_reads_need_a_signed_in_member_of_the_org() {
+    // Given an anonymous caller and carol, who is not a member of acme
+    let server = start(setup()).await;
+    let anonymous = GoGithub::enterprise(&server);
+    let carol = GoGithub::enterprise(&server).with_token(fixture::CAROL_TOKEN);
+    let team_reads = [
+        format!("{TEAM_PATH}/child"),
+        format!("{TEAM_PATH}/child/memberships/bob"),
+        TEAM_REPO.to_owned(),
+    ];
+
+    // When each reads the teams, a team, a membership, a team repository and a permission
+    let mut anonymous_answers = vec![assert_status(&anonymous, TEAM_PATH, 401).await];
+    for path in team_reads
+        .iter()
+        .map(String::as_str)
+        .chain([BOB_PERMISSION])
+    {
+        anonymous_answers.push(assert_status(&anonymous, path, 401).await);
+    }
+    let carol_list = assert_status(&carol, TEAM_PATH, 403).await;
+
+    // Then the anonymous reads need authentication, and carol may not list or find teams
+    for answer in &anonymous_answers {
+        assert_eq!(answer.json()["status"], "401");
+        assert_eq!(
+            answer.json()["documentation_url"],
+            "https://docs.github.com/rest"
+        );
+    }
+    assert_eq!(
+        carol_list.json()["documentation_url"],
+        "https://docs.github.com/rest/teams/teams#list-teams"
+    );
+    for path in &team_reads {
+        assert_status(&carol, path, 404).await;
+    }
+}
+
+#[tokio::test]
+async fn collaborator_permissions_need_push_access() {
+    // Given carol, a reader of acme/public, and bob, a maintainer of it through his team
+    let server = start(setup()).await;
+    let carol = GoGithub::enterprise(&server).with_token(fixture::CAROL_TOKEN);
+    let bob = GoGithub::enterprise(&server).with_token(fixture::BOB_TOKEN);
+    let query = r#"query { repository(owner: "acme", name: "public") { collaborators(first: 1) { edges { permission node { login } } } } }"#;
+
+    // When each reads a collaborator permission through REST and GraphQL
+    let carol_rest = assert_status(&carol, BOB_PERMISSION, 403).await;
+    let bob_rest = body(
+        &bob.get(BOB_PERMISSION).await,
+        "repos/get-collaborator-permission-level",
+    );
+    let carol_graphql = Graphql::new(carol).query(query, &json!({})).await.json();
+    let bob_graphql = Graphql::new(bob).query(query, &json!({})).await.json();
+
+    // Then only bob reads them, and carol gets GitHub's refusal
+    assert_eq!(
+        carol_rest.json()["documentation_url"],
+        "https://docs.github.com/rest/collaborators/collaborators#get-repository-permissions-for-a-user"
+    );
+    assert_eq!(bob_rest["permission"], "write");
+    assert!(
+        carol_graphql["data"]["repository"]["collaborators"].is_null(),
+        "{carol_graphql}"
+    );
+    assert_eq!(carol_graphql["errors"][0]["type"], "FORBIDDEN");
+    assert_eq!(
+        carol_graphql["errors"][0]["path"],
+        json!(["repository", "collaborators"])
+    );
+    assert!(bob_graphql.get("errors").is_none(), "{bob_graphql}");
+    assert_eq!(
+        bob_graphql["data"]["repository"]["collaborators"]["edges"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
 }
 
 #[tokio::test]

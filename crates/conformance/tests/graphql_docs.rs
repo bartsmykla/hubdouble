@@ -78,7 +78,7 @@ impl Inventory {
             .query(
                 &self.sources["access"],
                 &json!({
-                    "owner":"acme", "login":"alice", "n0":"public", "n1":"private"
+                    "owner":"acme", "login":"alice", "n0":"docs", "n1":"private"
                 }),
             )
             .await
