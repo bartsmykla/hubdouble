@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use http::StatusCode;
+use hubdouble_auth::Actor;
 use hubdouble_model::{
-    ApiError, Issue, Reaction, ReactionContent, ReactionSubjectKind, ReviewComment, ReviewState,
-    ReviewThread, Timestamp, node_id,
+    ApiError, Issue, Reaction, ReactionContent, ReactionSubjectKind, RepoRole, ReviewComment,
+    ReviewState, ReviewThread, Timestamp, node_id,
 };
 use hubdouble_rest::{Ctx, Registry, Reply};
 use hubdouble_store::{Issues, Reactions, ReviewComments, ReviewThreads, Reviews, Tx, TxMut};
@@ -367,13 +368,26 @@ fn reply(ctx: &mut Ctx<'_>, issue: &Issue, parent: i64, body: String) -> Result<
     created(ctx, &comment)
 }
 
+fn may_change(ctx: &Ctx<'_>, comment: &ReviewComment) -> Result<i64, ApiError> {
+    let sender = view::author(ctx.actor())?;
+    let pushes = match ctx.actor() {
+        Actor::Installation { .. } => true,
+        Actor::User { user, .. } => {
+            hubdouble_auth::repo_role(ctx.tx(), user.id, ctx.repo()?) >= Some(RepoRole::Write)
+        }
+        Actor::Anonymous | Actor::App { .. } => false,
+    };
+    if sender == comment.user_id || pushes {
+        Ok(sender)
+    } else {
+        Err(ApiError::forbidden("Must have push access to repository"))
+    }
+}
+
 fn edit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let comment = target(ctx)?;
     let issue = issue(ctx.tx(), &comment)?;
-    let sender = view::author(ctx.actor())?;
-    if sender != comment.user_id {
-        return Err(ApiError::forbidden("Only the comment author can edit it"));
-    }
+    let sender = may_change(ctx, &comment)?;
     let Body { body } = ctx.body()?;
     validate_body(&body)?;
     if body == comment.body {
@@ -396,7 +410,7 @@ fn edit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 fn delete(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let comment = target(ctx)?;
     let issue = issue(ctx.tx(), &comment)?;
-    let sender = view::author(ctx.actor())?;
+    let sender = may_change(ctx, &comment)?;
     let tx = ctx.tx_mut()?;
     if published(tx, &comment) {
         events::comment(tx, &issue, sender, &comment, "deleted", None)?;

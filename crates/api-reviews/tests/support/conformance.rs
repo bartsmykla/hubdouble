@@ -13,6 +13,9 @@ use serde_json::{Value, json};
 pub(super) const PULL: &str = "repos/acme/public/pulls/1";
 pub(super) const COMMENTS: &str = "repos/acme/public/pulls/comments";
 pub(super) const TOKEN: &str = "ghs_reviews_conformance";
+pub(super) const PULLS_WRITE_TOKEN: &str = "ghs_reviews_pull_requests_write";
+const PULLS_APP_ID: i64 = 4002;
+const PULLS_INSTALLATION_ID: i64 = 5002;
 const NOW: Timestamp = Timestamp::SEED;
 
 pub(super) async fn fixture_server() -> TestServer {
@@ -35,6 +38,17 @@ pub(super) async fn fixture_server() -> TestServer {
         }
         builder = builder.entry(entry);
     }
+    builder = builder
+        .entry(
+            json!({"kind": "app", "id": PULLS_APP_ID, "slug": "pulls-app", "owner": fixture::ORG,
+                      "public_key": fixture::APP_PUBLIC_KEY,
+                      "permissions": {"pull_requests": "write", "metadata": "read"}}),
+        )
+        .entry(
+            json!({"kind": "installation", "id": PULLS_INSTALLATION_ID, "app": "pulls-app",
+                      "account": fixture::ORG, "repositories": [fixture::PUBLIC_REPO],
+                      "permissions": {"pull_requests": "write", "metadata": "read"}}),
+        );
     let server = builder.start().await;
     let services = server.server.services();
     services
@@ -179,6 +193,22 @@ fn insert_team_and_token(tx: &mut hubdouble_store::TxMut<'_>) -> Result<(), ApiE
         user_id: None,
         repo_ids: None,
         permissions: [("metadata".into(), Access::Read)].into(),
+        scopes: vec![],
+        expires_at: None,
+        revoked: false,
+        owner_seeded: false,
+        created_at: NOW,
+    })?;
+    let id = tx.next_id();
+    tx.table_mut::<Tokens>().insert(Token {
+        id,
+        token: PULLS_WRITE_TOKEN.into(),
+        kind: TokenKind::Installation,
+        app_id: Some(PULLS_APP_ID),
+        installation_id: Some(PULLS_INSTALLATION_ID),
+        user_id: None,
+        repo_ids: None,
+        permissions: [].into(),
         scopes: vec![],
         expires_at: None,
         revoked: false,

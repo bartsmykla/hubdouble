@@ -5,8 +5,8 @@ use http::{Method, StatusCode};
 use hubdouble_testkit::{GoGithub, Graphql, fixture};
 use serde_json::json;
 use support::{
-    COMMENTS, PULL, TOKEN, api_call, assert_reactions, check, drain, field_id, fixture_server,
-    graphql, head_sha, update_feature, webhook,
+    COMMENTS, PULL, PULLS_WRITE_TOKEN, TOKEN, api_call, assert_reactions, check, drain, field_id,
+    fixture_server, graphql, head_sha, update_feature, webhook,
 };
 
 macro_rules! rest {
@@ -225,6 +225,59 @@ async fn review_comments_replies_and_reactions_share_the_same_records() {
             id
         );
     }
+}
+
+#[tokio::test]
+async fn another_users_review_comment_changes_only_with_push_access() {
+    // Given review comments by bob, a reader of acme/public
+    let server = fixture_server().await;
+    let as_bob = GoGithub::new(&server).with_token(fixture::BOB_TOKEN);
+    let path = format!("{PULL}/comments");
+    let mut comments = Vec::new();
+    for body in ["First", "Second"] {
+        let draft = json!({"body": body, "path": "src/feature.txt", "line": 1, "commit_id": head_sha(&server)});
+        let created = rest!(
+            as_bob,
+            POST,
+            path,
+            "pulls/create-review-comment",
+            201,
+            draft
+        );
+        comments.push(format!("{COMMENTS}/{}", field_id(&created, "id")));
+    }
+    let as_carol = GoGithub::new(&server).with_token(fixture::CAROL_TOKEN);
+    let as_alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    let as_installation = GoGithub::new(&server).with_token(PULLS_WRITE_TOKEN);
+    let edit = json!({"body": "Edited"});
+
+    // When carol, who has no push access, edits and deletes one
+    let carol_edit = as_carol.call_json(Method::PATCH, &comments[0], &edit).await;
+    let carol_delete = as_carol.call(Method::DELETE, &comments[0]).await;
+
+    // Then both are refused and the comment is unchanged
+    for refused in [&carol_edit, &carol_delete] {
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert_eq!(refused.json()["status"], "403");
+    }
+    let kept = rest!(as_bob, GET, comments[0], "pulls/get-review-comment", 200);
+    assert_eq!(kept["body"], "First");
+
+    // When alice, an org owner, edits it and an installation with pull_requests write deletes the other
+    let edited = rest!(
+        as_alice,
+        PATCH,
+        comments[0],
+        "pulls/update-review-comment",
+        200,
+        edit
+    );
+    let deleted = as_installation.call(Method::DELETE, &comments[1]).await;
+
+    // Then both changes apply
+    assert_eq!(edited["body"], "Edited");
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    assert_eq!(as_bob.get(&comments[1]).await.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
