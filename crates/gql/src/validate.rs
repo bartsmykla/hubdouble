@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn apollo_reports_the_nullability_merge_as_a_conflicting_field_type() {
-        // Given client's originalCommentEdit, which GitHub accepted on 2026-11-22
+        // Given the client's originalCommentEdit, which GitHub accepted on 2026-11-22
         // When apollo-compiler runs the spec's full validation
         // Then it reports exactly one diagnostic, narrowable by its kind
         assert_eq!(

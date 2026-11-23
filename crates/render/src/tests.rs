@@ -40,7 +40,7 @@ fn repo() -> m::Repo {
         id: 7,
         node_id: node_id::entity(node_id::REPOSITORY, 7),
         owner_id: 962_416,
-        name: "agent".to_owned(),
+        name: "app".to_owned(),
         description: None,
         homepage: None,
         language: None,

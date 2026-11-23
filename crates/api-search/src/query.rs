@@ -157,7 +157,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_the_proposals_query_client_sends() {
+    fn parses_the_proposals_query_the_client_sends() {
         // Given the query internal/proposals/proposals.go:385 builds
         let text = "repo:octo-org/app is:pr head:prompts/proposal- sort:updated-desc";
 

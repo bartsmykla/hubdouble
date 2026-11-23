@@ -1085,7 +1085,10 @@ fn a_new_branch_sends_push_and_create() {
         (json!(true), json!(false), json!(false))
     );
     assert_eq!(push["base_ref"], Value::Null);
-    assert_eq!(push["compare"], "https://github.com/octo-org/r/compare/main");
+    assert_eq!(
+        push["compare"],
+        "https://github.com/octo-org/r/compare/main"
+    );
     assert_eq!(
         push["pusher"],
         json!({"name": "alice", "email": "alice@example.com"})

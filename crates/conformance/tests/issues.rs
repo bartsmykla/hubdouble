@@ -657,7 +657,9 @@ async fn pull_request_label_changes_send_webhooks_and_list_who_labeled_it() {
     let pr = pull_request(&server, "change", "", IssueState::Open);
     let path = format!("{REPO}/issues/{pr}/labels");
     // When
-    let added = as_alice(&server).post(&path, &json!(["agent:review"])).await;
+    let added = as_alice(&server)
+        .post(&path, &json!(["agent:review"]))
+        .await;
     let again = as_alice(&server)
         .post(
             &path,
@@ -706,7 +708,10 @@ async fn pull_request_label_changes_send_webhooks_and_list_who_labeled_it() {
     let p = octokit(sent[0]);
     assert_eq!(p["number"], json!(pr));
     assert_eq!(p["label"]["name"], json!("agent:review"));
-    assert_eq!(p["pull_request"]["labels"][0]["name"], json!("agent:review"));
+    assert_eq!(
+        p["pull_request"]["labels"][0]["name"],
+        json!("agent:review")
+    );
     let unlabeled = of(&all, "pull_request", "unlabeled");
     assert_eq!(unlabeled.len(), 1);
     let p = octokit(unlabeled[0]);

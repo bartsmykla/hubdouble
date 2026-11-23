@@ -253,7 +253,8 @@ fn extra_routes_sit_next_to_the_table() {
         &[("org", "octo-org")],
     );
     assert_eq!(
-        r.route(&Method::GET, "/orgs/octo-org").map(|x| x.operation_id),
+        r.route(&Method::GET, "/orgs/octo-org")
+            .map(|x| x.operation_id),
         Some("orgs/get")
     );
     assert_eq!(r.operations().filter(|o| o.registered).count(), 2);

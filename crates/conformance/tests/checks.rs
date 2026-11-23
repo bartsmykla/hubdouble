@@ -192,8 +192,8 @@ fn annotations(count: usize) -> Vec<Value> {
 }
 
 #[tokio::test]
-async fn check_writes_follow_client_batches_and_keep_output() {
-    // Given client internal/dispatch/checks.go:131-191, which posts the first batch of 50
+async fn check_writes_follow_the_client_batches_and_keep_output() {
+    // Given the client's internal/dispatch/checks.go:131-191, which posts the first batch of 50
     // annotations with the run facts and patches the next batches without them.
     let server = start(vec![]).await;
     let client = app_client(&server);
@@ -290,7 +290,7 @@ async fn check_writes_refuse_what_github_refuses() {
 }
 
 #[tokio::test]
-async fn check_runs_for_ref_honour_client_listing_options() {
+async fn check_runs_for_ref_honour_the_client_listing_options() {
     // Given runs from two Apps on main, seeded through the check_run kind
     let run = |app: &str, name: &str, state: Value| {
         let mut entry = json!({"kind": "check_run", "repository": "acme/public", "app": app,
@@ -319,7 +319,7 @@ async fn check_runs_for_ref_honour_client_listing_options() {
     let client = app_client(&server);
     let head = sha(&server, "main");
     let list = |query: &str| format!("repos/acme/public/commits/{head}/check-runs?{query}");
-    // When client internal/dispatch/checks.go:94 looks for its newest review check
+    // When the client's internal/dispatch/checks.go:94 looks for its newest review check
     let own = checked(
         &client
             .get(&list(&format!(
@@ -424,7 +424,7 @@ async fn a_push_asks_each_checks_app_for_a_suite() {
 }
 
 #[tokio::test]
-async fn check_run_events_reach_the_app_with_the_fields_client_reads() {
+async fn check_run_events_reach_the_app_with_the_fields_the_client_reads() {
     // Given
     let server = start(vec![]).await;
     let client = app_client(&server);
@@ -502,8 +502,8 @@ async fn check_run_events_reach_the_app_with_the_fields_client_reads() {
 }
 
 #[tokio::test]
-async fn statuses_list_and_combine_as_client_reads_them() {
-    // Given client internal/dispatch/ack.go:122-128 writing its run status
+async fn statuses_list_and_combine_as_the_client_reads_them() {
+    // Given the client's internal/dispatch/ack.go:122-128 writing its run status
     let server = start(vec![]).await;
     let client = app_client(&server);
     let head = sha(&server, "main");

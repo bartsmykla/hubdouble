@@ -264,7 +264,7 @@ fn open_pull_request(server: &TestServer, head: &str) -> (i64, String) {
 }
 
 #[tokio::test]
-async fn workflow_runs_leave_out_pull_requests_when_client_excludes_them() {
+async fn workflow_runs_leave_out_pull_requests_when_the_client_excludes_them() {
     // Given a run on the head of an open pull request
     let server = server("none").await;
     let client = client(&server);
@@ -276,7 +276,7 @@ async fn workflow_runs_leave_out_pull_requests_when_client_excludes_them() {
         |exclude: &str| format!("{ACTIONS}/runs?{exclude}head_sha={sha}&page=1&per_page=100");
 
     // When the runs of that head are listed with and without exclude_pull_requests, as
-    // client's ciSuites lists them (internal/dispatch/ci.go:200)
+    // the client's ciSuites lists them (internal/dispatch/ci.go:200)
     let excluded = valid(
         "list-workflow-runs-for-repo",
         &client.get(&list("exclude_pull_requests=true&")).await,

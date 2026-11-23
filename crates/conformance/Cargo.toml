@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-conformance"
-description = "The client inventory suite, one tests/<track>.rs per track, run against the in-process server"
+description = "The inventory suite for the client's GitHub calls, one tests/<track>.rs per track, run against the in-process server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -281,7 +281,7 @@ async fn proposals_search_finds_open_and_closed_proposal_pulls_of_one_repository
     // Given pulls on proposal branches in two repositories, and other pulls and issues
     let server = server().await;
 
-    // When client's proposals search runs (internal/proposals/proposals.go:385)
+    // When the client's proposals search runs (internal/proposals/proposals.go:385)
     let found = search(
         &server,
         fixture::ALICE_TOKEN,
