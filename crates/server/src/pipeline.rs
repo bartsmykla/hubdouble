@@ -1,9 +1,11 @@
 use std::fmt::Write as _;
+use std::hash::{BuildHasher as _, Hash as _, Hasher as _};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
+use foldhash::fast::{FixedState, FoldHasher};
 use http::header::{self, HeaderName, HeaderValue};
 use http::request::Parts as RequestParts;
 use http::{HeaderMap, Method, Request, Response, StatusCode};
@@ -16,7 +18,6 @@ use hubdouble_rest::{Access, Ctx, Entry, Params, Parts, Query, Reply};
 use hubdouble_store::{Accounts, Repos, Tx};
 use hyper::body::Incoming;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 const VERSIONS: [&str; 2] = ["2022-11-28", "2026-03-10"];
 const RATE_LIMIT: u32 = 5000;
@@ -629,17 +630,16 @@ pub(crate) fn media_type(accept: Option<&str>) -> String {
 }
 
 pub(crate) fn weak_etag(media: &str, body: &[u8]) -> String {
-    let digest = Sha256::new()
-        .chain_update(media.as_bytes())
-        .chain_update(body)
-        .finalize();
-    let mut tag = String::with_capacity(70);
-    tag.push_str("W/\"");
-    for b in digest {
-        let _ = write!(tag, "{b:02x}");
-    }
-    tag.push('"');
-    tag
+    let lane = |seed: u64, value: &dyn Fn(&mut FoldHasher<'static>)| {
+        let mut hasher = FixedState::with_seed(seed).build_hasher();
+        value(&mut hasher);
+        hasher.finish()
+    };
+    let content = |h: &mut FoldHasher<'static>| (media, body).hash(h);
+    let (a, b) = (lane(1, &content), lane(2, &content));
+    let digest = |h: &mut FoldHasher<'static>| (a, b).hash(h);
+    let (c, d) = (lane(3, &digest), lane(4, &digest));
+    format!("W/\"{a:016x}{b:016x}{c:016x}{d:016x}\"")
 }
 
 fn if_none_match(headers: &HeaderMap, tag: &HeaderValue) -> bool {

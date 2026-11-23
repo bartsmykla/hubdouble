@@ -268,7 +268,7 @@ fn update_refs(
     let head = live_tip(git, tx, &p.head)?;
     let now = git.now();
     let closes = if let (Some(base), Some(head)) = (base, head) {
-        let reaches = git.compare(tx, repo_id, base, head)?.ahead_by == 0;
+        let reaches = git.is_ancestor(tx, repo_id, head, base)?;
         if reaches {
             p.merged_at = Some(now);
             p.merge_commit_sha = Some(base.to_string());

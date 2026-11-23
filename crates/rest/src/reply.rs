@@ -6,6 +6,8 @@ use serde::Serialize;
 
 pub const JSON: &str = "application/json; charset=utf-8";
 
+const BODY_CAPACITY: usize = 16 * 1024;
+
 /// A handler's answer. The server adds the common headers, the `ETag` and the request log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
@@ -21,7 +23,8 @@ impl Reply {
     ///
     /// `500` when `value` cannot be serialized.
     pub fn json<T: Serialize + ?Sized>(value: &T) -> Result<Reply, ApiError> {
-        let body = serde_json::to_vec(value).map_err(|e| ApiError::internal(e.to_string()))?;
+        let mut body = Vec::with_capacity(BODY_CAPACITY);
+        serde_json::to_writer(&mut body, value).map_err(|e| ApiError::internal(e.to_string()))?;
         Ok(Reply::raw(JSON, body))
     }
 

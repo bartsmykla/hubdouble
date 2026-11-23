@@ -20,6 +20,8 @@ fn pgp_error(e: impl std::fmt::Display) -> GitError {
 pub(crate) struct WebFlow {
     secret: SignedSecretKey,
     public: SignedPublicKey,
+    issuer_fingerprint: Subpacket,
+    issuer_key_id: Subpacket,
 }
 
 fn timestamp(t: Timestamp) -> pgp::types::Timestamp {
@@ -46,22 +48,29 @@ impl WebFlow {
             .generate(StdRng::seed_from_u64(seed))
             .map_err(pgp_error)?;
         let public = secret.to_public_key();
-        Ok(WebFlow { secret, public })
+        let key = &secret.primary_key;
+        let issuer_fingerprint =
+            Subpacket::regular(SubpacketData::IssuerFingerprint(key.fingerprint()))
+                .map_err(pgp_error)?;
+        let issuer_key_id = Subpacket::regular(SubpacketData::IssuerKeyId(key.legacy_key_id()))
+            .map_err(pgp_error)?;
+        Ok(WebFlow {
+            secret,
+            public,
+            issuer_fingerprint,
+            issuer_key_id,
+        })
     }
 
     pub(crate) fn sign(&self, payload: &[u8], time: Timestamp) -> Result<String, GitError> {
         let key = &self.secret.primary_key;
         let subpackets = SubpacketConfig::UserDefined {
             hashed: vec![
-                Subpacket::regular(SubpacketData::IssuerFingerprint(key.fingerprint()))
-                    .map_err(pgp_error)?,
+                self.issuer_fingerprint.clone(),
                 Subpacket::regular(SubpacketData::SignatureCreationTime(timestamp(time)))
                     .map_err(pgp_error)?,
             ],
-            unhashed: vec![
-                Subpacket::regular(SubpacketData::IssuerKeyId(key.legacy_key_id()))
-                    .map_err(pgp_error)?,
-            ],
+            unhashed: vec![self.issuer_key_id.clone()],
         };
         let signature = DetachedSignature::sign_binary_data_with_subpackets(
             StdRng::seed_from_u64(KEY_SEED),

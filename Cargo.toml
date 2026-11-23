@@ -42,6 +42,7 @@ base64 = "=0.23.1"
 bytes = "=1.12.2"
 criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
 fancy-regex = "=0.20.2"
+foldhash = { version = "=0.2.0", default-features = false }
 gix-actor = "=0.44.1"
 gix-config = "=0.63.0"
 gix-hash = "=0.28.1"

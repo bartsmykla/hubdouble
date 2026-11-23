@@ -18,6 +18,7 @@ const ALWAYS_DELIVERED: [&str; 4] = [
 ];
 
 const ZEN: &str = "Keep it logically awesome.";
+const BODY_CAPACITY: usize = 16 * 1024;
 
 fn payload_urls(tx: &Tx) -> Urls {
     Urls::new(tx.config(), "")
@@ -207,6 +208,7 @@ fn rendered(tx: &Tx, e: &Event, p: &Map<String, Value>) -> Vec<(&'static str, Re
 }
 
 fn payload_body(
+    buffer: &mut Vec<u8>,
     p: &Map<String, Value>,
     rendered: &[(&'static str, Rendered)],
     installation: Option<&Installation>,
@@ -226,7 +228,7 @@ fn payload_body(
         ));
     }
     entries.sort_unstable_by_key(|(k, _)| *k);
-    body(&Body(entries))
+    body(buffer, &Body(entries))
 }
 
 fn webhook_label(l: &mut Value) {
@@ -264,8 +266,9 @@ pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
         payload.insert("action".to_owned(), Value::from(action));
     }
     let rendered = rendered(tx, &e, &payload);
+    let mut buffer = Vec::with_capacity(BODY_CAPACITY);
     for (app_id, installation) in recipients {
-        let body = payload_body(&payload, &rendered, installation.as_deref());
+        let body = payload_body(&mut buffer, &payload, &rendered, installation.as_deref());
         tx.push_outbox(OutboxEntry {
             app_id,
             installation_id: installation.map(|i| i.id),
@@ -314,13 +317,17 @@ pub(crate) fn ping(tx: &mut TxMut<'_>, app_id: i64) {
         repo_id: None,
         event: "ping".into(),
         action: None,
-        payload: body(&payload),
+        payload: body(&mut Vec::new(), &payload),
         redelivery_of: None,
     });
 }
 
-fn body(payload: &impl Serialize) -> Bytes {
-    Bytes::copy_from_slice(&serde_json::to_vec(payload).unwrap_or_default())
+fn body(buffer: &mut Vec<u8>, payload: &impl Serialize) -> Bytes {
+    buffer.clear();
+    match serde_json::to_writer(&mut *buffer, payload) {
+        Ok(()) => Bytes::copy_from_slice(buffer),
+        Err(_) => Bytes::new(),
+    }
 }
 
 pub(crate) fn redeliver(

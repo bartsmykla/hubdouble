@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use foldhash::fast::FixedState;
 use parking_lot::RwLock;
 
 use crate::contract::{Commit, EntryMode, GitError, ObjectData, ObjectId, TreeEntry};
@@ -15,13 +16,15 @@ struct StoredObject {
     tree_depth: usize,
 }
 
+type Objects = HashMap<ObjectId, StoredObject, FixedState>;
+
 #[derive(Default)]
 pub(crate) struct Odb {
-    shards: [RwLock<HashMap<ObjectId, StoredObject>>; SHARDS],
+    shards: [RwLock<Objects>; SHARDS],
 }
 
 impl Odb {
-    fn shard(&self, id: ObjectId) -> &RwLock<HashMap<ObjectId, StoredObject>> {
+    fn shard(&self, id: ObjectId) -> &RwLock<Objects> {
         &self.shards[usize::from(id.0[0]) % SHARDS]
     }
 

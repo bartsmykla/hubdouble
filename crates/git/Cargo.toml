@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+foldhash.workspace = true
 gix-actor.workspace = true
 gix-hash = { workspace = true, features = ["sha1"] }
 gix-object = { workspace = true, features = ["sha1"] }

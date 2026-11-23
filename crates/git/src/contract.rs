@@ -19,11 +19,20 @@ pub struct ObjectId(pub [u8; 20]);
 impl ObjectId {
     /// The all-zero ID git writes for a missing side of a ref change.
     pub const NULL: ObjectId = ObjectId([0; 20]);
+
+    fn hex(&self) -> [u8; 40] {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut hex = [0; 40];
+        for (pair, b) in hex.as_chunks_mut::<2>().0.iter_mut().zip(self.0) {
+            *pair = [DIGITS[usize::from(b >> 4)], DIGITS[usize::from(b & 0xf)]];
+        }
+        hex
+    }
 }
 
 impl fmt::Display for ObjectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
+        f.write_str(std::str::from_utf8(&self.hex()).map_err(|_| fmt::Error)?)
     }
 }
 
@@ -53,7 +62,8 @@ impl FromStr for ObjectId {
 
 impl Serialize for ObjectId {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_str(self)
+        let hex = self.hex();
+        s.serialize_str(std::str::from_utf8(&hex).map_err(serde::ser::Error::custom)?)
     }
 }
 

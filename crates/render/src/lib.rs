@@ -89,6 +89,13 @@ fn escaped(segment: &str) -> impl std::fmt::Display {
     utf8_percent_encode(segment, SEGMENT)
 }
 
+fn joined(base: &str, tail: &str) -> String {
+    let mut out = String::with_capacity(base.len() + tail.len());
+    out.push_str(base);
+    out.push_str(tail);
+    out
+}
+
 fn sized(args: std::fmt::Arguments<'_>) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(128);
