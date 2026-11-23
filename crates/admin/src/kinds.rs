@@ -577,7 +577,7 @@ pub(crate) fn app_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<()
     if s.slug.is_empty() {
         return Err(ApiError::unprocessable("slug is empty"));
     }
-    if s.slug == ACTIONS_APP_SLUG {
+    if s.slug.eq_ignore_ascii_case(ACTIONS_APP_SLUG) {
         return Err(ApiError::unprocessable(format!(
             "slug {ACTIONS_APP_SLUG} belongs to GitHub Actions"
         )));

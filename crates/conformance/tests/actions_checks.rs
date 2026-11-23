@@ -704,13 +704,15 @@ async fn no_local_app_takes_the_id_or_slug_of_github_actions() {
         "owner": fixture::ORG, "public_key": fixture::APP_PUBLIC_KEY});
     let by_slug = json!({"kind": "app", "slug": "github-actions", "owner": fixture::ORG,
         "public_key": fixture::APP_PUBLIC_KEY});
+    let by_cased_slug = json!({"kind": "app", "slug": "GitHub-Actions", "owner": fixture::ORG,
+        "public_key": fixture::APP_PUBLIC_KEY});
 
-    for claim in [&by_id, &by_slug] {
+    for claim in [&by_id, &by_slug, &by_cased_slug] {
         // When a seed holds one
         let error = seed_error(claim);
 
-        // Then the seed does not load
-        assert_eq!(error.status, 422);
+        // Then the seed does not load, as live GET /apps/GitHub-Actions answers GitHub Actions
+        assert_eq!(error.status, 422, "{claim}");
     }
 
     // Given a running server whose ID sequence hands out the GitHub Actions App's ID next
@@ -727,15 +729,20 @@ async fn no_local_app_takes_the_id_or_slug_of_github_actions() {
         .unwrap();
 
     // When the admin API creates an App with that slug, and one with no ID
-    let mut admin_slug = by_slug.clone();
-    admin_slug.as_object_mut().unwrap().remove("kind");
-    let refused = server.admin(Method::POST, "app", Some(&admin_slug)).await;
+    let mut refused = Vec::new();
+    for claim in [&by_slug, &by_cased_slug] {
+        let mut admin_slug = claim.clone();
+        admin_slug.as_object_mut().unwrap().remove("kind");
+        refused.push(server.admin(Method::POST, "app", Some(&admin_slug)).await);
+    }
     let fresh = json!({"slug": "fresh", "owner": fixture::ORG,
         "public_key": fixture::APP_PUBLIC_KEY});
     let made = server.admin(Method::POST, "app", Some(&fresh)).await;
 
-    // Then the slug is refused and the new App gets another ID
-    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    // Then the slug is refused in any case and the new App gets another ID
+    for answer in &refused {
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
     assert_eq!(made.status, StatusCode::CREATED);
     let id = server
         .server
