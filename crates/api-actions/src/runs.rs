@@ -11,6 +11,19 @@ use crate::{ACTIONS_READ, ACTIONS_WRITE, lifecycle, views, workflows};
 pub(crate) type RunNumbers = Rows<RunNumber>;
 pub(crate) type RunContexts = Rows<RunContext>;
 pub(crate) type Attempts = Rows<Attempt>;
+pub(crate) type JobKeys = Rows<JobKey>;
+
+pub(crate) struct JobKey {
+    pub job: i64,
+    pub key: String,
+    pub needs: Vec<String>,
+}
+
+impl Entity for JobKey {
+    fn id(&self) -> i64 {
+        self.job
+    }
+}
 
 pub(crate) struct RunNumber {
     pub workflow: i64,

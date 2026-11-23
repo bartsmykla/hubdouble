@@ -32,6 +32,7 @@ pub fn register(r: &mut Registrar<'_>) {
         .register_table::<runs::RunNumbers>()
         .register_table::<runs::RunContexts>()
         .register_table::<runs::Attempts>()
+        .register_table::<runs::JobKeys>()
         .register_table::<configuration::Settings>()
         .register_table::<configuration::Entries>()
         .register_table::<oidc::SigningKey>();

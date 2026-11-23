@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use hubdouble_git::{Git, ObjectId};
@@ -14,7 +14,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::configuration::Settings;
-use crate::runs::{Attempt, Attempts, Reusable, RunContext, RunContexts, RunNumber, RunNumbers};
+use crate::runs::{
+    Attempt, Attempts, JobKey, JobKeys, Reusable, RunContext, RunContexts, RunNumber, RunNumbers,
+};
 use crate::views;
 use crate::workflows::{self, Definition, JobDefinition};
 
@@ -93,8 +95,15 @@ pub(crate) fn create(
     views::run_event(tx, git, &run, info.actor, "requested")?;
     for (key, job) in &info.definition.jobs {
         let name = job.name.as_ref().unwrap_or(key).clone();
-        let job = new_job(tx, &run, name, now);
-        save_job(tx, job, info.actor, Some("queued"))?;
+        queue_job(
+            tx,
+            &run,
+            name,
+            key.clone(),
+            job.needs.clone(),
+            now,
+            info.actor,
+        )?;
     }
     if let Some(conclusion) = tx.table::<Settings>().conclusion() {
         return complete(tx, git, &run, now, info.actor, conclusion);
@@ -174,6 +183,24 @@ fn new_job(tx: &mut TxMut<'_>, run: &WorkflowRun, name: String, now: Timestamp) 
         started_at: None,
         completed_at: None,
     }
+}
+
+fn queue_job(
+    tx: &mut TxMut<'_>,
+    run: &WorkflowRun,
+    name: String,
+    key: String,
+    needs: Vec<String>,
+    now: Timestamp,
+    actor: i64,
+) -> Result<(), ApiError> {
+    let job = new_job(tx, run, name, now);
+    tx.table_mut::<JobKeys>().insert(JobKey {
+        job: job.id,
+        key,
+        needs,
+    })?;
+    save_job(tx, job, actor, Some("queued"))
 }
 
 fn save_job(
@@ -450,21 +477,37 @@ pub(crate) fn rerun(
     if old.status != RunStatus::Completed {
         return Err(ApiError::forbidden("The workflow run is not complete"));
     }
-    let jobs: Vec<_> = tx
+    let keys = tx.table::<JobKeys>();
+    let mut jobs: Vec<_> = tx
         .table::<WorkflowJobs>()
         .children(old.id)
-        .filter(|job| {
-            job.run_attempt == old.run_attempt
-                && matches!(
-                    job.conclusion,
-                    Some(Conclusion::Failure | Conclusion::Cancelled)
-                )
+        .filter(|job| job.run_attempt == old.run_attempt)
+        .map(|job| {
+            let failed = matches!(
+                job.conclusion,
+                Some(Conclusion::Failure | Conclusion::Cancelled)
+            );
+            let (key, needs) = keys
+                .get(job.id)
+                .map_or_default(|row| (row.key.clone(), row.needs.clone()));
+            (failed, job.name.clone(), key, needs)
         })
-        .map(|job| job.name.clone())
         .collect();
-    if jobs.is_empty() {
+    if !jobs.iter().any(|(failed, ..)| *failed) {
         return Err(ApiError::forbidden("The workflow run has no failed jobs"));
     }
+    let mut chosen: BTreeSet<String> = jobs
+        .iter()
+        .filter(|(failed, ..)| *failed)
+        .map(|(_, _, key, _)| key.clone())
+        .collect();
+    while let Some(job) = jobs.iter_mut().find(|(failed, _, key, needs)| {
+        !*failed && !chosen.contains(key) && needs.iter().any(|need| chosen.contains(need))
+    }) {
+        job.0 = true;
+        chosen.insert(job.2.clone());
+    }
+    jobs.retain(|(rerun, ..)| *rerun);
     let mut run = WorkflowRun::clone(&old);
     run.run_attempt += 1;
     run.status = RunStatus::Queued;
@@ -478,10 +521,8 @@ pub(crate) fn rerun(
     };
     tx.table_mut::<Attempts>().insert(archive)?;
     let run = store_run(tx, run)?;
-    views::run_event(tx, git, &run, actor, "requested")?;
-    for name in jobs {
-        let job = new_job(tx, &run, name, now);
-        save_job(tx, job, actor, Some("queued"))?;
+    for (_, name, key, needs) in jobs {
+        queue_job(tx, &run, name, key, needs, now, actor)?;
     }
     if let Some(conclusion) = tx.table::<Settings>().conclusion() {
         complete(tx, git, &run, now, actor, conclusion)?;

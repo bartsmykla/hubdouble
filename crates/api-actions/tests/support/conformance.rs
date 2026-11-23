@@ -46,6 +46,10 @@ pub(super) async fn server(auto_complete: &str) -> TestServer {
                 );
                 entry["files"][".github/workflows/multi.yml"] =
                     json!("name: Multi\non: workflow_dispatch\njobs: {fail: {}, pass: {}}\n");
+                entry["files"][".github/workflows/chain.yml"] = json!(concat!(
+                    "name: Chain\non: workflow_dispatch\njobs:\n  build: {}\n  lint: {}\n",
+                    "  test: {needs: build}\n  deploy: {needs: [lint, test]}\n",
+                ));
             }
             Some("app") => {
                 entry["permissions"]["actions"] = json!("write");

@@ -444,6 +444,79 @@ async fn lifecycle_preserves_attempts_and_serves_ranged_job_logs() {
     assert_lifecycle_webhooks(&server, &final_run).await;
 }
 
+#[tokio::test]
+async fn rerun_failed_jobs_queues_dependents_without_a_requested_run_event() {
+    // Given a run whose build failed, whose lint passed, and whose dependents were skipped
+    let server = server("none").await;
+    let client = client(&server);
+    let run_id = dispatch_workflow(&client, "chain.yml", "main").await["workflow_run_id"]
+        .as_i64()
+        .unwrap();
+    let run_path = format!("{ACTIONS}/runs/{run_id}");
+    let latest = format!("{run_path}/jobs?filter=latest&per_page=100");
+    let jobs = valid("list-jobs-for-workflow-run", &client.get(&latest).await);
+    let conclusions: Vec<_> = jobs["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|job| {
+            let conclusion = match job["name"].as_str().unwrap() {
+                "build" => "failure",
+                "lint" => "success",
+                _ => "skipped",
+            };
+            json!({"id": job["id"], "conclusion": conclusion})
+        })
+        .collect();
+    let complete = server
+        .admin(
+            Method::POST,
+            &format!("actions/runs/{run_id}"),
+            Some(&json!({"conclusion": "failure", "jobs": conclusions})),
+        )
+        .await;
+    assert_eq!(complete.status, StatusCode::OK);
+    drain(&server).await;
+    server.receiver.received().await;
+
+    // When the failed jobs are re-run
+    let retried = client
+        .call(Method::POST, &format!("{run_path}/rerun-failed-jobs"))
+        .await;
+    assert_eq!(retried.status, StatusCode::CREATED);
+
+    // Then the failed job and every job that needs it, directly or not, are queued again
+    let latest = valid("list-jobs-for-workflow-run", &client.get(&latest).await);
+    let names: BTreeSet<_> = latest["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|job| job["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        names,
+        BTreeSet::from(["build", "deploy", "test"].map(str::to_owned))
+    );
+    // And only the new jobs' queued events are sent, with no workflow_run requested
+    drain(&server).await;
+    let sent: Vec<_> = server
+        .receiver
+        .received()
+        .await
+        .iter()
+        .map(|delivery| {
+            let body = delivery.json();
+            (
+                delivery.header("x-github-event").to_owned(),
+                body["action"].as_str().unwrap().to_owned(),
+                body["workflow_job"]["run_attempt"].clone(),
+            )
+        })
+        .collect();
+    let queued = ("workflow_job".to_owned(), "queued".to_owned(), json!(2));
+    assert_eq!(sent, [queued.clone(), queued.clone(), queued]);
+}
+
 async fn assert_lifecycle_webhooks(server: &TestServer, final_run: &serde_json::Value) {
     let mut completed = Vec::new();
     let mut events = BTreeSet::new();

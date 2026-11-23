@@ -57,6 +57,21 @@ pub(crate) struct JobDefinition {
     pub name: Option<String>,
     pub uses: Option<String>,
     pub environment: Option<Value>,
+    #[serde(default, deserialize_with = "needs")]
+    pub needs: Vec<String>,
+}
+
+fn needs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Needs {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Needs::deserialize(d)? {
+        Needs::One(key) => vec![key],
+        Needs::Many(keys) => keys,
+    })
 }
 
 pub(crate) fn register(rest: &mut Registry) {
