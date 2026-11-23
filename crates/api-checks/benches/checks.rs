@@ -3,11 +3,12 @@ use std::{collections::BTreeMap, hint::black_box, sync::Arc};
 use criterion::{Criterion, criterion_group, criterion_main};
 use http::{HeaderMap, Method};
 use hubdouble_admin::{Admin, Registrar};
+use hubdouble_api_checks::actions;
 use hubdouble_auth::Actor;
 use hubdouble_git::{Git, GitBuilder, Signature};
 use hubdouble_model::{
-    Access, Account, AccountKind, App, Installation, ManualClock, Repo, RepositorySelection,
-    Timestamp, Token, TokenKind, Visibility, node_id,
+    Access, Account, AccountKind, ApiError, App, Installation, ManualClock, Repo,
+    RepositorySelection, RunStatus, Timestamp, Token, TokenKind, Visibility, WorkflowJob, node_id,
 };
 use hubdouble_render::Urls;
 use hubdouble_rest::{Access as StoreAccess, Ctx, Parts, Query, Registry};
@@ -248,6 +249,69 @@ fn bench(c: &mut Criterion) {
             });
         });
     }
+    bench_actions_job(c, &store, &git, &fixture);
+}
+
+fn job(id: i64, repo_id: i64, sha: &str) -> WorkflowJob {
+    WorkflowJob {
+        id,
+        node_id: node_id::entity(node_id::CHECK_RUN, id),
+        repo_id,
+        run_id: 1,
+        run_attempt: 1,
+        name: format!("job {id}"),
+        workflow_name: Some("CI".to_owned()),
+        head_sha: sha.to_owned(),
+        head_branch: Some("main".to_owned()),
+        status: RunStatus::Queued,
+        conclusion: None,
+        steps: Vec::new(),
+        labels: Vec::new(),
+        runner_id: None,
+        runner_name: None,
+        check_run_id: Some(id),
+        log_blob_id: None,
+        created_at: Timestamp::SEED,
+        started_at: None,
+        completed_at: None,
+    }
+}
+
+const SUITE_JOBS: i64 = 1000;
+
+fn bench_actions_job(c: &mut Criterion, store: &Store, git: &Git, fixture: &Fixture) {
+    let suite = store
+        .update_quiet(|tx| {
+            let suite = tx.next_id();
+            actions::open_suite(
+                tx,
+                actions::Suite {
+                    id: suite,
+                    repo_id: fixture.repo.id,
+                    head_branch: Some("main".to_owned()),
+                    head_sha: fixture.sha.clone(),
+                    created_at: Timestamp::SEED,
+                },
+            )?;
+            for _ in 0..SUITE_JOBS {
+                let id = tx.next_id();
+                let job = job(id, fixture.repo.id, &fixture.sha);
+                actions::write_job(tx, git, (&job, suite), Vec::new(), 1)?;
+            }
+            Ok(suite)
+        })
+        .unwrap_or_else(|e| panic!("seed the Actions suite: {e:?}"));
+    c.bench_function("actions job check run in a suite of 1000", |b| {
+        b.iter(|| {
+            let rolled_back = store.update_quiet(|tx| {
+                let id = tx.next_id();
+                let job = job(id, fixture.repo.id, &fixture.sha);
+                actions::write_job(tx, git, (&job, suite), Vec::new(), 1)?;
+                Err::<(), _>(ApiError::conflict("roll back"))
+            });
+            black_box(rolled_back)
+        });
+    });
 }
 
 criterion_group!(benches, bench);

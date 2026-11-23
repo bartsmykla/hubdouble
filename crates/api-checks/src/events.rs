@@ -101,12 +101,16 @@ fn send(
 pub fn run_payload(tx: &Tx, git: &Git, run: &CheckRun) -> Result<Value, ApiError> {
     let urls = Urls::new(tx.config(), "");
     let view = View::of(tx, git, &urls, run.repo_id)?;
-    let mut value = object(&view.run(run))?;
+    let rendered = view.run(run);
     let suite = tx
         .table::<CheckSuites>()
         .get(run.check_suite_id)
         .ok_or_else(ApiError::not_found)?;
-    let mut suite = object(&view.suite(suite))?;
+    let mut suite_view =
+        hubdouble_render::CheckSuite::new(suite, view.repository(), rendered.app.clone());
+    suite_view.pull_requests.clone_from(&rendered.pull_requests);
+    let mut value = object(&rendered)?;
+    let mut suite = object(&suite_view)?;
     retain(&mut suite, RUN_SUITE);
     webhook_app(&mut suite);
     webhook_app(&mut value);
