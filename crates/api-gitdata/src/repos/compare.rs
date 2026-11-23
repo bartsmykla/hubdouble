@@ -41,14 +41,17 @@ fn side(view: &View<'_>, text: &str) -> Option<ObjectId> {
 
 pub(crate) fn compare(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let basehead = ctx.param("basehead")?.to_owned();
-    let (base, head) = basehead
-        .split_once("...")
-        .or_else(|| basehead.split_once(".."))
-        .ok_or_else(ApiError::not_found)?;
+    let (base, head) = basehead.split_once("...").ok_or_else(ApiError::not_found)?;
     let view = View::of(ctx)?;
     let base_id = side(&view, base).ok_or_else(ApiError::not_found)?;
     let head_id = side(&view, head).ok_or_else(ApiError::not_found)?;
     let cmp = view.git.compare(view.tx, view.repo.id, base_id, head_id)?;
+    let merge_base = cmp.merge_base.ok_or_else(|| {
+        ApiError::new(
+            404,
+            format!("No common ancestor between {base} and {head}."),
+        )
+    })?;
     let load = |id: ObjectId| -> Result<Arc<Commit>, ApiError> {
         match view.git.object(view.tx, view.repo.id, id)?.data {
             ObjectData::Commit(c) => Ok(c),
@@ -56,7 +59,6 @@ pub(crate) fn compare(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         }
     };
     let base_commit = load(base_id)?;
-    let merge_base = cmp.merge_base.unwrap_or(base_id);
     let status = match (cmp.ahead_by, cmp.behind_by) {
         (0, 0) => "identical",
         (_, 0) => "ahead",

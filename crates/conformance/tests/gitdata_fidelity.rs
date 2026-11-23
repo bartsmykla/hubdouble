@@ -88,6 +88,41 @@ async fn compare_orders_interleaved_branches_before_the_limit_and_pagination() {
 }
 
 #[tokio::test]
+async fn compare_rejects_unrelated_commits() {
+    let s = server().await;
+    let services = s.server.services();
+    let git = &services.git;
+    let repo = PUBLIC_REPO_ID;
+    let head = services
+        .store
+        .view(|tx| {
+            let base = git.resolve_ref(tx, repo, "main")?;
+            let ObjectData::Commit(base) = git.object(tx, repo, base)?.data else {
+                panic!("the main ref must point to a commit");
+            };
+            Ok(git.write_commit(
+                tx,
+                repo,
+                &Commit {
+                    tree: base.tree,
+                    parents: Vec::new(),
+                    author: Signature::seed(),
+                    committer: Signature::seed(),
+                    message: "unrelated root".to_owned(),
+                    gpg_signature: None,
+                },
+            )?)
+        })
+        .unwrap();
+    let client = GoGithub::new(&s).with_token(ALICE_TOKEN);
+    for separator in ["...", ".."] {
+        let path = format!("repos/acme/public/compare/main{separator}{head}");
+        let answer = client.get(&path).await;
+        assert_eq!(answer.status, StatusCode::NOT_FOUND, "{separator}");
+    }
+}
+
+#[tokio::test]
 async fn get_commit_pages_up_to_300_files_and_keeps_the_whole_commit_stats() {
     let files: BTreeMap<_, _> = (0..3_001)
         .map(|n| (format!("file-{n:04}"), "line\n"))

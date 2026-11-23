@@ -747,7 +747,7 @@ async fn compare_counts_commits_both_ways_and_pages_its_commits() {
     assert_ne!(two["commits"][0]["sha"], feature);
     assert!(two.get("files").is_none());
     assert_eq!(valid("repos/compare-commits", &by_sha)["behind_by"], 1);
-    assert_eq!(valid("repos/compare-commits", &two_dots)["ahead_by"], 2);
+    assert_eq!(two_dots.status, StatusCode::NOT_FOUND);
     assert_eq!(valid("repos/compare-commits", &same)["status"], "identical");
     assert_eq!(valid("repos/compare-commits", &behind)["status"], "behind");
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
