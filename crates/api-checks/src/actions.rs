@@ -103,15 +103,16 @@ pub fn owner() -> Account {
 }
 
 /// The account that owns GitHub Actions in this store: a seeded account with the `github`
-/// organization's ID, else one with its login, else that organization. `GET /users/{username}`
-/// and `GET /user/{account_id}` serve the same account.
+/// organization's login, else one with its ID, else that organization. `GET /users/{username}`
+/// with the owner's login and `GET /user/{account_id}` with its ID serve this account, and they
+/// serve that organization only when no seeded account holds its login or its ID.
 #[must_use]
 pub fn owner_in(tx: &Tx) -> Account {
     let builtin = owner();
     let accounts = tx.table::<Accounts>();
     accounts
-        .get(builtin.id)
-        .or_else(|| accounts.by_login(&builtin.login))
+        .by_login(&builtin.login)
+        .or_else(|| accounts.get(builtin.id))
         .map_or(builtin, |seeded| (**seeded).clone())
 }
 

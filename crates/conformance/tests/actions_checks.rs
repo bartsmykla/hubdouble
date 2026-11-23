@@ -1008,3 +1008,45 @@ async fn the_github_actions_app_names_the_seeded_account_that_holds_the_github_l
     assert_eq!(check["app"]["owner"]["id"], 7777);
     assert_eq!(check["app"]["owner"]["login"], "github");
 }
+
+#[tokio::test]
+async fn the_github_actions_owner_is_one_account_when_two_accounts_hold_its_login_and_id() {
+    // Given one seeded organization with the login github and another with the ID 9919
+    let server = start_with(
+        "none",
+        [
+            json!({"kind": "org", "id": 7777, "login": "github", "name": "Seeded"}),
+            json!({"kind": "org", "id": 9919, "login": "other", "name": "Other"}),
+        ],
+    )
+    .await;
+    let client = app(&server);
+    push_feature(&server);
+    let id = dispatch(&client, "feature").await;
+    let build = named(&jobs(&client, id, "latest").await, "build")["id"].clone();
+
+    // When the job's check run, the owner's login and the owner's ID are read
+    let check = ok(
+        &client.get(&format!("{REPO}/check-runs/{build}")).await,
+        StatusCode::OK,
+    );
+    let owner = check["app"]["owner"].clone();
+    let by_login = ok(
+        &client
+            .get(&format!("users/{}", owner["login"].as_str().unwrap()))
+            .await,
+        StatusCode::OK,
+    );
+    let by_id = ok(
+        &client.get(&format!("user/{}", owner["id"])).await,
+        StatusCode::OK,
+    );
+    let github = ok(&client.get("users/github").await, StatusCode::OK);
+
+    // Then the owner is the account that GET /users/github and GET /user/{id} both give
+    assert_eq!(owner["login"], "github");
+    for account in [&by_login, &by_id, &github] {
+        assert_eq!(account["id"], owner["id"]);
+        assert_eq!(account["login"], owner["login"]);
+    }
+}
