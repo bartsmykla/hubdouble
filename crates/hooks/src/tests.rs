@@ -764,6 +764,7 @@ async fn an_event_past_the_byte_budget_is_logged_failed_without_an_attempt() {
     hooks.drain().await.unwrap();
     assert!(bodies.recv().await.is_some());
     assert_eq!(hooks.stats().waiting_bytes, 0);
+    assert_eq!(store.outbox_use().refused_bytes, 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1101,6 +1102,49 @@ async fn the_delivery_log_is_a_ring_per_app() {
     hooks.drain().await.unwrap();
     assert_eq!(logged_ids(&store, APP_A), vec![2, 3]);
     assert_eq!(logged_ids(&store, APP_B), vec![4]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn deferred_deliveries_count_toward_the_ring_and_keep_their_order() {
+    // Given a ring of three and seven events whose first attempt the receiver holds
+    let store = world();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 2;
+        o.log_capacity = 3;
+    });
+    for n in 1..=7 {
+        let mut e = event("push", WIDGET);
+        e.payload.insert("n".to_owned(), json!(n));
+        emit_one(&store, e);
+    }
+    let mut held = None;
+    let mut answered = 0;
+    while answered < 6 {
+        let hit = hits.recv().await.unwrap();
+        if hit.json()["n"] == json!(1) {
+            held = Some(hit);
+        } else {
+            hit.reply.send(200).unwrap();
+            answered += 1;
+        }
+    }
+
+    // When the other six finish while delivery 1 is in flight
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 1 && s.queued == 0)
+        .await;
+
+    // Then only the newest three of them wait for the log, and the log shows none yet
+    assert_eq!(hooks.stats().unlogged, 4);
+    assert_eq!(logged_ids(&store, APP_A), Vec::<i64>::new());
+
+    // When delivery 1 finishes
+    held.unwrap().reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+
+    // Then the ring holds the newest three in ID order
+    assert_eq!(logged_ids(&store, APP_A), vec![5, 6, 7]);
 }
 
 #[tokio::test(start_paused = true)]

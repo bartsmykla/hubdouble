@@ -202,9 +202,12 @@ impl Outbox {
     }
 
     fn take(&mut self) -> Vec<Committed> {
-        self.refused_bytes = 0;
         self.shed_until = 0;
         std::mem::take(&mut self.entries)
+    }
+
+    fn release_refused(&mut self, bytes: usize) {
+        self.refused_bytes = self.refused_bytes.saturating_sub(bytes);
     }
 }
 
@@ -365,18 +368,23 @@ impl Store {
                 table.restore_dyn(&**seeded);
             }
         }
-        for c in self.inner.outbox.lock().take() {
-            if !c.over_budget {
+        let mut outbox = self.inner.outbox.lock();
+        for c in outbox.take() {
+            if c.over_budget {
+                outbox.release_refused(c.entry.payload.len());
+            } else {
                 self.inner.release(c.entry.payload.len());
             }
         }
+        drop(outbox);
         self.inner.epoch.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// Bounds the committed entries that wait for delivery: an entry that would make them more
     /// than `limit.events` entries or `limit.bytes` payload bytes is committed with
     /// [`Committed::over_budget`] set. Over-budget entries keep at most `limit.refused_bytes`
-    /// payload bytes until they are taken; past it the oldest of them lose their payload.
+    /// payload bytes until they are released with [`Store::release_refused`], taken or not;
+    /// past it the oldest of them still in the outbox lose their payload.
     /// Without a call there is no bound.
     pub fn limit_outbox(&self, limit: OutboxUse) {
         *self.inner.limit.lock() = limit;
@@ -386,6 +394,13 @@ impl Store {
     /// bytes held, once its delivery starts or is dropped.
     pub fn release_outbox(&self, bytes: usize) {
         self.inner.release(bytes);
+    }
+
+    /// Gives back the share of [`OutboxUse::refused_bytes`] that one over-budget entry of
+    /// `bytes` payload bytes held, once it is logged or dropped. A taken entry keeps its share
+    /// until then.
+    pub fn release_refused(&self, bytes: usize) {
+        self.inner.outbox.lock().release_refused(bytes);
     }
 
     /// What the committed entries hold now.

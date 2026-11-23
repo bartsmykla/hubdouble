@@ -8,8 +8,8 @@ use hubdouble_model::{
 };
 
 use crate::{
-    Accounts, Blob, Blobs, Counters, Deliveries, OutboxEntry, OutboxUse, Repos, Sequence, Store,
-    StoreBuilder, Table, TxMut,
+    Accounts, Blob, Blobs, Committed, Counters, Deliveries, OutboxEntry, OutboxUse, Repos,
+    Sequence, Store, StoreBuilder, Table, TxMut,
 };
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -333,7 +333,52 @@ fn over_budget_entries_keep_only_the_newest_payloads_within_the_refused_limit() 
         kept,
         [(false, 1), (true, 0), (true, 0), (true, 3), (true, 2)]
     );
-    assert_eq!(s.outbox_use().refused_bytes, 0);
+    assert_eq!(s.outbox_use().refused_bytes, 5);
+}
+
+#[test]
+fn a_taken_over_budget_entry_holds_its_refused_share_until_it_is_released() {
+    // Given an outbox with room for one byte and five bytes of refused payload
+    let s = store();
+    s.limit_outbox(OutboxUse {
+        events: 10,
+        bytes: 1,
+        refused_bytes: 5,
+    });
+    let commit = |n: usize| {
+        s.update(|tx| {
+            tx.push_outbox(OutboxEntry {
+                payload: Bytes::from(vec![b'1'; n]),
+                ..entry("push")
+            });
+            Ok(())
+        })
+        .unwrap();
+    };
+    let kept = |taken: Vec<Committed>| -> Vec<usize> {
+        taken
+            .iter()
+            .filter(|c| c.over_budget)
+            .map(|c| c.entry.payload.len())
+            .collect()
+    };
+    commit(1);
+    commit(3);
+    assert_eq!(kept(s.take_outbox()), [3]);
+
+    // When another over-budget entry of 3 bytes commits while the taken one is not yet logged
+    commit(3);
+
+    // Then it loses its payload, since the taken one still holds 3 of the 5 bytes
+    assert_eq!(kept(s.take_outbox()), [0]);
+    assert_eq!(s.outbox_use().refused_bytes, 3);
+
+    // When the taken one is released and another over-budget entry of 3 bytes commits
+    s.release_refused(3);
+    commit(3);
+
+    // Then that entry keeps its payload
+    assert_eq!(kept(s.take_outbox()), [3]);
 }
 
 #[test]

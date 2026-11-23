@@ -312,16 +312,20 @@ impl Shared {
             .unwrap_or_default()
     }
 
-    fn release(&self, c: &Committed) {
-        if !c.over_budget {
-            self.store.release_outbox(c.entry.payload.len());
+    fn release_bytes(&self, over_budget: bool, bytes: usize) {
+        if over_budget {
+            self.store.release_refused(bytes);
+        } else {
+            self.store.release_outbox(bytes);
         }
     }
 
+    fn release(&self, c: &Committed) {
+        self.release_bytes(c.over_budget, c.entry.payload.len());
+    }
+
     fn release_job(&self, job: &Job) {
-        if !job.over_budget {
-            self.store.release_outbox(job.body.len());
-        }
+        self.release_bytes(job.over_budget, job.body.len());
     }
 
     fn job(a: Assigned) -> Option<Job> {
@@ -404,11 +408,10 @@ impl Shared {
             .into_iter()
             .map(|a| {
                 let pair = (a.app.id, a.id);
-                let held = (!a.committed.over_budget).then_some(a.committed.entry.payload.len());
+                let (over_budget, bytes) =
+                    (a.committed.over_budget, a.committed.entry.payload.len());
                 Shared::job(a).ok_or_else(|| {
-                    if let Some(bytes) = held {
-                        self.store.release_outbox(bytes);
-                    }
+                    self.release_bytes(over_budget, bytes);
                     pair
                 })
             })
@@ -459,14 +462,16 @@ impl Shared {
 
     fn refuse(&self, job: Job) {
         let (app, id, epoch) = (job.app_id, job.id, job.epoch);
-        let shed = job.body.is_empty();
+        let bytes = job.body.len();
         let mut delivery = job.logged(self.clock.now(), 0.0, Outcome::failed(OVER_BUDGET));
-        if shed {
+        if bytes == 0 {
             strip(&mut delivery);
         }
         let mut st = self.state.lock();
         let logged = (epoch == self.store.epoch()).then_some((epoch, delivery));
         self.finish(&mut st, app, id, logged);
+        drop(st);
+        self.release_bytes(true, bytes);
     }
 
     fn take_job(&self) -> Option<Job> {
@@ -570,13 +575,19 @@ impl Shared {
         let Some(log) = apps.get_mut(&app) else {
             return;
         };
+        let capacity = self.options.log_capacity.max(1);
         let floor = log.running.first().copied().unwrap_or(i64::MAX);
-        let rest = log.ready.split_off(&floor);
+        let mut rest = log.ready.split_off(&floor);
+        while rest.len() > capacity
+            && let Some((id, _)) = rest.pop_first()
+        {
+            bodies.release(id);
+            unlogged.remove(&id);
+        }
         let ready = std::mem::replace(&mut log.ready, rest);
         if ready.is_empty() {
             return;
         }
-        let capacity = self.options.log_capacity.max(1);
         let logged = &mut log.logged;
         let mut inserted = Vec::new();
         let mut gone = Vec::new();

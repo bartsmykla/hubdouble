@@ -24,8 +24,9 @@ pub struct Committed {
     pub epoch: u64,
     /// The entry did not fit the limits of [`crate::Store::limit_outbox`] at commit. It holds
     /// no share of them; any other entry holds one until [`crate::Store::release_outbox`].
-    /// Such an entry keeps its payload only while it is among the newest over-budget entries
-    /// within [`OutboxUse::refused_bytes`]; otherwise its payload is empty.
+    /// Such an entry keeps its payload only if it fits [`OutboxUse::refused_bytes`] beside the
+    /// over-budget entries not yet released with [`crate::Store::release_refused`]; otherwise
+    /// its payload is empty.
     pub over_budget: bool,
     pub entry: OutboxEntry,
 }
@@ -35,6 +36,6 @@ pub struct Committed {
 pub struct OutboxUse {
     pub events: usize,
     pub bytes: usize,
-    /// The payload bytes that over-budget entries keep until [`crate::Store::take_outbox`].
+    /// The payload bytes that over-budget entries keep until [`crate::Store::release_refused`].
     pub refused_bytes: usize,
 }
