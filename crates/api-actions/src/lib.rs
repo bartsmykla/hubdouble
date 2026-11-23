@@ -2,6 +2,7 @@ mod admin;
 mod configuration;
 mod lifecycle;
 mod oidc;
+mod pushes;
 mod runs;
 mod views;
 mod workflows;
@@ -35,8 +36,10 @@ pub fn register(r: &mut Registrar<'_>) {
         .register_table::<runs::JobKeys>()
         .register_table::<configuration::Settings>()
         .register_table::<configuration::Entries>()
-        .register_table::<oidc::SigningKey>();
+        .register_table::<oidc::SigningKey>()
+        .register_table::<pushes::Pushes>();
     r.git.on_ref_update(workflows::ref_updated);
+    r.git.on_ref_update(pushes::record);
     workflows::register(r.rest);
     runs::register(r.rest);
     configuration::register(r);

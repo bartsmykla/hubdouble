@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use hubdouble_api_checks::actions as checks;
+use hubdouble_api_checks::{AnnotationInput, annotation};
 use hubdouble_git::{Git, ObjectId};
 use hubdouble_model::{
-    ApiError, Conclusion, IssueState, JobStep, Repo, RunStatus, Timestamp, WorkflowJob,
+    Annotation, ApiError, Conclusion, IssueState, JobStep, Repo, RunStatus, Timestamp, WorkflowJob,
     WorkflowRun, node_id,
 };
 use hubdouble_store::{
@@ -14,6 +16,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::configuration::Settings;
+use crate::pushes;
 use crate::runs::{
     Attempt, Attempts, JobKey, JobKeys, Reusable, RunContext, RunContexts, RunNumber, RunNumbers,
 };
@@ -84,6 +87,24 @@ pub(crate) fn create(
         .values()
         .find_map(|job| reusable(tx, git, repo, &run.head_sha, job.uses.as_deref()?));
     let environment = info.definition.jobs.values().find_map(environment);
+    let (before, after) = pushes::last(
+        tx,
+        repo.id,
+        info.git_ref.strip_prefix("refs/heads/"),
+        &run.head_sha,
+    );
+    checks::open_suite(
+        tx,
+        checks::Suite {
+            id: check_suite,
+            repo_id: repo.id,
+            head_branch: run.head_branch.clone(),
+            head_sha: run.head_sha.clone(),
+            before,
+            after,
+            created_at: now,
+        },
+    )?;
     tx.table_mut::<RunContexts>().insert(RunContext {
         run: id,
         git_ref: info.git_ref,
@@ -96,11 +117,10 @@ pub(crate) fn create(
     for (key, job) in &info.definition.jobs {
         let name = job.name.as_ref().unwrap_or(key).clone();
         queue_job(
-            tx,
+            (tx, git),
             &run,
             name,
-            key.clone(),
-            job.needs.clone(),
+            (key.clone(), job.needs.clone()),
             now,
             info.actor,
         )?;
@@ -163,7 +183,7 @@ fn new_job(tx: &mut TxMut<'_>, run: &WorkflowRun, name: String, now: Timestamp) 
     let id = tx.next_id();
     WorkflowJob {
         id,
-        node_id: node_id::entity(node_id::WORKFLOW_JOB, id),
+        node_id: node_id::entity(node_id::CHECK_RUN, id),
         repo_id: run.repo_id,
         run_id: run.id,
         run_attempt: run.run_attempt,
@@ -186,11 +206,10 @@ fn new_job(tx: &mut TxMut<'_>, run: &WorkflowRun, name: String, now: Timestamp) 
 }
 
 fn queue_job(
-    tx: &mut TxMut<'_>,
+    (tx, git): (&mut TxMut<'_>, &Git),
     run: &WorkflowRun,
     name: String,
-    key: String,
-    needs: Vec<String>,
+    (key, needs): (String, Vec<String>),
     now: Timestamp,
     actor: i64,
 ) -> Result<(), ApiError> {
@@ -200,16 +219,15 @@ fn queue_job(
         key,
         needs,
     })?;
-    save_job(tx, job, actor, Some("queued"))
+    save_job((tx, git), job, (actor, Some("queued")), Vec::new())
 }
 
 fn carry_job(
-    tx: &mut TxMut<'_>,
+    (tx, git): (&mut TxMut<'_>, &Git),
     run: &WorkflowRun,
     old: &WorkflowJob,
-    key: String,
-    needs: Vec<String>,
-    now: Timestamp,
+    (key, needs): (String, Vec<String>),
+    (now, actor): (Timestamp, i64),
 ) -> Result<(), ApiError> {
     let fresh = new_job(tx, run, old.name.clone(), now);
     let log_blob_id = match old
@@ -242,18 +260,24 @@ fn carry_job(
         key,
         needs,
     })?;
-    tx.table_mut::<WorkflowJobs>().replace(job)?;
-    Ok(())
+    save_job((tx, git), job, (actor, None), Vec::new())
 }
 
 fn save_job(
-    tx: &mut TxMut<'_>,
+    (tx, git): (&mut TxMut<'_>, &Git),
     job: WorkflowJob,
-    actor: i64,
-    action: Option<&'static str>,
+    (actor, action): (i64, Option<&'static str>),
+    annotations: Vec<Annotation>,
 ) -> Result<(), ApiError> {
     if let Some(action) = action {
         views::job_event(tx, &job, actor, action)?;
+    }
+    let suite = tx
+        .table::<WorkflowRuns>()
+        .get(job.run_id)
+        .and_then(|run| run.check_suite_id);
+    if let Some(suite) = suite {
+        checks::write_job(tx, git, (&job, suite), annotations, actor)?;
     }
     tx.table_mut::<WorkflowJobs>().replace(job)?;
     Ok(())
@@ -279,6 +303,8 @@ struct JobPatch {
     labels: Option<Vec<String>>,
     runner_id: Option<i64>,
     runner_name: Option<String>,
+    #[serde(default)]
+    annotations: Vec<AnnotationInput>,
 }
 
 #[derive(Deserialize)]
@@ -302,7 +328,7 @@ pub(crate) fn apply(
 ) -> Result<Arc<WorkflowRun>, ApiError> {
     let (status, conclusion) = state(old.status, old.conclusion, patch.status, patch.conclusion)?;
     for input in patch.jobs {
-        apply_job(tx, old, now, actor, input)?;
+        apply_job((tx, git), old, now, actor, input)?;
     }
     if status == RunStatus::Completed && old.status != status {
         let conclusion = conclusion.ok_or_else(|| {
@@ -324,7 +350,7 @@ pub(crate) fn apply(
     if old.status != status && matches!(status, RunStatus::InProgress | RunStatus::Requested) {
         views::run_event(tx, git, &run, actor, status.as_str())?;
     }
-    store_run(tx, run)
+    store_run((tx, git), run, actor)
 }
 
 fn state(
@@ -361,7 +387,7 @@ fn state(
 }
 
 fn apply_job(
-    tx: &mut TxMut<'_>,
+    (tx, git): (&mut TxMut<'_>, &Git),
     run: &WorkflowRun,
     now: Timestamp,
     actor: i64,
@@ -417,7 +443,12 @@ fn apply_job(
         );
         job.log_blob_id = Some(id);
     }
-    save_job(tx, job, actor, action)
+    let annotations = patch
+        .annotations
+        .into_iter()
+        .map(annotation)
+        .collect::<Result<_, _>>()?;
+    save_job((tx, git), job, (actor, action), annotations)
 }
 
 impl StepPatch {
@@ -499,7 +530,7 @@ pub(crate) fn complete(
     };
     for mut job in unfinished {
         set_job_state(&mut job, RunStatus::Completed, Some(job_conclusion), now);
-        save_job(tx, job, actor, Some("completed"))?;
+        save_job((tx, git), job, (actor, Some("completed")), Vec::new())?;
     }
     let mut run = old.clone();
     run.status = RunStatus::Completed;
@@ -507,47 +538,89 @@ pub(crate) fn complete(
     run.updated_at = now;
     run.run_started_at.get_or_insert(now);
     views::run_event(tx, git, &run, actor, "completed")?;
-    store_run(tx, run)
+    store_run((tx, git), run, actor)
 }
 
-fn store_run(tx: &mut TxMut<'_>, run: WorkflowRun) -> Result<Arc<WorkflowRun>, ApiError> {
+fn store_run(
+    (tx, git): (&mut TxMut<'_>, &Git),
+    run: WorkflowRun,
+    actor: i64,
+) -> Result<Arc<WorkflowRun>, ApiError> {
     let run = Arc::new(run);
     tx.table_mut::<WorkflowRuns>().replace(Arc::clone(&run))?;
+    if let Some(suite) = run.check_suite_id {
+        checks::follow_run(
+            tx,
+            git,
+            suite,
+            (run.status, run.conclusion),
+            (actor, run.updated_at),
+        )?;
+    }
     Ok(run)
 }
 
+const RERUN_WINDOW_SECONDS: i64 = 30 * 24 * 60 * 60;
+const MAX_RERUNS: i64 = 50;
+
+#[derive(Clone, Copy)]
+pub(crate) enum Rerun {
+    All,
+    Failed,
+    Job(i64),
+}
+
 pub(crate) fn rerun(
-    tx: &mut TxMut<'_>,
-    git: &Git,
+    (tx, git): (&mut TxMut<'_>, &Git),
     old: Arc<WorkflowRun>,
+    which: Rerun,
     actor: i64,
     now: Timestamp,
 ) -> Result<(), ApiError> {
+    if now > old.created_at.plus_seconds(RERUN_WINDOW_SECONDS) {
+        return Err(ApiError::forbidden(
+            "Unable to retry this workflow run because it was created over a month ago",
+        )
+        .with_docs("https://docs.github.com/rest/actions/workflow-runs#re-run-a-workflow"));
+    }
     if old.status != RunStatus::Completed {
         return Err(ApiError::forbidden("The workflow run is not complete"));
     }
     let keys = tx.table::<JobKeys>();
+    let key_of = |id: i64| {
+        keys.get(id)
+            .map_or_default(|row| (row.key.clone(), row.needs.clone()))
+    };
+    let asked = match which {
+        Rerun::Job(id) => Some(key_of(id).0),
+        Rerun::All | Rerun::Failed => None,
+    };
     let mut jobs: Vec<_> = tx
         .table::<WorkflowJobs>()
         .children(old.id)
         .filter(|job| job.run_attempt == old.run_attempt)
         .map(|job| {
-            let failed = matches!(
-                job.conclusion,
-                Some(Conclusion::Failure | Conclusion::Cancelled | Conclusion::TimedOut)
-            );
-            let (key, needs) = keys
-                .get(job.id)
-                .map_or_default(|row| (row.key.clone(), row.needs.clone()));
-            (failed, Arc::clone(job), key, needs)
+            let (key, needs) = key_of(job.id);
+            let chosen = match which {
+                Rerun::All => true,
+                Rerun::Failed => matches!(
+                    job.conclusion,
+                    Some(Conclusion::Failure | Conclusion::Cancelled | Conclusion::TimedOut)
+                ),
+                Rerun::Job(_) => asked.as_ref() == Some(&key),
+            };
+            (chosen, Arc::clone(job), key, needs)
         })
         .collect();
-    if !jobs.iter().any(|(failed, ..)| *failed) {
-        return Err(ApiError::forbidden("The workflow run has no failed jobs"));
+    if !jobs.iter().any(|(chosen, ..)| *chosen) {
+        return Err(match which {
+            Rerun::Failed => ApiError::forbidden("The workflow run has no failed jobs"),
+            Rerun::All | Rerun::Job(_) => ApiError::not_found(),
+        });
     }
     let mut chosen: BTreeSet<String> = jobs
         .iter()
-        .filter(|(failed, ..)| *failed)
+        .filter(|(chosen, ..)| *chosen)
         .map(|(_, _, key, _)| key.clone())
         .collect();
     while let Some(job) = jobs.iter_mut().find(|(failed, _, key, needs)| {
@@ -568,12 +641,16 @@ pub(crate) fn rerun(
         snapshot: old,
     };
     tx.table_mut::<Attempts>().insert(archive)?;
-    let run = store_run(tx, run)?;
+    let run = store_run((tx, git), run, actor)?;
+    if run.run_attempt > MAX_RERUNS + 1 {
+        complete(tx, git, &run, now, actor, Conclusion::Failure)?;
+        return Ok(());
+    }
     for (rerun, old, key, needs) in jobs {
         if rerun {
-            queue_job(tx, &run, old.name.clone(), key, needs, now, actor)?;
+            queue_job((tx, git), &run, old.name.clone(), (key, needs), now, actor)?;
         } else {
-            carry_job(tx, &run, &old, key, needs, now)?;
+            carry_job((tx, git), &run, &old, (key, needs), (now, actor))?;
         }
     }
     if let Some(conclusion) = tx.table::<Settings>().conclusion() {

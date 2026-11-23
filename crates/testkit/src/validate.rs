@@ -58,7 +58,17 @@ fn allow_newer_fields(mut schema: Value) -> Value {
             json!({ "$ref": "#/definitions/organization" }),
         ),
     ];
-    for (definition, field, field_schema) in newer {
+    let access = json!({ "type": "string", "enum": ["read", "write"] });
+    let permissions = [
+        "artifact_metadata",
+        "attestations",
+        "code_quality",
+        "copilot_requests",
+        "drives",
+        "models",
+    ]
+    .map(|name| ("app/properties/permissions", name, access.clone()));
+    for (definition, field, field_schema) in newer.into_iter().chain(permissions) {
         if let Some(props) = schema
             .pointer_mut(&format!("/definitions/{definition}/properties"))
             .and_then(Value::as_object_mut)

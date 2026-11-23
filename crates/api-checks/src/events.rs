@@ -151,7 +151,7 @@ pub fn check_suite(
     webhook_app(&mut value);
     if action != "rerequested" {
         value["rerequestable"] = Value::Bool(suite.rerequestable);
-        value["runs_rerequestable"] = Value::Bool(suite.rerequestable);
+        value["runs_rerequestable"] = Value::Bool(crate::view::runs_rerequestable(suite));
     }
     send(
         tx,

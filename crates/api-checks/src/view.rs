@@ -9,6 +9,8 @@ use hubdouble_render::{
 };
 use hubdouble_store::{Accounts, Apps, CheckRuns, Issues, Repos, Statuses, Tx};
 
+use crate::actions;
+
 pub fn commit(tx: &Tx, git: &Git, repo: i64, reference: &str) -> Option<ObjectId> {
     let object = git.expression(tx, repo, reference).ok()?;
     git.peel_to_commit(tx, repo, object.id).ok()
@@ -32,6 +34,12 @@ pub fn latest<'t>(runs: impl Iterator<Item = &'t Arc<CheckRun>>) -> Vec<&'t Arc<
             .or_insert(run);
     }
     newest.into_values().collect()
+}
+
+/// GitHub Actions re-runs a job only through the Actions API, so its suites have no re-runnable
+/// check runs.
+pub fn runs_rerequestable(suite: &CheckSuite) -> bool {
+    suite.rerequestable && suite.app_id != actions::APP_ID
 }
 
 pub fn runs_on<'t>(tx: &'t Tx, repo: i64, sha: &'t str) -> impl Iterator<Item = &'t Arc<CheckRun>> {
@@ -108,7 +116,9 @@ impl<'a> View<'a> {
     }
 
     pub fn app(&self, id: i64) -> Option<Integration> {
-        let app = self.tx.table::<Apps>().get(id)?;
+        let Some(app) = self.tx.table::<Apps>().get(id) else {
+            return (id == actions::APP_ID).then(|| actions::app(self.urls));
+        };
         let owner = self.tx.table::<Accounts>().get(app.owner_id)?;
         Some(Integration::new(self.urls, app, owner))
     }
@@ -159,6 +169,9 @@ impl<'a> View<'a> {
         pulls: Vec<PullRequestMinimal>,
     ) -> render::CheckRun {
         let mut view = render::CheckRun::new(self.urls, run, &self.name, app);
+        if run.app_id == actions::APP_ID {
+            view.html_url.clone_from(&run.details_url);
+        }
         view.pull_requests = pulls;
         view
     }
@@ -188,6 +201,7 @@ impl<'a> View<'a> {
     pub fn suite(&self, suite: &CheckSuite) -> render::CheckSuite {
         let mut view = render::CheckSuite::new(suite, self.repository(), self.app(suite.app_id));
         view.pull_requests = self.pulls(&suite.head_sha);
+        view.runs_rerequestable = runs_rerequestable(suite);
         view.latest_check_runs_count =
             i64::try_from(latest(self.tx.table::<CheckRuns>().children(suite.id)).len())
                 .unwrap_or(i64::MAX);

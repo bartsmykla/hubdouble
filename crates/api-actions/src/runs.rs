@@ -6,6 +6,7 @@ use hubdouble_model::{ApiError, Conclusion, RunStatus, Timestamp, WorkflowJob, W
 use hubdouble_rest::{Ctx, Query, Registry, Reply};
 use hubdouble_store::{Accounts, Entity, Rows, Tx, WorkflowJobs, WorkflowRuns};
 
+use crate::lifecycle::Rerun;
 use crate::{ACTIONS_READ, ACTIONS_WRITE, lifecycle, views, workflows};
 
 pub(crate) type RunNumbers = Rows<RunNumber>;
@@ -108,7 +109,17 @@ pub(crate) fn register(rest: &mut Registry) {
         logs,
     );
     rest.handle("actions/cancel-workflow-run", ACTIONS_WRITE, cancel);
-    rest.handle("actions/re-run-workflow-failed-jobs", ACTIONS_WRITE, rerun);
+    rest.handle("actions/re-run-workflow", ACTIONS_WRITE, rerun);
+    rest.handle(
+        "actions/re-run-workflow-failed-jobs",
+        ACTIONS_WRITE,
+        rerun_failed,
+    );
+    rest.handle(
+        "actions/re-run-job-for-workflow-run",
+        ACTIONS_WRITE,
+        rerun_job,
+    );
 }
 
 pub(crate) fn find(tx: &Tx, id: i64) -> Result<&Arc<WorkflowRun>, ApiError> {
@@ -380,9 +391,24 @@ fn cancel(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 
 fn rerun(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let run = Arc::clone(for_repo(ctx)?);
+    rerun_as(ctx, run, Rerun::All)
+}
+
+fn rerun_failed(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    let run = Arc::clone(for_repo(ctx)?);
+    rerun_as(ctx, run, Rerun::Failed)
+}
+
+fn rerun_job(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    let job = job(ctx)?;
+    let (id, run) = (job.id, job.run_id);
+    let run = Arc::clone(find(ctx.tx(), run)?);
+    rerun_as(ctx, run, Rerun::Job(id))
+}
+
+fn rerun_as(ctx: &mut Ctx<'_>, run: Arc<WorkflowRun>, which: Rerun) -> Result<Reply, ApiError> {
     let actor = ctx.actor().account().ok_or_else(ApiError::unauthorized)?.id;
     let now = ctx.now();
-    let (tx, git) = ctx.tx_mut_and_git()?;
-    lifecycle::rerun(tx, git, run, actor, now)?;
+    lifecycle::rerun(ctx.tx_mut_and_git()?, run, which, actor, now)?;
     Reply::json(&serde_json::json!({})).map(|reply| reply.status(StatusCode::CREATED))
 }

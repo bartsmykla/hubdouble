@@ -80,7 +80,24 @@ fn owner(actor: &Actor, run: &CheckRun) -> Result<i64, ApiError> {
     }
 }
 
-fn annotation(input: AnnotationInput) -> Result<Annotation, ApiError> {
+fn modifier(actor: &Actor, run: &CheckRun) -> Result<i64, ApiError> {
+    let (app, bot) = app_actor(actor)?;
+    if app == run.app_id {
+        return Ok(bot);
+    }
+    Err(ApiError::forbidden(format!(
+        "Invalid app_id `{}` - check run can only be modified by the GitHub App that created it.",
+        run.app_id
+    ))
+    .with_docs("https://docs.github.com/rest/checks/runs#update-a-check-run"))
+}
+
+/// Reads one annotation of a check run's `output.annotations`, as the Checks API takes it.
+///
+/// # Errors
+///
+/// Returns `422` for an unknown `annotation_level`.
+pub fn annotation(input: AnnotationInput) -> Result<Annotation, ApiError> {
     Ok(Annotation {
         path: input.path,
         start_line: input.start_line,
@@ -272,7 +289,7 @@ pub fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 
 pub fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let run = find(ctx)?;
-    let sender = owner(ctx.actor(), &run)?;
+    let sender = modifier(ctx.actor(), &run)?;
     let input: RunInput = ctx.body()?;
     validate(&input, false)?;
     let now = ctx.now();

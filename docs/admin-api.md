@@ -88,7 +88,7 @@ The App routes accept a numeric App ID in place of the slug. App and user reads 
 | `POST /_hubdouble/actions/runs/{id}` | Optional `status`, `conclusion`, and `jobs` (job update objects). See the fields below. | `200` with the updated workflow run object. |
 | `POST /_hubdouble/actions/oidc/token` | Required numeric `run_id`. Optional numeric `job_id`, string `audience`, and `claims` object. | `200` with `token` (JWT), `request_token` (runner credential), and `request_url` (the runner endpoint). Use the runner credential as a bearer token at that URL. |
 
-Each job update requires numeric `id`. Optional fields are `status`, `conclusion`, `steps`, `logs` (text), `labels` (string array), `runner_id`, and `runner_name`. Each step requires `number`, `name`, and `status`. It can also have `conclusion`, `started_at`, and `completed_at`. A completed run or job requires a conclusion.
+Each job update requires numeric `id`. Optional fields are `status`, `conclusion`, `steps`, `logs` (text), `labels` (string array), `runner_id`, `runner_name`, and `annotations`. The `annotations` array has the annotation objects of the Checks API `output.annotations` and appends them to the job's check run. Each step requires `number`, `name`, and `status`. It can also have `conclusion`, `started_at`, and `completed_at`. A completed run or job requires a conclusion.
 
 An OIDC claim override must name a claim that the token already has. Use integers for time claims and strings for the other claims. A supplied `job_id` must belong to the current run attempt.
 

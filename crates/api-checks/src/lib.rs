@@ -5,6 +5,8 @@ use hubdouble_rest::{Ctx, Page, Reply};
 use serde::Serialize;
 use serde_json::json;
 
+pub mod actions;
+pub use runs::{AnnotationInput, annotation};
 mod events;
 mod graphql;
 mod runs;

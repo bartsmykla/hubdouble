@@ -2250,6 +2250,7 @@ dependencies = [
  "criterion",
  "http",
  "hubdouble-admin",
+ "hubdouble-api-checks",
  "hubdouble-auth",
  "hubdouble-git",
  "hubdouble-gql",
@@ -2308,6 +2309,7 @@ dependencies = [
  "hubdouble-store",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
