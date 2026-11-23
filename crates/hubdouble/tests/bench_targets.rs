@@ -7,7 +7,7 @@ mod row;
 
 use std::path::Path;
 
-use row::{CALIBRATION, Goal, REFERENCE_CALIBRATION_US, Row};
+use row::{CALIBRATION, Goal, REFERENCE_CALIBRATION_US, REFERENCE_CPU, Row};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -57,8 +57,31 @@ fn round(dir: &Path, side: &str, n: u32, rows: &[(&Measure, Option<f64>)]) {
     write(&path, &report(rows, Some(REFERENCE_CALIBRATION_US)));
 }
 
+fn criterion_run(dir: &Path, bench: &str, side: &str, n: u32, median: f64) {
+    let file = format!("criterion/{bench}/{side}-{n}/estimates.json");
+    write(
+        &dir.join(file),
+        &json!({"median": {"point_estimate": median}}),
+    );
+}
+
+fn steady_criterion(dir: &Path) {
+    if dir.join("criterion").exists() {
+        return;
+    }
+    for n in 1..=5 {
+        criterion_run(dir, "steady", "base", n, 100.0);
+        criterion_run(dir, "steady", "head", n, 100.0);
+    }
+}
+
+fn compare_on(dir: &Path, cpu: &str) -> usize {
+    steady_criterion(dir);
+    gate::compare(dir, Some(&dir.join("rounds")), Some(cpu)).0
+}
+
 fn compare(dir: &Path) -> usize {
-    gate::compare(dir, Some(&dir.join("rounds"))).0
+    compare_on(dir, REFERENCE_CPU)
 }
 
 #[test]
@@ -143,7 +166,7 @@ fn the_gate_needs_every_round_and_a_value_on_both_sides_of_every_row() {
     // When the gate compares them, without a base for round 1, and without rounds at all
     let failed = compare(dir.path());
     let without_base = compare(unpaired.path());
-    let (without_rounds, _) = gate::compare(dir.path(), None);
+    let (without_rounds, _) = gate::compare(dir.path(), None, Some(REFERENCE_CPU));
 
     // Then the dropped row, and the unmeasured round against main and against its target, fail it
     assert_eq!(failed, 3);
@@ -202,16 +225,19 @@ fn a_scaled_target_is_judged_on_the_reference_runner_and_a_raw_one_as_measured()
 
 #[test]
 fn a_criterion_bench_regresses_when_its_median_paired_change_passes_20_percent() {
-    // Given three paired rounds of criterion medians, one bench with one slow head round, one 25 % slower
+    // Given five paired rounds of criterion medians, one bench with one slow head round, one 25 % slower
     let dir = TempDir::new().unwrap();
     let run = |bench: &str, side: &str, n: u32, median: f64| {
-        let file = format!("criterion/{bench}/{side}-{n}/estimates.json");
-        write(
-            &dir.path().join(file),
-            &json!({"median": {"point_estimate": median}}),
-        );
+        criterion_run(dir.path(), bench, side, n, median);
     };
-    for (n, steady, slower) in [(1, 101.0, 125.0), (2, 150.0, 130.0), (3, 99.0, 100.0)] {
+    let head = [
+        (101.0, 125.0),
+        (150.0, 130.0),
+        (99.0, 100.0),
+        (100.0, 126.0),
+        (102.0, 90.0),
+    ];
+    for (n, (steady, slower)) in (1..).zip(head) {
         run("group/steady", "base", n, 100.0);
         run("group/steady", "head", n, steady);
         run("slower", "base", n, 100.0);
@@ -224,6 +250,93 @@ fn a_criterion_bench_regresses_when_its_median_paired_change_passes_20_percent()
     // When the gate compares them
     let failed = compare(dir.path());
 
-    // Then only the bench that is 25 % slower in two of three rounds fails it
+    // Then only the bench that is 25 % slower in three of five rounds fails it
     assert_eq!(failed, 1);
+}
+
+#[test]
+fn the_criterion_gate_fails_without_data_without_five_pairs_and_without_a_bench_of_main() {
+    // Given no criterion data, a bench with an unreadable head round, and a bench only main has
+    let judge = |benches: &[(&str, &[u32], &[u32])], unreadable: Option<&str>| {
+        let dir = TempDir::new().unwrap();
+        for (bench, base, head) in benches {
+            for &n in *base {
+                criterion_run(dir.path(), bench, "base", n, 100.0);
+            }
+            for &n in *head {
+                criterion_run(dir.path(), bench, "head", n, 100.0);
+            }
+        }
+        if let Some(path) = unreadable {
+            write(&dir.path().join(path), &json!({"median": {}}));
+        }
+        round(dir.path(), "base", 1, &[]);
+        round(dir.path(), "head", 1, &[]);
+        gate::compare(
+            dir.path(),
+            Some(&dir.path().join("rounds")),
+            Some(REFERENCE_CPU),
+        )
+        .0
+    };
+    let all: &[u32] = &[1, 2, 3, 4, 5];
+
+    // When the gate judges each case
+    let nothing = judge(&[], None);
+    let complete = judge(&[("steady", all, all)], None);
+    let four_rounds = judge(&[("steady", all, &[1, 2, 3, 4])], None);
+    let unreadable = judge(
+        &[("steady", all, all)],
+        Some("criterion/steady/head-3/estimates.json"),
+    );
+    let dropped = judge(&[("steady", all, all), ("dropped", all, &[])], None);
+    let added = judge(&[("steady", all, all), ("added", &[], all)], None);
+
+    // Then only complete data passes, and a bench new on the head is no failure
+    assert_eq!(nothing, 1);
+    assert_eq!(complete, 0);
+    assert_eq!(four_rounds, 1);
+    assert_eq!(unreadable, 1);
+    assert_eq!(dropped, 1);
+    assert_eq!(added, 0);
+}
+
+#[test]
+fn a_scaled_miss_off_the_reference_model_fails_only_when_main_meets_the_target() {
+    // Given a scaled row and a raw row that the head misses, against a main that meets or misses them
+    let scaled = Measure {
+        name: "scaled latency",
+        target: 100.0,
+        scaled: true,
+        ..LATENCY
+    };
+    let raw = Measure {
+        name: "raw latency",
+        target: 100.0,
+        ..LATENCY
+    };
+    let judge = |measure: &Measure, base: Option<f64>, cpu: &str| {
+        let dir = TempDir::new().unwrap();
+        for n in 1..=3 {
+            let rows = base.map(|b| (measure, Some(b)));
+            round(dir.path(), "base", n, rows.as_slice());
+            round(dir.path(), "head", n, &[(measure, Some(104.0))]);
+        }
+        compare_on(dir.path(), cpu)
+    };
+    let other = "AMD EPYC 7763 64-Core Processor";
+
+    // When the gate judges them on the reference model and on another model
+    let reference_both_miss = judge(&scaled, Some(103.0), "intel(r) xeon(r) 6975p-c ");
+    let other_base_meets = judge(&scaled, Some(90.0), other);
+    let other_both_miss = judge(&scaled, Some(103.0), other);
+    let other_base_absent = judge(&scaled, None, other);
+    let other_raw_both_miss = judge(&raw, Some(103.0), other);
+
+    // Then only a scaled row that main misses too on another model passes, as a runner miss
+    assert_eq!(reference_both_miss, 1);
+    assert_eq!(other_base_meets, 1);
+    assert_eq!(other_both_miss, 0);
+    assert_eq!(other_base_absent, 1);
+    assert_eq!(other_raw_both_miss, 1);
 }

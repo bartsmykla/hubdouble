@@ -21,6 +21,7 @@ pub(crate) enum Goal {
 
 pub(crate) const CALIBRATION: &str = "Runner calibration: JSON round trip of 13 KB";
 pub(crate) const REFERENCE_CALIBRATION_US: f64 = 54.8;
+pub(crate) const REFERENCE_CPU: &str = "Intel(R) Xeon(R) 6975P-C";
 
 pub(crate) struct Row {
     pub(crate) measure: String,

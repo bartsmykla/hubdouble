@@ -37,6 +37,7 @@ jobs:
             echo "HEAD_SHA=$(git rev-parse HEAD)"
             echo "BASE_SHA=$(git rev-parse "$BASE_REF")"
             echo "CRITERION_HOME=$GITHUB_WORKSPACE/target/criterion"
+            echo "HUBDOUBLE_BENCH_CPU=$(lscpu | sed -n 's/^Model name: *//p')"
           } >> "$GITHUB_ENV"
           rm -rf target/criterion
       - name: build the benchmarks and the image of the base and the head
@@ -54,8 +55,8 @@ jobs:
           done
       - name: criterion benchmarks, base and head rounds interleaved
         run: |
-          for exe in "$RUNNER_TEMP"/head/*; do
-            name=$(basename "$exe")
+          names=$(find "$RUNNER_TEMP/base" "$RUNNER_TEMP/head" -type f -printf '%f\n' | sort -u)
+          for name in $names; do
             [ "$name" = targets ] && continue
             for round in $(seq 1 "$ROUNDS"); do
               order="base head"

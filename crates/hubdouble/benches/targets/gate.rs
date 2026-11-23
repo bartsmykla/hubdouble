@@ -7,9 +7,10 @@ use std::process::ExitCode;
 
 use serde_json::Value;
 
-use crate::row::{CALIBRATION, Goal, REFERENCE_CALIBRATION_US, Row, number};
+use crate::row::{CALIBRATION, Goal, REFERENCE_CALIBRATION_US, REFERENCE_CPU, Row, number};
 
 const BUDGET: f64 = 0.20;
+const ROUNDS: usize = 5;
 
 struct Round {
     number: u32,
@@ -164,20 +165,78 @@ fn relative(rounds: &[Round], out: &mut String) -> usize {
     failed
 }
 
-fn factor(round: &Round) -> Option<f64> {
-    find(&round.head, CALIBRATION)
+fn factor(rows: &[Row]) -> Option<f64> {
+    find(rows, CALIBRATION)
         .and_then(|r| r.value)
         .filter(|v| *v > 0.0)
         .map(|v| v / REFERENCE_CALIBRATION_US)
 }
 
-fn absolute(rounds: &[Round], out: &mut String) -> usize {
+struct Judged {
+    value: Option<f64>,
+    raw: Option<f64>,
+}
+
+fn judge(rounds: &[Round], row: &Row, side: fn(&Round) -> &[Row]) -> Judged {
+    let mut raw = Vec::new();
+    let mut judged = Vec::new();
+    for round in rounds {
+        let Some(value) = find(side(round), &row.measure).and_then(|r| r.value) else {
+            continue;
+        };
+        let scaled = if row.scaled {
+            factor(side(round))
+                .or_else(|| factor(&round.head))
+                .map(|f| match row.goal {
+                    Goal::Above(_) => value * f,
+                    _ => value / f,
+                })
+        } else {
+            Some(value)
+        };
+        raw.push(value);
+        judged.extend(scaled);
+    }
+    let complete = judged.len() == rounds.len();
+    Judged {
+        value: median(judged).filter(|_| complete),
+        raw: median(raw),
+    }
+}
+
+fn shown(row: &Row, judged: &Judged) -> String {
+    let value = judged.value.map_or_else(
+        || "n/a".to_owned(),
+        |v| format!("{} {}", number(v), row.unit),
+    );
+    match judged.raw {
+        Some(r) if row.scaled => format!(
+            "{value} on the reference runner, {} {} here",
+            number(r),
+            row.unit
+        ),
+        _ => value,
+    }
+}
+
+fn is_reference(cpu: Option<&str>) -> bool {
+    cpu.is_none_or(|c| c.trim().eq_ignore_ascii_case(REFERENCE_CPU))
+}
+
+fn absolute(rounds: &[Round], cpu: Option<&str>, out: &mut String) -> usize {
     let mut failed = 0;
-    let seen: Vec<f64> = rounds.iter().filter_map(factor).collect();
+    let seen: Vec<f64> = rounds.iter().filter_map(|r| factor(&r.head)).collect();
     let runs: Vec<String> = seen.iter().map(|f| format!("{f:.2}")).collect();
+    let reference = is_reference(cpu);
     let _ = writeln!(
         out,
-        "runner   {CALIBRATION}: factor {} against the reference {} µs (rounds {})",
+        "runner   {}{}: {CALIBRATION} factor {} against the reference {} µs (rounds {})",
+        cpu.map_or("CPU not given", str::trim),
+        if reference {
+            ", judged as the reference model"
+        } else {
+            ", not the reference model"
+        },
         median(seen.clone()).map_or_else(|| "n/a".to_owned(), |f| format!("{f:.2}")),
         number(REFERENCE_CALIBRATION_US),
         runs.join(", ")
@@ -186,46 +245,28 @@ fn absolute(rounds: &[Round], out: &mut String) -> usize {
         if matches!(row.goal, Goal::Report) {
             continue;
         }
-        let mut raw = Vec::new();
-        let mut judged = Vec::new();
-        for round in rounds {
-            let Some(value) = find(&round.head, &row.measure).and_then(|r| r.value) else {
-                continue;
-            };
-            let scaled = if row.scaled {
-                factor(round).map(|f| match row.goal {
-                    Goal::Above(_) => value * f,
-                    _ => value / f,
-                })
-            } else {
-                Some(value)
-            };
-            raw.push(value);
-            judged.extend(scaled);
-        }
-        let complete = judged.len() == rounds.len();
-        let value = median(judged).filter(|_| complete);
-        let met = row.met_by(value);
-        if !met {
+        let head = judge(rounds, row, |r| &r.head);
+        let line = if row.met_by(head.value) {
+            format!("met      {}: {}", row.measure, shown(row, &head))
+        } else if reference || !row.scaled || head.value.is_none() {
             failed += 1;
-        }
-        let shown = value.map_or_else(
-            || "n/a".to_owned(),
-            |v| format!("{} {}", number(v), row.unit),
-        );
-        let here = match median(raw) {
-            Some(r) if row.scaled => {
-                format!(" on the reference runner, {} {} here", number(r), row.unit)
-            }
-            _ => String::new(),
+            format!("MISS     {}: {}", row.measure, shown(row, &head))
+        } else {
+            let base = judge(rounds, row, |r| &r.base);
+            let tag = if base.value.is_some() && !row.met_by(base.value) {
+                "RUNNER"
+            } else {
+                failed += 1;
+                "MISS"
+            };
+            format!(
+                "{tag:8} {}: {}, main {}",
+                row.measure,
+                shown(row, &head),
+                shown(row, &base)
+            )
         };
-        let _ = writeln!(
-            out,
-            "{:8} {}: {shown}{here}, target {}",
-            if met { "met" } else { "MISS" },
-            row.measure,
-            row.target()
-        );
+        let _ = writeln!(out, "{line}, target {}", row.target());
     }
     failed
 }
@@ -267,15 +308,32 @@ fn baselines(root: &Path, dir: &Path, found: &mut Baselines) {
 fn criterion(dir: &Path, out: &mut String) -> usize {
     let mut found = Baselines::new();
     baselines(dir, dir, &mut found);
+    if found.is_empty() {
+        let _ = writeln!(
+            out,
+            "MISSING  criterion: no readable base-N or head-N baseline in {}",
+            dir.display()
+        );
+        return 1;
+    }
     let mut failed = 0;
     for (name, runs) in found {
+        if runs.keys().all(|(side, _)| *side == "head") {
+            let _ = writeln!(out, "new      criterion {name}");
+            continue;
+        }
         let pairs: Vec<(f64, f64)> = runs
             .iter()
             .filter(|((side, _), _)| *side == "base")
             .filter_map(|(&(_, n), &old)| Some((old, *runs.get(&("head", n))?)))
             .collect();
-        if pairs.is_empty() {
-            let _ = writeln!(out, "new      criterion {name}");
+        if pairs.len() < ROUNDS {
+            failed += 1;
+            let _ = writeln!(
+                out,
+                "MISSING  criterion {name}: {} readable rounds on main and now, {ROUNDS} needed",
+                pairs.len()
+            );
             continue;
         }
         let changes = pairs
@@ -307,8 +365,8 @@ fn criterion(dir: &Path, out: &mut String) -> usize {
     failed
 }
 
-pub(crate) fn run(target: &Path, rounds: Option<&Path>) -> ExitCode {
-    let (failed, out) = compare(target, rounds);
+pub(crate) fn run(target: &Path, rounds: Option<&Path>, cpu: Option<&str>) -> ExitCode {
+    let (failed, out) = compare(target, rounds, cpu);
     let _ = std::io::stdout().lock().write_all(out.as_bytes());
     if failed == 0 {
         ExitCode::SUCCESS
@@ -317,7 +375,7 @@ pub(crate) fn run(target: &Path, rounds: Option<&Path>) -> ExitCode {
     }
 }
 
-pub(crate) fn compare(target: &Path, dir: Option<&Path>) -> (usize, String) {
+pub(crate) fn compare(target: &Path, dir: Option<&Path>, cpu: Option<&str>) -> (usize, String) {
     let mut out = String::new();
     let mut failed = 0;
     let measured = dir
@@ -332,7 +390,7 @@ pub(crate) fn compare(target: &Path, dir: Option<&Path>) -> (usize, String) {
             );
             failed += relative(&rounds, &mut out);
             let _ = writeln!(out, "plan section 9 targets, median of the head rounds:");
-            failed += absolute(&rounds, &mut out);
+            failed += absolute(&rounds, cpu, &mut out);
         }
         Err(e) => {
             failed += 1;

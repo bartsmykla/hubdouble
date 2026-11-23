@@ -55,6 +55,9 @@ const FAST_BATCH: usize = 1_000;
 const TEAMS: usize = 100;
 const CALIBRATION_ROUNDS: usize = 5;
 const CALIBRATION_ITERATIONS: usize = 200;
+const PUSH_PULLS: usize = 100;
+const PUSH_WARMUP: usize = 20;
+const PUSH_SAMPLES: usize = 500;
 
 fn micros(d: Duration) -> f64 {
     d.as_secs_f64() * 1e6
@@ -610,6 +613,7 @@ enum Vars {
         head: String,
     },
     UpdateRefs {
+        name: &'static str,
         repo: String,
         a: String,
         b: String,
@@ -695,6 +699,7 @@ fn documents(w: &World) -> Vec<Doc> {
                     json!({"org": fixture::ORG, "login": fixture::BOB, "after": null}),
                 )),
                 "updateRefs" => Some(Vars::UpdateRefs {
+                    name: "refs/heads/bench-ref",
                     repo: w.repo_node.clone(),
                     a: w.main.clone(),
                     b: w.feature.clone(),
@@ -726,6 +731,7 @@ fn doc_variables(vars: &mut Vars, i: usize) -> Value {
                 "expectedHeadOid": head}})
         }
         Vars::UpdateRefs {
+            name,
             repo,
             a,
             b,
@@ -734,8 +740,7 @@ fn doc_variables(vars: &mut Vars, i: usize) -> Value {
             let after = if current == a { b.clone() } else { a.clone() };
             let before = std::mem::replace(current, after.clone());
             json!({"input": {"repositoryId": repo, "refUpdates": [
-                {"name": "refs/heads/bench-ref", "beforeOid": before,
-                 "afterOid": after, "force": true}]}})
+                {"name": name, "beforeOid": before, "afterOid": after, "force": true}]}})
         }
     }
 }
@@ -761,7 +766,11 @@ async fn measure_rest(client: &mut Client, path: &str) -> Result<Vec<Duration>, 
     Ok(samples)
 }
 
-async fn measure_doc(client: &mut Client, doc: &mut Doc) -> Result<Vec<Duration>, String> {
+async fn measure_doc(
+    client: &mut Client,
+    doc: &mut Doc,
+    (warmup, count): (usize, usize),
+) -> Result<Vec<Duration>, String> {
     let Some(vars) = doc.vars.as_mut() else {
         return Err("no variables for this document".to_owned());
     };
@@ -771,8 +780,8 @@ async fn measure_doc(client: &mut Client, doc: &mut Doc) -> Result<Vec<Duration>
         )),
         _ => None,
     };
-    let mut samples = Vec::with_capacity(SAMPLES);
-    for i in 0..WARMUP + SAMPLES {
+    let mut samples = Vec::with_capacity(count);
+    for i in 0..warmup + count {
         let body = fixed.clone().unwrap_or_else(|| {
             Bytes::from(
                 json!({"query": doc.query, "variables": doc_variables(vars, i)}).to_string(),
@@ -781,7 +790,7 @@ async fn measure_doc(client: &mut Client, doc: &mut Doc) -> Result<Vec<Duration>
         let started = Instant::now();
         let answer = client.call(Method::POST, "/graphql", Some(body)).await;
         let spent = started.elapsed();
-        let check = i == 0 || matches!(vars, Vars::CreateCommit { .. });
+        let check = i == 0 || !matches!(vars, Vars::Fixed(_));
         if check {
             let value = answer.json();
             if answer.status != StatusCode::OK || value.get("errors").is_some() {
@@ -794,7 +803,7 @@ async fn measure_doc(client: &mut Client, doc: &mut Doc) -> Result<Vec<Duration>
                     .clone_into(head);
             }
         }
-        if i >= WARMUP {
+        if i >= warmup {
             samples.push(spent);
         }
     }
@@ -892,7 +901,7 @@ fn doc_rows(runtime: &Runtime, addr: SocketAddr, docs: &mut [Doc], rows: &mut Ve
                 if round > 0 && !doc.query.trim_start().starts_with("query") {
                     continue;
                 }
-                match measure_doc(&mut client, doc).await {
+                match measure_doc(&mut client, doc, (WARMUP, SAMPLES)).await {
                     Ok(samples) => {
                         eprintln!(
                             "graphql {}: p50 {:.1} µs, p99 {:.1} µs",
@@ -1047,6 +1056,113 @@ fn in_process(dir: &Path, rows: &mut Vec<Row>) {
     for load in ["slow", "fast"] {
         memory_rows(load, rows);
     }
+}
+
+fn push_seed() -> Vec<Value> {
+    let mut entries = fixture::seed();
+    let mut commits: Vec<Value> = (1..=PUSH_PULLS)
+        .map(|n| {
+            json!({"branch": format!("pull-{n}"), "message": format!("change {n}"),
+                   "files": {format!("changes/{n}.txt"): format!("change {n}\n")}})
+        })
+        .collect();
+    commits.push(json!({"branch": "main-next", "message": "move main",
+                        "files": {"next.txt": "next\n"}}));
+    for entry in &mut entries {
+        if entry["kind"] == "repository" && entry["name"] == fixture::PUBLIC_REPO {
+            entry["commits"] = Value::Array(commits.clone());
+        }
+    }
+    entries.extend((1..=PUSH_PULLS).map(|n| {
+        json!({"kind": "pull_request", "repository": "acme/public", "user": fixture::ALICE,
+               "title": format!("Change {n}"), "head": format!("pull-{n}"), "base": "main"})
+    }));
+    entries
+}
+
+async fn open_mergeable(client: &mut Client) -> usize {
+    let pulls = client
+        .ok(
+            Method::GET,
+            "/repos/acme/public/pulls?state=open&per_page=100",
+            None,
+        )
+        .await;
+    let mut mergeable = 0;
+    for pull in pulls.as_array().map_or(&[][..], Vec::as_slice) {
+        let path = format!("/repos/acme/public/pulls/{}", pull["number"]);
+        if client.ok(Method::GET, &path, None).await["mergeable"] == json!(true) {
+            mergeable += 1;
+        }
+    }
+    mergeable
+}
+
+fn push_rows(dir: &Path, rows: &mut Vec<Row>) {
+    let receiver = Receiver::start(Duration::ZERO);
+    let running = start_server(&push_seed(), &receiver.url, dir, "push-seed.json");
+    let client_runtime = runtime(4);
+    let addr = running.addr;
+    let measured = client_runtime.block_on(async {
+        let mut client = Client::connect(addr, fixture::ALICE_TOKEN).await;
+        let mut tips = Vec::new();
+        for name in ["main", "main-next"] {
+            let path = format!("/repos/acme/public/git/ref/heads/{name}");
+            tips.push(text(
+                &client.ok(Method::GET, &path, None).await["object"]["sha"],
+            ));
+        }
+        let repo = client.ok(Method::GET, "/repos/acme/public", None).await;
+        let [main, next] =
+            <[String; 2]>::try_from(tips).unwrap_or_else(|_| fail("read the tips", "count"));
+        let before = open_mergeable(&mut client).await;
+        let mut doc = Doc {
+            name: "updateRefs".to_owned(),
+            query: std::fs::read_to_string(format!("{DOCS}/updateRefs.graphql"))
+                .unwrap_or_else(|e| fail("read updateRefs", e)),
+            vars: Some(Vars::UpdateRefs {
+                name: "refs/heads/main",
+                repo: text(&repo["node_id"]),
+                a: main.clone(),
+                b: next,
+                current: main,
+            }),
+        };
+        let samples = measure_doc(&mut client, &mut doc, (PUSH_WARMUP, PUSH_SAMPLES)).await;
+        let after = open_mergeable(&mut client).await;
+        match samples {
+            Ok(_) if before != PUSH_PULLS || after != PUSH_PULLS => Err(format!(
+                "{before} open mergeable pull requests before and {after} after, \
+                 {PUSH_PULLS} expected"
+            )),
+            other => other,
+        }
+    });
+    let measure = format!("GraphQL updateRefs p99, main with {PUSH_PULLS} open pull requests");
+    let row = match measured {
+        Ok(samples) => {
+            eprintln!(
+                "graphql updateRefs on main: p50 {:.1} µs, p99 {:.1} µs",
+                micros(percentile(&samples, 0.5)),
+                micros(percentile(&samples, 0.99))
+            );
+            Row::new(
+                measure,
+                Some(micros(percentile(&samples, 0.99)) / 1000.0),
+                "ms",
+                Goal::Below(3.0),
+            )
+            .note(format!(
+                "{PUSH_SAMPLES} pushes that move main back and forth, each a test merge of every \
+                 pull request"
+            ))
+        }
+        Err(e) => Row::new(measure, None, "ms", Goal::Below(3.0)).note(e),
+    };
+    rows.push(row);
+    drop(receiver);
+    running.runtime.shutdown_background();
+    client_runtime.shutdown_background();
 }
 
 const MEMORY_ROWS: &str = "--memory-rows";
@@ -1802,7 +1918,8 @@ fn main() -> ExitCode {
     }
     if std::env::args().any(|a| a == "--gate") {
         let rounds = std::env::var_os("HUBDOUBLE_BENCH_ROUNDS").map(PathBuf::from);
-        return gate::run(target, rounds.as_deref());
+        let cpu = std::env::var("HUBDOUBLE_BENCH_CPU").ok();
+        return gate::run(target, rounds.as_deref(), cpu.as_deref());
     }
     std::fs::create_dir_all(TMP).unwrap_or_else(|e| fail("make the temporary directory", e));
     let dir = TempDir::new_in(TMP).unwrap_or_else(|e| fail("make a temporary directory", e));
@@ -1814,6 +1931,7 @@ fn main() -> ExitCode {
         container_rows(dir.path(), &mut rows);
     }
     in_process(dir.path(), &mut rows);
+    push_rows(dir.path(), &mut rows);
     rows.push(calibration_row(before, calibrate()));
     let table = report(&rows);
     let _ = std::io::stdout().lock().write_all(table.as_bytes());
