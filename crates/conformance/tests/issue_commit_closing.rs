@@ -342,3 +342,46 @@ async fn a_merged_pull_request_body_closes_another_repositorys_issue_only_with_p
         "open"
     );
 }
+
+#[tokio::test]
+async fn a_merged_event_has_no_close_reason_or_intent_as_github_gives_it() {
+    // Given an open pull request, as microsoft/vscode and cli/cli merged events show
+    let server = TestServer::builder()
+        .fixture()
+        .frame(hubdouble_api::register_all)
+        .entry(
+            json!({"kind": "pull_request", "repository": "acme/public", "user": "alice",
+                      "title": "Fix a fault", "head": "feature", "base": "main"}),
+        )
+        .start()
+        .await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+
+    // When alice merges it and reads its events
+    checked(
+        &alice
+            .call_json(Method::PUT, &format!("{PUBLIC}/pulls/1/merge"), &json!({}))
+            .await,
+        StatusCode::OK,
+    );
+    let events = checked(
+        &alice.get(&format!("{PUBLIC}/issues/1/events")).await,
+        StatusCode::OK,
+    );
+
+    // Then the merged event has neither key and the closed event has both
+    let keys = |name: &str| {
+        let event = events
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["event"] == name)
+            .unwrap_or_else(|| panic!("no {name} event in {events}"));
+        (
+            event.get("state_reason").cloned(),
+            event.get("intent").cloned(),
+        )
+    };
+    assert_eq!(keys("merged"), (None, None));
+    assert_eq!(keys("closed"), (Some(Value::Null), Some(Value::Null)));
+}

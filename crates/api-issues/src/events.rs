@@ -222,9 +222,11 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
                 ),
                 ("intent", Value::Null),
             ],
-            What::CommitClosed { .. } | What::Reopened | What::Merged(_) => {
+            What::CommitClosed { .. } => {
                 vec![("state_reason", Value::Null), ("intent", Value::Null)]
             }
+            What::Reopened => vec![("state_reason", json!("reopened"))],
+            What::Merged(_) => vec![],
         };
         for (k, value) in extra {
             v[k] = value;

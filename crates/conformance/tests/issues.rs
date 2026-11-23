@@ -1169,7 +1169,7 @@ async fn issue_events_carry_intent_and_a_close_reason_only_when_not_completed() 
             json!(["unlabeled", null, null]),
             json!(["unassigned", null, null]),
             json!(["closed", null, null]),
-            json!(["reopened", null, null]),
+            json!(["reopened", null, "reopened"]),
             json!(["closed", null, "not_planned"]),
         ]
     );
@@ -1179,5 +1179,5 @@ async fn issue_events_carry_intent_and_a_close_reason_only_when_not_completed() 
         .iter()
         .map(|e| e.get("intent").is_some())
         .collect();
-    assert_eq!(has_intent, [true, true, true, false, true, true, true]);
+    assert_eq!(has_intent, [true, true, true, false, true, false, true]);
 }
