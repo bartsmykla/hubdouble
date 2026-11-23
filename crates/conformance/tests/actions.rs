@@ -418,6 +418,65 @@ async fn workflow_run_list_returns_no_matches_for_an_invalid_created_filter() {
 }
 
 #[tokio::test]
+async fn workflow_run_lists_read_check_suite_id_as_github_does() {
+    // Given one run of agent.yml and its check suite
+    let server = server("none").await;
+    let client = client(&server);
+    let id = dispatch(&client, "main").await["workflow_run_id"]
+        .as_i64()
+        .unwrap();
+    let suite = valid(
+        "get-workflow-run",
+        &client.get(&format!("{ACTIONS}/runs/{id}")).await,
+    )["check_suite_id"]
+        .as_i64()
+        .unwrap();
+    let docs = "https://docs.github.com/rest/actions/workflow-runs";
+    for (base, anchor) in [
+        (
+            format!("{ACTIONS}/runs"),
+            "list-workflow-runs-for-a-repository",
+        ),
+        (
+            format!("{ACTIONS}/workflows/agent.yml/runs"),
+            "list-workflow-runs-for-a-workflow",
+        ),
+    ] {
+        for (query, value) in [
+            ("abc", "abc"),
+            ("", ""),
+            ("%20", " "),
+            ("0", "0"),
+            ("-1", "-1"),
+        ] {
+            // When the value has no positive leading integer
+            let answer = client.get(&format!("{base}?check_suite_id={query}")).await;
+            // Then live GitHub's 400 comes back with the value and the list's docs
+            assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{base} {query}");
+            assert_eq!(
+                answer.json(),
+                json!({"message": format!("invalid check_suite_id `{value}`"),
+                    "documentation_url": format!("{docs}#{anchor}"), "status": "400"}),
+            );
+        }
+        for (query, count) in [
+            (format!("{suite}"), 1),
+            (format!("%2B{suite}"), 1),
+            (format!("{suite}abc"), 0),
+            (format!("%20{suite}"), 0),
+            (format!("{suite}.9"), 0),
+            ("99999999999999999999".to_owned(), 0),
+        ] {
+            // When the value has one, it filters only as an exact integer
+            let answer = client.get(&format!("{base}?check_suite_id={query}")).await;
+            // Then
+            assert_eq!(answer.status, StatusCode::OK, "{base} {query}");
+            assert_eq!(answer.json()["total_count"], count, "{base} {query}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn lifecycle_preserves_attempts_and_serves_ranged_job_logs() {
     let server = server("none").await;
     let client = client(&server);
@@ -497,6 +556,11 @@ async fn lifecycle_preserves_attempts_and_serves_ranged_job_logs() {
         &client.get(&format!("{run_path}/jobs?filter=all")).await,
     );
     assert_eq!(all["total_count"], 4);
+    for filter in ["nonsense", "", "ALL"] {
+        let path = format!("{run_path}/jobs?filter={filter}&per_page=100");
+        let read = valid("list-jobs-for-workflow-run", &client.get(&path).await);
+        assert_eq!(read, latest, "{filter}");
+    }
     assert_eq!(
         client
             .call(Method::POST, &format!("{run_path}/cancel"))

@@ -188,7 +188,15 @@ const SEARCH_PARAMETERS: [&str; 7] = [
 ];
 
 fn list_runs(ctx: &Ctx<'_>, workflow: Option<i64>) -> Result<Reply, ApiError> {
-    let filters = Filters::new(ctx.tx(), ctx.query())?;
+    let docs = match workflow {
+        Some(_) => {
+            "https://docs.github.com/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow"
+        }
+        None => {
+            "https://docs.github.com/rest/actions/workflow-runs#list-workflow-runs-for-a-repository"
+        }
+    };
+    let filters = Filters::new(ctx.tx(), ctx.query(), docs)?;
     let Some(created) = filters.created else {
         return crate::page::<hubdouble_render::WorkflowRun>(ctx, "workflow_runs", 0, &[]);
     };
@@ -222,36 +230,45 @@ struct Filters<'a> {
     branch: Option<&'a str>,
     sha: Option<&'a str>,
     status: Option<&'a str>,
-    actor: ActorFilter,
-    suite: Option<i64>,
+    actor: IdFilter,
+    suite: IdFilter,
     created: Option<(Bound<Timestamp>, Bound<Timestamp>)>,
 }
 
-enum ActorFilter {
+enum IdFilter {
     Any,
     Known(i64),
     Unknown,
 }
 
+impl IdFilter {
+    fn matches(&self, id: Option<i64>) -> bool {
+        match self {
+            IdFilter::Any => true,
+            IdFilter::Known(known) => id == Some(*known),
+            IdFilter::Unknown => false,
+        }
+    }
+}
+
 impl<'a> Filters<'a> {
-    fn new(tx: &Tx, query: &'a Query) -> Result<Self, ApiError> {
+    fn new(tx: &Tx, query: &'a Query, docs: &str) -> Result<Self, ApiError> {
         let actor = match query.get("actor") {
-            None => ActorFilter::Any,
+            None => IdFilter::Any,
             Some(login) => tx
                 .table::<Accounts>()
                 .by_login(login)
-                .map_or(ActorFilter::Unknown, |account| {
-                    ActorFilter::Known(account.id)
-                }),
+                .map_or(IdFilter::Unknown, |account| IdFilter::Known(account.id)),
         };
-        let suite = query
-            .get("check_suite_id")
-            .map(|value| {
-                value.parse().map_err(|_| {
-                    crate::invalid("WorkflowRun", "check_suite_id", "Invalid check suite ID")
-                })
-            })
-            .transpose()?;
+        let suite = match query.get("check_suite_id") {
+            None => IdFilter::Any,
+            Some(value) if hubdouble_api_checks::leading_integer(value) <= 0 => {
+                return Err(
+                    ApiError::new(400, format!("invalid check_suite_id `{value}`")).with_docs(docs),
+                );
+            }
+            Some(value) => value.parse().map_or(IdFilter::Unknown, IdFilter::Known),
+        };
         let created = query
             .get("created")
             .map_or(Some((Bound::Unbounded, Bound::Unbounded)), created_range);
@@ -276,12 +293,8 @@ impl<'a> Filters<'a> {
                 status == run.status.as_str()
                     || run.conclusion.map(Conclusion::as_str) == Some(status)
             })
-            && match self.actor {
-                ActorFilter::Any => true,
-                ActorFilter::Known(id) => run.actor_id == id,
-                ActorFilter::Unknown => false,
-            }
-            && self.suite.is_none_or(|id| Some(id) == run.check_suite_id)
+            && self.actor.matches(Some(run.actor_id))
+            && self.suite.matches(run.check_suite_id)
     }
 }
 
@@ -317,17 +330,7 @@ fn created_range(text: &str) -> Option<(Bound<Timestamp>, Bound<Timestamp>)> {
 
 fn list_jobs(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let run = for_repo(ctx)?;
-    let choice = match ctx.query().get("filter") {
-        None | Some("latest") => Some(run.run_attempt),
-        Some("all") => None,
-        _ => {
-            return Err(crate::invalid(
-                "WorkflowJob",
-                "filter",
-                "Invalid jobs filter",
-            ));
-        }
-    };
+    let choice = (ctx.query().get("filter") != Some("all")).then_some(run.run_attempt);
     jobs(ctx, run, choice)
 }
 

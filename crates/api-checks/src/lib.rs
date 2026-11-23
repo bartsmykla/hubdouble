@@ -98,7 +98,11 @@ fn app_filter(query: &Query) -> Option<i64> {
     filter(query, "app_id").map(leading_integer)
 }
 
-fn leading_integer(text: &str) -> i64 {
+/// Reads `text` as GitHub reads a lenient numeric query value: leading spaces, an optional sign
+/// and the leading digits, with `_` allowed between digits, and `0` when no digit leads.
+/// A value past the `i64` range saturates.
+#[must_use]
+pub fn leading_integer(text: &str) -> i64 {
     let text = text.trim_start();
     let (negative, digits) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
