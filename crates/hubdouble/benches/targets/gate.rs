@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use serde_json::Value;
 
-use crate::row::{Goal, Row, Scale, number};
+use crate::row::{CALIBRATION, Goal, REFERENCE_CALIBRATION_US, Row, number};
 
 const BUDGET: f64 = 0.20;
 
@@ -164,27 +164,24 @@ fn relative(rounds: &[Round], out: &mut String) -> usize {
     failed
 }
 
-fn factor(round: &Round, scale: Scale) -> Option<f64> {
-    find(&round.head, scale.measure())
+fn factor(round: &Round) -> Option<f64> {
+    find(&round.head, CALIBRATION)
         .and_then(|r| r.value)
         .filter(|v| *v > 0.0)
-        .map(|v| v / scale.reference())
+        .map(|v| v / REFERENCE_CALIBRATION_US)
 }
 
 fn absolute(rounds: &[Round], out: &mut String) -> usize {
     let mut failed = 0;
-    for scale in Scale::ALL {
-        let seen: Vec<f64> = rounds.iter().filter_map(|r| factor(r, scale)).collect();
-        let runs: Vec<String> = seen.iter().map(|f| format!("{f:.2}")).collect();
-        let _ = writeln!(
-            out,
-            "runner   {}: factor {} against the reference {} µs (rounds {})",
-            scale.measure(),
-            median(seen.clone()).map_or_else(|| "n/a".to_owned(), |f| format!("{f:.2}")),
-            number(scale.reference()),
-            runs.join(", ")
-        );
-    }
+    let seen: Vec<f64> = rounds.iter().filter_map(factor).collect();
+    let runs: Vec<String> = seen.iter().map(|f| format!("{f:.2}")).collect();
+    let _ = writeln!(
+        out,
+        "runner   {CALIBRATION}: factor {} against the reference {} µs (rounds {})",
+        median(seen.clone()).map_or_else(|| "n/a".to_owned(), |f| format!("{f:.2}")),
+        number(REFERENCE_CALIBRATION_US),
+        runs.join(", ")
+    );
     for row in &rounds[0].head {
         if matches!(row.goal, Goal::Report) {
             continue;
@@ -195,12 +192,13 @@ fn absolute(rounds: &[Round], out: &mut String) -> usize {
             let Some(value) = find(&round.head, &row.measure).and_then(|r| r.value) else {
                 continue;
             };
-            let scaled = match row.scale {
-                None => Some(value),
-                Some(s) => factor(round, s).map(|f| match row.goal {
+            let scaled = if row.scaled {
+                factor(round).map(|f| match row.goal {
                     Goal::Above(_) => value * f,
                     _ => value / f,
-                }),
+                })
+            } else {
+                Some(value)
             };
             raw.push(value);
             judged.extend(scaled);
@@ -215,8 +213,8 @@ fn absolute(rounds: &[Round], out: &mut String) -> usize {
             || "n/a".to_owned(),
             |v| format!("{} {}", number(v), row.unit),
         );
-        let here = match (row.scale, median(raw)) {
-            (Some(_), Some(r)) => {
+        let here = match median(raw) {
+            Some(r) if row.scaled => {
                 format!(" on the reference runner, {} {} here", number(r), row.unit)
             }
             _ => String::new(),

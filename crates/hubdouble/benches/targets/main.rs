@@ -21,7 +21,7 @@ use hubdouble_testkit::fixture;
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use mimalloc::MiMalloc;
-use row::{Goal, Row, Scale, number};
+use row::{CALIBRATION, Goal, Row, number};
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
 use tokio::net::{TcpListener, TcpStream};
@@ -216,7 +216,6 @@ fn opened(o: &Mutex<Opened>) -> MutexGuard<'_, Opened> {
 
 struct Receiver {
     runtime: Runtime,
-    addr: SocketAddr,
     url: String,
     payload_bytes: Arc<AtomicUsize>,
     accepted: Arc<Mutex<Opened>>,
@@ -264,7 +263,6 @@ impl Receiver {
         });
         Receiver {
             runtime,
-            addr,
             url: format!("http://{addr}/hook"),
             payload_bytes,
             accepted,
@@ -856,7 +854,7 @@ fn rest_rows(runtime: &Runtime, addr: SocketAddr, routes: &[String], rows: &mut 
         let measure = format!("REST GET {label}, {count} routes");
         rows.push(match &failed {
             Some(e) => Row::new(measure, None, "µs", Goal::Below(goal))
-                .scale(Scale::RoundTrip)
+                .scaled()
                 .note(e.clone()),
             None => Row::new(
                 measure,
@@ -864,7 +862,7 @@ fn rest_rows(runtime: &Runtime, addr: SocketAddr, routes: &[String], rows: &mut 
                 "µs",
                 Goal::Below(goal),
             )
-            .scale(Scale::RoundTrip),
+            .scaled(),
         });
     }
     rows.push(Worst::row(
@@ -928,7 +926,6 @@ fn doc_rows(runtime: &Runtime, addr: SocketAddr, docs: &mut [Doc], rows: &mut Ve
                     "ms",
                     Goal::Below(3.0),
                 )
-                .scale(Scale::RoundTrip)
                 .note(note),
             );
         }
@@ -946,20 +943,7 @@ fn calibration_document() -> Value {
     json!({"action": "created", "items": items})
 }
 
-struct Calibration {
-    round_trip: Result<f64, String>,
-    compute: f64,
-}
-
-fn calibrate() -> Calibration {
-    let receiver = Receiver::start(Duration::ZERO);
-    let client_runtime = runtime(4);
-    let round_trip = client_runtime.block_on(async {
-        let mut client = Client::connect(receiver.addr, fixture::ALICE_TOKEN).await;
-        measure_rest(&mut client, "/hook").await
-    });
-    client_runtime.shutdown_background();
-    receiver.runtime.shutdown_background();
+fn calibrate() -> f64 {
     let document = calibration_document();
     let mut times: Vec<Duration> = (0..CALIBRATION_ROUNDS)
         .map(|_| {
@@ -975,42 +959,15 @@ fn calibrate() -> Calibration {
         })
         .collect();
     times.sort();
-    Calibration {
-        round_trip: round_trip.map(|s| micros(percentile(&s, 0.5))),
-        compute: micros(percentile(&times, 0.5)) / float(CALIBRATION_ITERATIONS),
-    }
+    micros(percentile(&times, 0.5)) / float(CALIBRATION_ITERATIONS)
 }
 
-fn calibration_rows(before: Calibration, after: Calibration, rows: &mut Vec<Row>) {
-    let round_trip = before
-        .round_trip
-        .and_then(|a| after.round_trip.map(|b| a.min(b)));
-    rows.push(
-        Row::new(
-            Scale::RoundTrip.measure(),
-            round_trip.as_ref().ok().copied(),
-            "µs",
-            Goal::Report,
-        )
-        .note(round_trip.err().unwrap_or_else(|| {
-            "GET to an empty hyper service over loopback, the faster of the runs before and after \
-             the rows; scales the REST, GraphQL and mixed rows"
-                .to_owned()
-        })),
-    );
+fn calibration_row(before: f64, after: f64) -> Row {
     let size = serde_json::to_vec(&calibration_document()).map_or(0, |b| b.len());
-    rows.push(
-        Row::new(
-            Scale::Compute.measure(),
-            Some(before.compute.min(after.compute)),
-            "µs",
-            Goal::Report,
-        )
-        .note(format!(
-            "encode and decode a {size} B document, median of {CALIBRATION_ROUNDS} rounds, the \
-             faster of the runs before and after the rows; scales the start and enqueue rows"
-        )),
-    );
+    Row::new(CALIBRATION, Some(before.min(after)), "µs", Goal::Report).note(format!(
+        "encode and decode a {size} B document, median of {CALIBRATION_ROUNDS} rounds, the faster \
+         of the runs before and after the rows"
+    ))
 }
 
 fn in_process(dir: &Path, rows: &mut Vec<Row>) {
@@ -1051,7 +1008,7 @@ fn in_process(dir: &Path, rows: &mut Vec<Row>) {
         "req/s",
         Goal::Above(5000.0),
     )
-    .scale(Scale::RoundTrip);
+    .scaled();
     rows.push(if errors == 0 {
         row
     } else {
@@ -1077,7 +1034,7 @@ fn in_process(dir: &Path, rows: &mut Vec<Row>) {
             "µs",
             Goal::Below(20.0),
         )
-        .scale(Scale::Compute)
+        .scaled()
         .note(format!(
             "median of {ENQUEUE_ROUNDS} rounds, each after a drain"
         )),
@@ -1781,7 +1738,7 @@ fn container_rows(dir: &Path, rows: &mut Vec<Row>) {
         eprintln!("{measure}: runs {times:?} ms");
         rows.push(
             Row::new(measure, median, "ms", Goal::Below(200.0))
-                .scale(Scale::Compute)
+                .scaled()
                 .note(error.unwrap_or_else(|| format!("median of {START_RUNS}"))),
         );
     }
@@ -1857,7 +1814,7 @@ fn main() -> ExitCode {
         container_rows(dir.path(), &mut rows);
     }
     in_process(dir.path(), &mut rows);
-    calibration_rows(before, calibrate(), &mut rows);
+    rows.push(calibration_row(before, calibrate()));
     let table = report(&rows);
     let _ = std::io::stdout().lock().write_all(table.as_bytes());
     let json = json!({"rows": rows.iter().map(Row::json).collect::<Vec<_>>()});
