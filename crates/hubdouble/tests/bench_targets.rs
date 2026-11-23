@@ -7,9 +7,29 @@ mod row;
 
 use std::path::Path;
 
-use row::{Goal, Row};
+use row::{CALIBRATION, Goal, REFERENCE_CALIBRATION_US, Row};
 use serde_json::{Value, json};
 use tempfile::TempDir;
+
+struct Measure {
+    name: &'static str,
+    goal: &'static str,
+    target: f64,
+    scaled: bool,
+}
+
+const LATENCY: Measure = Measure {
+    name: "latency",
+    goal: "below",
+    target: 1000.0,
+    scaled: false,
+};
+const THROUGHPUT: Measure = Measure {
+    name: "throughput",
+    goal: "above",
+    target: 1000.0,
+    scaled: false,
+};
 
 fn write(path: &Path, value: &Value) {
     if let Some(dir) = path.parent() {
@@ -18,11 +38,27 @@ fn write(path: &Path, value: &Value) {
     std::fs::write(path, value.to_string()).unwrap_or_else(|e| panic!("{e}"));
 }
 
-fn rows(values: &[(&str, &str, Option<f64>)]) -> Value {
-    json!({"rows": values
+fn report(rows: &[(&Measure, Option<f64>)], calibration: Option<f64>) -> Value {
+    let mut rows: Vec<Value> = rows
         .iter()
-        .map(|(measure, goal, value)| json!({"measure": measure, "goal": goal, "value": value}))
-        .collect::<Vec<_>>()})
+        .map(|(m, value)| {
+            json!({"measure": m.name, "goal": m.goal, "target": m.target, "unit": "µs",
+                   "value": value, "scaled": m.scaled})
+        })
+        .collect();
+    if let Some(c) = calibration {
+        rows.push(json!({"measure": CALIBRATION, "goal": "report", "unit": "µs", "value": c}));
+    }
+    json!({"rows": rows})
+}
+
+fn round(dir: &Path, side: &str, n: u32, rows: &[(&Measure, Option<f64>)]) {
+    let path = dir.join(format!("rounds/{side}-{n}.json"));
+    write(&path, &report(rows, Some(REFERENCE_CALIBRATION_US)));
+}
+
+fn compare(dir: &Path) -> usize {
+    gate::compare(dir, Some(&dir.join("rounds"))).0
 }
 
 #[test]
@@ -43,99 +79,151 @@ fn a_row_meets_its_target_only_with_a_value_on_the_right_side() {
 }
 
 #[test]
-fn the_gate_fails_a_target_that_regresses_more_than_20_percent_against_main() {
-    // Given main's targets and a run that moves each by a known amount
+fn one_slow_round_does_not_decide_a_row_but_a_median_change_over_20_percent_does() {
+    // Given three paired rounds of a steady row with one slow head round, and of rows that regress
     let dir = TempDir::new().unwrap();
-    let base = dir.path().join("main.json");
-    let current = dir.path().join("current.json");
-    write(
-        &base,
-        &rows(&[
-            ("slower within budget", "below", Some(100.0)),
-            ("slower beyond budget", "below", Some(100.0)),
-            ("fewer within budget", "above", Some(5000.0)),
-            ("fewer beyond budget", "above", Some(5000.0)),
-            ("no longer measured", "below", Some(1.0)),
-            ("reported", "report", Some(10.0)),
-        ]),
-    );
-    write(
-        &current,
-        &rows(&[
-            ("slower within budget", "below", Some(119.0)),
-            ("slower beyond budget", "below", Some(121.0)),
-            ("fewer within budget", "above", Some(4100.0)),
-            ("fewer beyond budget", "above", Some(3900.0)),
-            ("no longer measured", "below", None),
-            ("reported", "report", Some(1000.0)),
-            ("new measure", "below", Some(5.0)),
-        ]),
-    );
+    let steady = Measure {
+        name: "steady",
+        ..LATENCY
+    };
+    let within = Measure {
+        name: "slower within budget",
+        ..LATENCY
+    };
+    let head = [
+        (150.0, 125.0, 119.0, 3900.0),
+        (100.0, 130.0, 119.0, 3900.0),
+        (101.0, 90.0, 119.0, 6000.0),
+    ];
+    for (n, (s, slower, w, fewer)) in (1..).zip(head) {
+        let base = [
+            (&steady, Some(100.0)),
+            (&LATENCY, Some(100.0)),
+            (&within, Some(100.0)),
+            (&THROUGHPUT, Some(5000.0)),
+        ];
+        round(dir.path(), "base", n, &base);
+        let head = [
+            (&steady, Some(s)),
+            (&LATENCY, Some(slower)),
+            (&within, Some(w)),
+            (&THROUGHPUT, Some(fewer)),
+        ];
+        round(dir.path(), "head", n, &head);
+    }
 
-    // When the gate compares them
-    let (failed, _) = gate::compare(dir.path(), &current, Some(&base));
+    // When the gate compares the rounds
+    let failed = compare(dir.path());
 
-    // Then the two regressions beyond budget and the lost measure fail it
-    assert_eq!(failed, 3);
+    // Then the latency 25 % slower and the throughput 22 % lower in two of three rounds fail it
+    assert_eq!(failed, 2);
 }
 
 #[test]
-fn the_gate_fails_a_criterion_bench_whose_slowdown_lower_bound_passes_the_budget() {
-    // Given criterion change estimates against main's baseline
+fn the_gate_needs_every_round_and_a_value_on_both_sides_of_every_row() {
+    // Given a row main measured that the head drops, and a row the head did not measure in round 2
     let dir = TempDir::new().unwrap();
-    let change = |name: &str, lower: f64| {
+    let dropped = Measure {
+        name: "dropped",
+        ..LATENCY
+    };
+    for n in 1..=2 {
+        round(
+            dir.path(),
+            "base",
+            n,
+            &[(&LATENCY, Some(10.0)), (&dropped, Some(10.0))],
+        );
+        let value = (n == 1).then_some(10.0);
+        round(dir.path(), "head", n, &[(&LATENCY, value)]);
+    }
+    let unpaired = TempDir::new().unwrap();
+    round(unpaired.path(), "head", 1, &[(&LATENCY, Some(10.0))]);
+
+    // When the gate compares them, without a base for round 1, and without rounds at all
+    let failed = compare(dir.path());
+    let without_base = compare(unpaired.path());
+    let (without_rounds, _) = gate::compare(dir.path(), None);
+
+    // Then the dropped row, and the unmeasured round against main and against its target, fail it
+    assert_eq!(failed, 3);
+    assert_eq!(without_base, 1);
+    assert_eq!(without_rounds, 1);
+}
+
+#[test]
+fn a_scaled_target_is_judged_on_the_reference_runner_and_a_raw_one_as_measured() {
+    // Given a runner half as fast as the reference, with scaled and raw rows that read twice the target
+    let latency = Measure {
+        name: "scaled latency",
+        target: 100.0,
+        scaled: true,
+        ..LATENCY
+    };
+    let throughput = Measure {
+        name: "scaled throughput",
+        target: 5000.0,
+        scaled: true,
+        ..THROUGHPUT
+    };
+    let raw = Measure {
+        name: "raw latency",
+        target: 100.0,
+        ..LATENCY
+    };
+    let rows = [
+        (&latency, Some(180.0)),
+        (&throughput, Some(3000.0)),
+        (&raw, Some(180.0)),
+    ];
+    let judge = |calibration: Option<f64>| {
+        let dir = TempDir::new().unwrap();
         write(
-            &dir.path()
-                .join("criterion")
-                .join(name)
-                .join("change/estimates.json"),
-            &json!({"mean": {"point_estimate": lower + 0.05,
-                             "confidence_interval": {"lower_bound": lower}}}),
+            &dir.path().join("rounds/base-1.json"),
+            &report(&rows, calibration),
+        );
+        write(
+            &dir.path().join("rounds/head-1.json"),
+            &report(&rows, calibration),
+        );
+        compare(dir.path())
+    };
+
+    // When the gate judges them on a slower runner, a faster runner, and without the calibration
+    let slower = judge(Some(2.0 * REFERENCE_CALIBRATION_US));
+    let faster = judge(Some(0.5 * REFERENCE_CALIBRATION_US));
+    let uncalibrated = judge(None);
+
+    // Then the slower runner meets the scaled rows, the faster one misses them, and so does no calibration
+    assert_eq!(slower, 1);
+    assert_eq!(faster, 3);
+    assert_eq!(uncalibrated, 3);
+}
+
+#[test]
+fn a_criterion_bench_regresses_when_its_median_paired_change_passes_20_percent() {
+    // Given three paired rounds of criterion medians, one bench with one slow head round, one 25 % slower
+    let dir = TempDir::new().unwrap();
+    let run = |bench: &str, side: &str, n: u32, median: f64| {
+        let file = format!("criterion/{bench}/{side}-{n}/estimates.json");
+        write(
+            &dir.path().join(file),
+            &json!({"median": {"point_estimate": median}}),
         );
     };
-    change("steady", 0.19);
-    change("faster", -0.30);
-    change("slower", 0.21);
+    for (n, steady, slower) in [(1, 101.0, 125.0), (2, 150.0, 130.0), (3, 99.0, 100.0)] {
+        run("group/steady", "base", n, 100.0);
+        run("group/steady", "head", n, steady);
+        run("slower", "base", n, 100.0);
+        run("slower", "head", n, slower);
+    }
+    run("new", "head", 1, 1.0);
+    round(dir.path(), "base", 1, &[]);
+    round(dir.path(), "head", 1, &[]);
 
-    let targets = dir.path().join("targets.json");
-    write(&targets, &rows(&[]));
+    // When the gate compares them
+    let failed = compare(dir.path());
 
-    // When the gate runs with targets that match main's
-    let (failed, _) = gate::compare(dir.path(), &targets, Some(&targets));
-
-    // Then only the bench that is surely more than 20 % slower fails it
+    // Then only the bench that is 25 % slower in two of three rounds fails it
     assert_eq!(failed, 1);
-}
-
-#[test]
-fn the_gate_needs_main_targets_and_a_value_on_both_sides_of_every_row() {
-    // Given main's targets with one row it could not measure and one row this run drops
-    let dir = TempDir::new().unwrap();
-    let base = dir.path().join("main.json");
-    let current = dir.path().join("current.json");
-    write(
-        &base,
-        &rows(&[
-            ("steady", "below", Some(10.0)),
-            ("not measured on main", "below", None),
-            ("dropped", "below", Some(10.0)),
-        ]),
-    );
-    write(
-        &current,
-        &rows(&[
-            ("steady", "below", Some(10.0)),
-            ("not measured on main", "below", Some(10.0)),
-            ("new and measured", "below", Some(1.0)),
-            ("new and not measured", "below", None),
-        ]),
-    );
-
-    // When the gate compares them, and when it runs without main's targets
-    let (failed, _) = gate::compare(dir.path(), &current, Some(&base));
-    let (alone, _) = gate::compare(dir.path(), &current, None);
-
-    // Then each row without a value on one side fails it, and so does a missing baseline
-    assert_eq!(failed, 3);
-    assert_eq!(alone, 1);
 }
