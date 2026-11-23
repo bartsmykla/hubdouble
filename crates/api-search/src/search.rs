@@ -141,7 +141,7 @@ fn matches(tx: &Tx, q: &Query<'_>, i: &Issue) -> bool {
                 && (q.bases.is_empty()
                     || q.bases
                         .iter()
-                        .any(|b| p.base.ref_name.eq_ignore_ascii_case(b)))
+                        .any(|b| starts_with_ignore_case(&p.base.ref_name, b)))
         });
     is && branches && labelled(tx, q, i) && text(q, i)
 }

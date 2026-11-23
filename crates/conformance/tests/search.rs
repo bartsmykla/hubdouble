@@ -322,6 +322,17 @@ async fn every_qualifier_narrows_the_results() {
         ("repo:acme/public is:merged", &["Fix the parser"]),
         ("repo:acme/public is:draft", &["Proposal beta"]),
         ("repo:acme/public base:develop", &["Fix the parser"]),
+        ("repo:acme/public base:DEV", &["Fix the parser"]),
+        ("repo:acme/public base:velop", &[]),
+        (
+            "repo:acme/public base:dev base:ma",
+            &[
+                "Old proposal",
+                "Fix the parser",
+                "Proposal beta",
+                "Proposal alpha",
+            ],
+        ),
         (
             "repo:acme/public author:bob",
             &["Old proposal", "Fix the parser", "Proposal alpha"],
