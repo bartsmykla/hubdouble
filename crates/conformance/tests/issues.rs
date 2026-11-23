@@ -12,7 +12,7 @@ use hubdouble_model::{
 use hubdouble_store::{Accounts, Counters, Issues, Repos, Tokens};
 use hubdouble_testkit::fixture::{
     ALICE, ALICE_ID, ALICE_TOKEN, APP_ID, APP_PUBLIC_KEY, APP_SLUG, BOB_TOKEN, CAROL_TOKEN,
-    INSTALLATION_ID, ORG, PUBLIC_REPO, PUBLIC_REPO_ID, WEBHOOK_SECRET,
+    INSTALLATION_ID, ORG, PRIVATE_REPO_ID, PUBLIC_REPO, PUBLIC_REPO_ID, WEBHOOK_SECRET,
 };
 use hubdouble_testkit::validate::webhook_payload;
 use hubdouble_testkit::{Answer, Delivery, GoGithub, Graphql, TestServer, standins};
@@ -166,21 +166,31 @@ fn valid(operation: &str, a: &Answer) -> Value {
 /// Adds a pull request from `feature` to `main` on `acme/public` through the store, as T5's
 /// handlers would, and answers its number.
 fn pull_request(server: &TestServer, title: &str, body: &str, state: IssueState) -> i64 {
+    pull_request_on(server, title, body, state, (PUBLIC_REPO_ID, "main"))
+}
+
+fn pull_request_on(
+    server: &TestServer,
+    title: &str,
+    body: &str,
+    state: IssueState,
+    (repo_id, branch): (i64, &str),
+) -> i64 {
     let store = &server.server.services().store;
     must(
         store.update(|tx| {
             let id = tx.next_id();
             let pull_id = tx.next_id();
-            let number = tx.table_mut::<Counters>().next_number(PUBLIC_REPO_ID);
+            let number = tx.table_mut::<Counters>().next_number(repo_id);
             let side = |name: &str| PullRef {
-                repo_id: Some(PUBLIC_REPO_ID),
+                repo_id: Some(repo_id),
                 ref_name: name.to_owned(),
                 sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             };
             tx.table_mut::<Issues>().insert(Issue {
                 id,
                 node_id: node_id::entity(node_id::ISSUE, id),
-                repo_id: PUBLIC_REPO_ID,
+                repo_id,
                 number,
                 title: title.to_owned(),
                 body: Some(body.to_owned()),
@@ -200,7 +210,7 @@ fn pull_request(server: &TestServer, title: &str, body: &str, state: IssueState)
                     id: pull_id,
                     node_id: node_id::entity(node_id::PULL_REQUEST, pull_id),
                     head: side("feature"),
-                    base: side("main"),
+                    base: side(branch),
                     draft: false,
                     merged_at: None,
                     merge_commit_sha: None,
@@ -986,7 +996,7 @@ async fn implement_issue_reads_the_issue_and_the_open_pull_requests_that_close_i
 }
 
 #[tokio::test]
-async fn implement_issue_lists_an_open_pull_request_linked_by_hand() {
+async fn implement_issue_filters_manual_and_cross_repository_keyword_links() {
     // Given
     let server = start().await;
     let issue = open_issue(&as_alice(&server), &json!({"title": "bug"})).await;
@@ -994,6 +1004,19 @@ async fn implement_issue_lists_an_open_pull_request_linked_by_hand() {
     let keyword = pull_request(&server, "fix", &format!("Fixes #{n}"), IssueState::Open);
     let by_hand = pull_request(&server, "wip", "work in progress", IssueState::Open);
     let closed_by_hand = pull_request(&server, "old", "", IssueState::Closed);
+    let cross_repo = |body: &str, branch: &str| {
+        pull_request_on(
+            &server,
+            "external fix",
+            body,
+            IssueState::Open,
+            (PRIVATE_REPO_ID, branch),
+        )
+    };
+    let qualified = format!("Fixes ACME/Public#{n}");
+    let external = cross_repo(&qualified, "main");
+    cross_repo(&qualified, "develop");
+    cross_repo(&format!("Fixes #{n}"), "main");
     for pull in [by_hand, closed_by_hand] {
         let link = json!({"repository": format!("{ORG}/{PUBLIC_REPO}"),
                           "issue_number": n, "pull_number": pull});
@@ -1001,6 +1024,7 @@ async fn implement_issue_lists_an_open_pull_request_linked_by_hand() {
         assert_eq!(answer.status, StatusCode::CREATED);
     }
     let alice = Graphql::new(as_alice(&server));
+    let bob = Graphql::new(client(&server, BOB_TOKEN));
     let vars = json!({"owner": ORG, "name": PUBLIC_REPO, "number": n});
     let numbers = |answer: &Value| -> Vec<i64> {
         answer["data"]["repository"]["issue"]["closedByPullRequestsReferences"]["nodes"]
@@ -1022,13 +1046,15 @@ async fn implement_issue_lists_an_open_pull_request_linked_by_hand() {
     let found = alice.query(IMPLEMENT_ISSUE, &vars).await.json();
     let user_linked = alice.query(&only("userLinkedOnly"), &vars).await.json();
     let keyword_only = alice.query(&only("excludeUserLinked"), &vars).await.json();
+    let visible_to_bob = bob.query(IMPLEMENT_ISSUE, &vars).await.json();
     // Then
-    assert_eq!(numbers(&found), [keyword, by_hand]);
+    assert_eq!(numbers(&found), [keyword, by_hand, external]);
     assert_eq!(
         found["data"]["repository"]["issue"]["closedByPullRequestsReferences"]["nodes"][1],
         json!({"number": by_hand, "state": "OPEN", "headRefName": "feature",
                "headRepository": {"nameWithOwner": "acme/public"}})
     );
     assert_eq!(numbers(&user_linked), [by_hand]);
-    assert_eq!(numbers(&keyword_only), [keyword]);
+    assert_eq!(numbers(&keyword_only), [keyword, external]);
+    assert_eq!(numbers(&visible_to_bob), [keyword, by_hand]);
 }

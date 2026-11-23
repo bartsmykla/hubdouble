@@ -20,23 +20,20 @@ const CLOSING_KEYWORDS: [&str; 9] = [
     "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
 ];
 
-/// Whether `text` holds a closing keyword followed by `#number` or `owner/name#number`.
-pub(crate) fn closes(text: &str, full_name: &str, number: i64) -> bool {
-    let lower = text.to_ascii_lowercase();
-    let full = full_name.to_ascii_lowercase();
-    let words: Vec<&str> = lower.split_whitespace().collect();
-    words.windows(2).any(|pair| {
-        let keyword = pair[0].trim_start_matches('(').trim_end_matches(':');
-        if !CLOSING_KEYWORDS.contains(&keyword) {
-            return false;
-        }
-        let target = pair[1].trim_end_matches(['.', ',', ';', ')', '!', '?']);
-        let digits = target.strip_prefix('#').or_else(|| {
-            target
-                .strip_prefix(full.as_str())
-                .and_then(|t| t.strip_prefix('#'))
-        });
-        digits.and_then(|d| d.parse::<i64>().ok()) == Some(number)
+fn closes(text: &str, full_name: &str, number: i64, local: bool) -> bool {
+    let mut words = text.split_whitespace();
+    let mut previous = words.next().unwrap_or_default();
+    words.any(|word| {
+        let keyword = previous.trim_start_matches('(').trim_end_matches(':');
+        previous = word;
+        let target = word.trim_end_matches(['.', ',', ';', ')', '!', '?']);
+        target.split_once('#').is_some_and(|(qualifier, digits)| {
+            ((local && qualifier.is_empty()) || qualifier.eq_ignore_ascii_case(full_name))
+                && digits.parse::<i64>() == Ok(number)
+                && CLOSING_KEYWORDS
+                    .iter()
+                    .any(|k| k.eq_ignore_ascii_case(keyword))
+        })
     })
 }
 
@@ -107,21 +104,24 @@ fn closed_by(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError
     let exclude_user_linked = args.get::<bool>("excludeUserLinked")?.unwrap_or(false);
     let repo = read_repo(ctx, issue.repo_id, &PULLS_READ)?;
     let full = full_name(ctx.tx, repo);
+    let full = full.as_str();
     let issues = ctx.tx.table::<Issues>();
     let mut pulls: Vec<&Arc<Issue>> = if user_linked_only {
         Vec::new()
     } else {
-        issues
-            .in_repo(repo.id)
-            .filter(|i| {
-                i.pull
-                    .as_ref()
-                    .is_some_and(|p| p.base.ref_name == repo.default_branch)
-            })
-            .filter(|i| {
-                i.body
-                    .as_deref()
-                    .is_some_and(|b| closes(b, &full, issue.number))
+        ctx.tx
+            .table::<Repos>()
+            .iter()
+            .filter(|source| source.id == repo.id || read_repo(ctx, source.id, &PULLS_READ).is_ok())
+            .flat_map(|source| {
+                issues.in_repo(source.id).filter(move |i| {
+                    i.pull
+                        .as_ref()
+                        .is_some_and(|p| p.base.ref_name == source.default_branch)
+                        && i.body.as_deref().is_some_and(|body| {
+                            closes(body, full, issue.number, source.id == repo.id)
+                        })
+                })
             })
             .collect()
     };
@@ -253,11 +253,17 @@ mod tests {
 
     #[test]
     fn a_closing_keyword_links_the_issue_it_names() {
-        assert!(closes("Fixes #12", "acme/public", 12));
-        assert!(closes("This resolves: acme/public#12.", "acme/public", 12));
-        assert!(closes("(closes #12)", "ACME/Public", 12));
-        assert!(!closes("Fixes #123", "acme/public", 12));
-        assert!(!closes("See #12", "acme/public", 12));
-        assert!(!closes("fixes other/repo#12", "acme/public", 12));
+        assert!(closes("Fixes #12", "acme/public", 12, true));
+        assert!(closes(
+            "This resolves: acme/public#12.",
+            "acme/public",
+            12,
+            false
+        ));
+        assert!(closes("(closes #12)", "ACME/Public", 12, true));
+        assert!(!closes("Fixes #12", "acme/public", 12, false));
+        assert!(!closes("Fixes #123", "acme/public", 12, true));
+        assert!(!closes("See #12", "acme/public", 12, true));
+        assert!(!closes("fixes other/repo#12", "acme/public", 12, true));
     }
 }
