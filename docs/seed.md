@@ -501,7 +501,7 @@ For a release with `draft: false`, the loader creates the tag at `target_commiti
 
 ## Kubernetes example
 
-Make a copy of the [Secret template](../deploy/kubernetes/secret.yaml). Set the PEM public key for App `1000001`. Set the webhook secret to the value that client uses. Set the user token to `ghp_` followed by 36 hex digits. Set the admin token to a random value.
+Make a copy of the [Secret template](../deploy/kubernetes/secret.yaml). Set the PEM public key for App `1000001`. Set the webhook secret to the value that the client uses. Set the user token to `ghp_` followed by 36 hex digits. Set the admin token to a random value.
 
 Apply your Secret and the other manifests in the same namespace.
 

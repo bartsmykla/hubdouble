@@ -11,7 +11,7 @@
 
 - kind: repository
   owner: octo-org
-  name: agent
+  name: app
   visibility: private
   files:
     .github/releases.json: |
@@ -705,7 +705,7 @@
   app: agent-local
   account: octo-org
   repository_selection: selected
-  repositories: [agent, runner, e2e]
+  repositories: [app, runner, e2e]
   permissions:
       actions: write
       actions_variables: read

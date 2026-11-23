@@ -8,10 +8,7 @@ use hubdouble_testkit::{Answer, GoGithub, Graphql, Receiver, TestServer, fixture
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const SEED: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/client-v5.yaml"
-);
+const SEED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/client-v5.yaml");
 const CONFIG_MAP: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../deploy/kubernetes/configmap.yaml"
@@ -258,7 +255,7 @@ async fn the_example_installation_can_read_the_source_and_target() {
     )
     .await;
     assert_eq!(repos["total_count"], 3);
-    for name in ["agent", "runner", "e2e"] {
+    for name in ["app", "runner", "e2e"] {
         let install = get(
             &app,
             &format!("repos/octo-org/{name}/installation"),
@@ -267,7 +264,12 @@ async fn the_example_installation_can_read_the_source_and_target() {
         .await;
         assert_eq!(install["id"], 962_416);
     }
-    let org_installation = get(&app, "orgs/octo-org/installation", "apps/get-org-installation").await;
+    let org_installation = get(
+        &app,
+        "orgs/octo-org/installation",
+        "apps/get-org-installation",
+    )
+    .await;
     assert_eq!(org_installation["id"], 962_416);
 
     let source = "repos/octo-org/app";
