@@ -328,3 +328,38 @@ async fn contents_caps_directory_entries_and_large_file_inline_data() {
     );
     assert!(raw.body.as_ref() == data.as_ref());
 }
+
+#[tokio::test]
+async fn contents_refuses_blobs_over_100_mib_for_each_media_type() {
+    const OBJECT: &str = "application/vnd.github.object+json";
+
+    let s = server().await;
+    let limit = 100 * 1024 * 1024;
+    let data = vec![0; limit + 1];
+    commit_files(
+        &s,
+        &[
+            write("at-limit", &data[..limit], EntryMode::File),
+            write("oversized", data, EntryMode::File),
+        ],
+    );
+    let client = GoGithub::new(&s).with_token(ALICE_TOKEN);
+    let path = "repos/acme/public/contents/oversized";
+    for media in [
+        None,
+        Some(OBJECT),
+        Some("application/vnd.github.raw+json"),
+        Some("application/vnd.github.raw"),
+    ] {
+        let answer = contents_with_media(&client, path, media).await;
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{media:?}");
+        assert_eq!(
+            answer.json()["errors"],
+            json!([{"resource": "Blob", "field": "data", "code": "too_large"}])
+        );
+    }
+    let boundary =
+        contents_with_media(&client, "repos/acme/public/contents/at-limit", Some(OBJECT)).await;
+    assert_eq!(boundary.status, StatusCode::OK);
+    assert_eq!(boundary.json()["size"], limit);
+}

@@ -3,7 +3,7 @@ mod submodules;
 use std::sync::Arc;
 
 use hubdouble_git::{EntryMode, Git, ObjectData, ObjectId, ObjectKind, TreeEntry};
-use hubdouble_model::ApiError;
+use hubdouble_model::{ApiError, FieldError};
 use hubdouble_render::Urls;
 use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::Tx;
@@ -16,6 +16,7 @@ use crate::data::RAW;
 const MAX_SYMLINKS: usize = 40;
 const MAX_DIRECTORY_ENTRIES: usize = 1_000;
 const MAX_INLINE_BYTES: usize = 1024 * 1024;
+const MAX_FILE_BYTES: usize = 100 * 1024 * 1024;
 
 #[derive(Serialize)]
 struct ContentLinks {
@@ -296,6 +297,21 @@ fn file(
     id: ObjectId,
     data: &[u8],
 ) -> Result<Reply, ApiError> {
+    if data.len() > MAX_FILE_BYTES {
+        return Err(ApiError::forbidden(concat!(
+            "This endpoint can only return blobs smaller than 100 MB in size. ",
+            "The requested blob is too large to fetch via the API, ",
+            "but you can always clone the repository via Git to obtain it."
+        ))
+        .with_docs("https://docs.github.com/rest/repos/contents#get-repository-content")
+        .with_error(FieldError {
+            resource: "Blob".to_owned(),
+            field: "data".to_owned(),
+            code: "too_large".to_owned(),
+            message: None,
+            value: None,
+        }));
+    }
     if let Some(media) = accepted_media(ctx, "raw") {
         let content_type = match media {
             "application/vnd.github.raw+json" => "application/vnd.github.raw+json; charset=utf-8",
