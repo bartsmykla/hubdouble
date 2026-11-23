@@ -197,19 +197,34 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             "performed_via_github_app": integration(tx, urls, e.via_app),
         });
         let extra = match &e.what {
-            What::Labeled { name, color } | What::Unlabeled { name, color } => {
-                vec![("label", json!({"name": name, "color": color}))]
-            }
-            What::Assigned(id) | What::Unassigned(id) => vec![
+            What::Labeled { name, color } | What::Unlabeled { name, color } => vec![
+                ("label", json!({"name": name, "color": color})),
+                ("intent", Value::Null),
+            ],
+            What::Assigned(id) => vec![
+                ("assignee", json!(user(tx, urls, *id))),
+                ("assigner", json!(user(tx, urls, e.actor_id))),
+                ("intent", Value::Null),
+            ],
+            What::Unassigned(id) => vec![
                 ("assignee", json!(user(tx, urls, *id))),
                 ("assigner", json!(user(tx, urls, e.actor_id))),
             ],
             What::Renamed { from, to } => vec![("rename", json!({"from": from, "to": to}))],
-            What::Closed(reason) => vec![("state_reason", json!(reason.map(StateReason::as_str)))],
-            What::CommitClosed { .. } => {
+            What::Closed(reason) => vec![
+                (
+                    "state_reason",
+                    json!(
+                        reason
+                            .filter(|r| *r != StateReason::Completed)
+                            .map(StateReason::as_str)
+                    ),
+                ),
+                ("intent", Value::Null),
+            ],
+            What::CommitClosed { .. } | What::Reopened | What::Merged(_) => {
                 vec![("state_reason", Value::Null), ("intent", Value::Null)]
             }
-            What::Reopened | What::Merged(_) => vec![("state_reason", Value::Null)],
         };
         for (k, value) in extra {
             v[k] = value;

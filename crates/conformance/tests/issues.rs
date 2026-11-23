@@ -1131,3 +1131,53 @@ async fn implement_issue_filters_manual_and_cross_repository_keyword_links() {
     assert_eq!(numbers(&keyword_only), [keyword, external]);
     assert_eq!(numbers(&visible_to_bob), [keyword, by_hand]);
 }
+
+#[tokio::test]
+async fn issue_events_carry_intent_and_a_close_reason_only_when_not_completed() {
+    // Given an issue that alice labels, assigns, closes, reopens and closes as not planned
+    let server = start().await;
+    let alice = as_alice(&server);
+    let made = alice
+        .post(&format!("{REPO}/issues"), &json!({"title": "Shape"}))
+        .await;
+    let path = format!("{REPO}/issues/{}", valid("issues/create", &made)["number"]);
+    for body in [
+        json!({"labels": ["bug"], "assignees": [ALICE]}),
+        json!({"labels": [], "assignees": []}),
+        json!({"state": "closed"}),
+        json!({"state": "open"}),
+        json!({"state": "closed", "state_reason": "not_planned"}),
+    ] {
+        let answer = alice.call_json(Method::PATCH, &path, &body).await;
+        assert_eq!(answer.status, StatusCode::OK, "{body}");
+    }
+    // When
+    let events = alice.get(&format!("{path}/events")).await;
+    // Then
+    let events = valid("issues/list-events", &events);
+    let shape: Vec<Value> = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| json!([e["event"], e.get("intent"), e.get("state_reason")]))
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            json!(["labeled", null, null]),
+            json!(["assigned", null, null]),
+            json!(["unlabeled", null, null]),
+            json!(["unassigned", null, null]),
+            json!(["closed", null, null]),
+            json!(["reopened", null, null]),
+            json!(["closed", null, "not_planned"]),
+        ]
+    );
+    let has_intent: Vec<bool> = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.get("intent").is_some())
+        .collect();
+    assert_eq!(has_intent, [true, true, true, false, true, true, true]);
+}
