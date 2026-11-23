@@ -44,6 +44,7 @@ const SLOW_WRITERS: usize = 16;
 const SLOW_WRITES_PER_WRITER: usize = 1_500;
 const SLOW_DELAY: Duration = Duration::from_secs(2);
 const ENQUEUE_EVENTS: usize = 5_000;
+const ENQUEUE_ROUNDS: usize = 5;
 const START_RUNS: usize = 5;
 const IDLE_RSS_MB: f64 = 40.0;
 const MEMORY_LIMIT_MIB: f64 = 128.0;
@@ -970,12 +971,29 @@ fn in_process(dir: &Path, rows: &mut Vec<Row>) {
         row.note(format!("{errors} failed requests"))
     });
 
-    rows.push(Row::new(
-        "Webhook enqueue per event",
-        Some(enqueue(&running.server, &world)),
-        "µs",
-        Goal::Below(20.0),
-    ));
+    let hooks = running.server.services().hooks.clone();
+    let mut rounds: Vec<f64> = (0..ENQUEUE_ROUNDS)
+        .map(|round| {
+            client_runtime
+                .block_on(hooks.drain())
+                .unwrap_or_else(|e| fail("drain the webhooks", e));
+            let per_event = enqueue(&running.server, &world);
+            eprintln!("enqueue round {round}: {per_event:.2} µs per event");
+            per_event
+        })
+        .collect();
+    rounds.sort_by(f64::total_cmp);
+    rows.push(
+        Row::new(
+            "Webhook enqueue per event",
+            Some(rounds[ENQUEUE_ROUNDS / 2]),
+            "µs",
+            Goal::Below(20.0),
+        )
+        .note(format!(
+            "median of {ENQUEUE_ROUNDS} rounds, each after a drain"
+        )),
+    );
     rows.push(receiver.connections_row("In-process rows"));
     drop(receiver);
     running.runtime.shutdown_background();
