@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -66,7 +67,6 @@ struct Assigned {
     id: i64,
     app: Arc<App>,
     committed: Committed,
-    name: (String, Option<String>),
 }
 
 #[derive(Default)]
@@ -286,16 +286,7 @@ impl Shared {
                         .filter(|app| app.webhook.as_ref().is_some_and(|w| w.active))
                         .filter(|_| c.epoch == epoch)
                         .cloned();
-                    let name = app.as_ref().and_then(|app| match &c.entry.redelivery_of {
-                        None => Some((c.entry.event.to_owned(), c.entry.action.map(str::to_owned))),
-                        Some(guid) => tx
-                            .table::<Deliveries>()
-                            .children(app.id)
-                            .rev()
-                            .find(|d| d.guid == *guid)
-                            .map(|original| (original.event.clone(), original.action.clone())),
-                    });
-                    let (Some(app), Some(name)) = (app, name) else {
+                    let Some(app) = app else {
                         self.release(&c);
                         continue;
                     };
@@ -304,7 +295,6 @@ impl Shared {
                         id,
                         app,
                         committed: c,
-                        name,
                     });
                 }
                 Ok(out)
@@ -329,15 +319,12 @@ impl Shared {
     }
 
     fn job(a: Assigned) -> Option<Job> {
-        let Assigned {
-            id,
-            app,
-            committed,
-            name: (event, action),
-        } = a;
+        let Assigned { id, app, committed } = a;
         let epoch = committed.epoch;
         let over_budget = committed.over_budget;
         let entry = committed.entry;
+        let event = entry.event.into_owned();
+        let action = entry.action.map(Cow::into_owned);
         let hook = app.webhook.as_ref()?;
         let (guid, redelivery) = match entry.redelivery_of {
             Some(guid) => (guid, true),
@@ -398,8 +385,8 @@ impl Shared {
                 observe(&Notice::Event {
                     app_id: a.app.id,
                     delivery_id: a.id,
-                    event: &a.name.0,
-                    action: a.name.1.as_deref(),
+                    event: &a.committed.entry.event,
+                    action: a.committed.entry.action.as_deref(),
                 });
             }
         }

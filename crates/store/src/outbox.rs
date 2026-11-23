@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use bytes::Bytes;
 
 /// One webhook delivery to one App, rendered inside the transaction that caused it.
@@ -6,8 +8,8 @@ pub struct OutboxEntry {
     pub app_id: i64,
     pub installation_id: Option<i64>,
     pub repo_id: Option<i64>,
-    pub event: &'static str,
-    pub action: Option<&'static str>,
+    pub event: Cow<'static, str>,
+    pub action: Option<Cow<'static, str>>,
     /// The complete payload as the JSON body, `installation`, `repository`, `organization` and
     /// `sender` included.
     pub payload: Bytes,

@@ -104,7 +104,7 @@ fn entry(event: &'static str) -> OutboxEntry {
         app_id: 1,
         installation_id: None,
         repo_id: None,
-        event,
+        event: event.into(),
         action: None,
         payload: Bytes::from_static(b"{}"),
         redelivery_of: None,
@@ -245,7 +245,7 @@ fn committed_outbox_entries_keep_commit_order_and_quiet_updates_deliver_nothing(
     .unwrap();
 
     let taken = s.take_outbox();
-    let events: Vec<_> = taken.iter().map(|c| c.entry.event).collect();
+    let events: Vec<_> = taken.iter().map(|c| &*c.entry.event).collect();
     assert_eq!(events, ["create", "push", "issues"]);
     assert!(taken.windows(2).all(|w| w[0].seq < w[1].seq));
     assert_eq!(s.take_outbox(), Vec::new());

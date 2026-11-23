@@ -619,6 +619,37 @@ async fn redelivery_keeps_the_guid_and_gets_a_new_id() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_accepted_redelivery_is_sent_after_the_log_drops_the_original() {
+    let store = world();
+    let (hooks, hits) = start(&store, |_| {});
+    let mut bodies = answer_all(hits);
+    let mut e = event("issue_comment", WIDGET);
+    e.action = Some("created");
+    emit_one(&store, e);
+    hooks.drain().await.unwrap();
+    let first = bodies.recv().await.unwrap();
+    // Given a redelivery of delivery 1 accepted while the log drops delivery 1
+    store
+        .update(|tx| {
+            redeliver(tx, APP_A, 1)?;
+            tx.table_mut::<Deliveries>().remove(1);
+            Ok(())
+        })
+        .unwrap();
+    // When the hooks drain
+    hooks.drain().await.unwrap();
+    // Then the payload goes out again and is logged with its event and action
+    assert_eq!(bodies.try_recv().ok(), Some(first));
+    let two = store
+        .view(|tx| Ok(tx.table::<Deliveries>().get(2).cloned()))
+        .unwrap()
+        .unwrap();
+    assert!(two.redelivery);
+    assert_eq!(two.event, "issue_comment");
+    assert_eq!(two.action.as_deref(), Some("created"));
+}
+
+#[tokio::test(start_paused = true)]
 async fn two_concurrent_writers_are_delivered_in_commit_order() {
     let store = world();
     let (hooks, hits) = start(&store, |o| o.workers = 1);
