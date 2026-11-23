@@ -8,7 +8,7 @@ use hubdouble_model::{
 use hubdouble_store::{Accounts, IssueComments, Issues, Repos};
 use serde::Serialize;
 
-use crate::links::IssueLinks;
+use crate::links::{IssueLinks, closing_references};
 use crate::shared::{ISSUES_READ, READ, full_name};
 
 const PULLS_READ: Requirement = Requirement {
@@ -16,28 +16,14 @@ const PULLS_READ: Requirement = Requirement {
     ..ISSUES_READ
 };
 
-const CLOSING_KEYWORDS: [&str; 9] = [
-    "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
-];
-
 fn closes(text: &str, full_name: &str, number: i64, local: bool) -> bool {
-    let mut words = text.split_whitespace();
-    let mut previous = words.next().unwrap_or_default();
-    words.any(|word| {
-        let keyword = previous.trim_start_matches('(').trim_end_matches(':');
-        previous = word;
-        let target = word.trim_end_matches(['.', ',', ';', ')', '!', '?']);
-        target.split_once('#').is_some_and(|(qualifier, digits)| {
-            ((local && qualifier.is_empty()) || qualifier.eq_ignore_ascii_case(full_name))
-                && digits.parse::<i64>() == Ok(number)
-                && CLOSING_KEYWORDS
-                    .iter()
-                    .any(|k| k.eq_ignore_ascii_case(keyword))
-        })
+    closing_references(text).any(|(qualifier, target)| {
+        target == number
+            && ((local && qualifier.is_empty()) || qualifier.eq_ignore_ascii_case(full_name))
     })
 }
 
-pub(crate) fn keyword_link(
+fn keyword_link(
     source: &Repo,
     pull: &Issue,
     issue_repo: i64,

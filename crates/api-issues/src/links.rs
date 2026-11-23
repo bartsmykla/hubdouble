@@ -8,9 +8,30 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::events::{self, What};
-use crate::graphql::keyword_link;
 use crate::issues::apply_state;
-use crate::shared::{emit_issue, full_name};
+use crate::shared::emit_issue;
+
+const CLOSING_KEYWORDS: [&str; 9] = [
+    "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
+];
+
+pub(crate) fn closing_references(text: &str) -> impl Iterator<Item = (&str, i64)> {
+    let mut previous = "";
+    text.split_whitespace().filter_map(move |word| {
+        let last = std::mem::replace(&mut previous, word);
+        let target = word.trim_end_matches(['.', ',', ';', ')', '!', '?']);
+        let (qualifier, digits) = target.split_once('#')?;
+        let keyword = last.trim_start_matches('(').trim_end_matches(':');
+        if CLOSING_KEYWORDS
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(keyword))
+        {
+            Some((qualifier, digits.parse().ok()?))
+        } else {
+            None
+        }
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IssueLink {
@@ -103,15 +124,8 @@ fn closed_by_merge(tx: &Tx, pull: &Issue) -> Vec<Arc<Issue>> {
     {
         return Vec::new();
     }
-    let mut closed: Vec<Arc<Issue>> = tx
-        .table::<Repos>()
-        .iter()
-        .flat_map(|target| {
-            let full = full_name(tx, target);
-            issues.in_repo(target.id).filter(move |i| {
-                i.pull.is_none() && keyword_link(repo, pull, target.id, &full, i.number)
-            })
-        })
+    let mut closed: Vec<Arc<Issue>> = closing_references(pull.body.as_deref().unwrap_or_default())
+        .filter_map(|(qualifier, number)| referenced_issue(tx, repo.id, qualifier, number))
         .chain(
             tx.table::<IssueLinks>()
                 .iter()
@@ -124,6 +138,22 @@ fn closed_by_merge(tx: &Tx, pull: &Issue) -> Vec<Arc<Issue>> {
     closed.sort_by_key(|i| i.id);
     closed.dedup_by_key(|i| i.id);
     closed
+}
+
+fn referenced_issue<'a>(
+    tx: &'a Tx,
+    source: i64,
+    qualifier: &str,
+    number: i64,
+) -> Option<&'a Arc<Issue>> {
+    let repo = if qualifier.is_empty() {
+        source
+    } else {
+        lookup_repo(tx, qualifier)?.id
+    };
+    tx.table::<Issues>()
+        .by_number(repo, number)
+        .filter(|i| i.pull.is_none())
 }
 
 fn close(tx: &mut TxMut<'_>, issue: &Issue, sender: i64, now: Timestamp) -> Result<(), ApiError> {
@@ -151,15 +181,18 @@ struct LinkSeed {
     pull_number: i64,
 }
 
-fn repo_named(tx: &Tx, full_name: &str) -> Result<i64, ApiError> {
-    let unknown = || ApiError::unprocessable("No such repository");
-    let (owner, name) = full_name.split_once('/').ok_or_else(unknown)?;
-    let owner = tx.table::<Accounts>().by_login(owner).ok_or_else(unknown)?;
-    Ok(tx
-        .table::<Repos>()
+fn lookup_repo<'a>(tx: &'a Tx, full_name: &str) -> Option<&'a Repo> {
+    let (owner, name) = full_name.split_once('/')?;
+    let owner = tx.table::<Accounts>().by_login(owner)?;
+    tx.table::<Repos>()
         .by_name(owner.id, name)
-        .ok_or_else(unknown)?
-        .id)
+        .map(AsRef::as_ref)
+}
+
+fn repo_named(tx: &Tx, full_name: &str) -> Result<i64, ApiError> {
+    lookup_repo(tx, full_name)
+        .map(|repo| repo.id)
+        .ok_or_else(|| ApiError::unprocessable("No such repository"))
 }
 
 pub(crate) fn seed(ctx: &mut SeedCtx<'_>, body: Value) -> Result<(), ApiError> {
@@ -190,4 +223,18 @@ pub(crate) fn seed(ctx: &mut SeedCtx<'_>, body: Value) -> Result<(), ApiError> {
         pull_issue_id: pull,
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::closing_references;
+
+    #[test]
+    fn closing_references_return_only_the_named_targets() {
+        let text = "See #2. (Fixes #12), resolves: Acme/other#13!\nClosed #bad; close #15.";
+        assert_eq!(
+            closing_references(text).collect::<Vec<_>>(),
+            [("", 12), ("Acme/other", 13), ("", 15)]
+        );
+    }
 }
