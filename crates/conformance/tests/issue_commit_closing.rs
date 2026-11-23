@@ -298,3 +298,47 @@ async fn each_ref_write_closes_issues_from_commit_messages() {
         assert_commit_closed(&server, &client, &path, new).await;
     }
 }
+
+#[tokio::test]
+async fn a_merged_pull_request_body_closes_another_repositorys_issue_only_with_push_access() {
+    // Given a pull request whose body names an issue alice can push to and one she cannot
+    let server = TestServer::builder()
+        .fixture()
+        .frame(hubdouble_api::register_all)
+        .entry(
+            json!({"kind": "repository", "owner": "carol", "name": "blocked",
+                      "visibility": "public", "has_issues": true}),
+        )
+        .start()
+        .await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let carol = GoGithub::new(&server).with_token(CAROL_TOKEN);
+    let (cross, cross_path) = open_issue(&alice, PRIVATE).await;
+    let (blocked, blocked_path) = open_issue(&carol, BLOCKED).await;
+    let body = format!("Fixes acme/private#{cross}, fixes carol/blocked#{blocked}");
+    checked(
+        &alice
+            .post(
+                &format!("{PUBLIC}/pulls"),
+                &json!({"title": "Fix", "head": "feature", "base": "main", "body": body}),
+            )
+            .await,
+        StatusCode::CREATED,
+    );
+    // When alice merges it
+    checked(
+        &alice
+            .call_json(Method::PUT, &format!("{PUBLIC}/pulls/1/merge"), &json!({}))
+            .await,
+        StatusCode::OK,
+    );
+    // Then only the issue in the repository she can push to closes
+    assert_eq!(
+        checked(&alice.get(&cross_path).await, StatusCode::OK)["state"],
+        "closed"
+    );
+    assert_eq!(
+        checked(&carol.get(&blocked_path).await, StatusCode::OK)["state"],
+        "open"
+    );
+}

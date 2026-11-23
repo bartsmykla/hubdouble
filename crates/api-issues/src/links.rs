@@ -123,7 +123,7 @@ pub(crate) fn ref_updated(
             .as_ref()
             .and_then(|p| p.merged_by)
             .unwrap_or(change.sender);
-        for issue in closed_by_merge(tx, &pull) {
+        for issue in closed_by_merge(tx, &pull, sender) {
             close(tx, &issue, sender, git.now(), None)?;
         }
     }
@@ -180,7 +180,7 @@ fn can_push(tx: &Tx, sender: i64, repo_id: i64) -> bool {
     }
 }
 
-fn closed_by_merge(tx: &Tx, pull: &Issue) -> Vec<Arc<Issue>> {
+fn closed_by_merge(tx: &Tx, pull: &Issue, sender: i64) -> Vec<Arc<Issue>> {
     let issues = tx.table::<Issues>();
     let Some(repo) = tx.table::<Repos>().get(pull.repo_id) else {
         return Vec::new();
@@ -201,6 +201,7 @@ fn closed_by_merge(tx: &Tx, pull: &Issue) -> Vec<Arc<Issue>> {
                 .filter_map(|l| issues.get(l.issue_id)),
         )
         .filter(|i| i.state == IssueState::Open)
+        .filter(|i| i.repo_id == repo.id || can_push(tx, sender, i.repo_id))
         .cloned()
         .collect();
     closed.sort_by_key(|i| i.id);
