@@ -367,8 +367,7 @@ fn events(all: &[Delivery], event: &str, action: &str) -> Vec<Value> {
 
 #[tokio::test]
 async fn a_workflow_job_is_its_check_run_in_the_github_actions_suite_of_its_run() {
-    // Given a pushed head with an open pull request and a run on it whose build job failed
-    // with one annotation, as hashicorp/terraform run 44826626663 shows
+    // Given a pushed head with an open pull request and a run on it whose build job failed with one annotation, as hashicorp/terraform run 44826626663 shows
     let server = start("none").await;
     let client = app(&server);
     let (before, after) = push_feature(&server);
@@ -462,8 +461,7 @@ async fn a_workflow_job_is_its_check_run_in_the_github_actions_suite_of_its_run(
 
 #[tokio::test]
 async fn check_runs_for_a_ref_count_attempts_as_github_filters_them() {
-    // Given a run of four jobs whose failed build was re-run with the jobs that need it, which
-    // gives attempt 2 four new check runs in the same suite
+    // Given a run of four jobs whose failed build was re-run with the jobs that need it, which gives attempt 2 four new check runs in the same suite
     let server = start("none").await;
     let client = app(&server);
     let id = dispatch(&client, "main").await;
@@ -531,8 +529,7 @@ async fn check_runs_for_a_ref_count_attempts_as_github_filters_them() {
 
 #[tokio::test]
 async fn every_suite_on_a_head_that_a_new_tag_brought_in_has_zeros_as_before() {
-    // Given a commit that a new tag brought in, and the feature branch moved to it later, as
-    // every suite on goreleaser/goreleaser commit a6edafa, tag v2.20.3, shows
+    // Given a commit that a new tag brought in, and the feature branch moved to it later, as every suite on goreleaser/goreleaser commit a6edafa, tag v2.20.3, shows
     let server = start("none").await;
     let client = app(&server);
     let head = tag_new_commit(&server, "refs/tags/v9.9.9");
@@ -552,8 +549,7 @@ async fn every_suite_on_a_head_that_a_new_tag_brought_in_has_zeros_as_before() {
 
 #[tokio::test]
 async fn a_suite_takes_before_from_the_first_push_of_its_head_after_that_branch_moved() {
-    // Given a head first pushed onto feature, feature moved on, and main pushed to the head
-    // later, as the suites on cli/cli commit 233b470 made days after its push show
+    // Given a head first pushed onto feature, feature moved on, and main pushed to the head later, as the suites on cli/cli commit 233b470 made days after its push show
     let server = start("none").await;
     let client = app(&server);
     let (before, head) = push_feature(&server);
