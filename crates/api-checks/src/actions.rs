@@ -6,7 +6,7 @@ use hubdouble_model::{
     Conclusion, RunStatus, Timestamp, WorkflowJob, node_id,
 };
 use hubdouble_render::{Integration, SimpleUser, Urls};
-use hubdouble_store::{CheckRuns, CheckSuites, TxMut};
+use hubdouble_store::{Accounts, CheckRuns, CheckSuites, Tx, TxMut};
 use uuid::Uuid;
 
 use crate::events::{self, To};
@@ -102,17 +102,28 @@ pub fn owner() -> Account {
     }
 }
 
-/// GitHub Actions as GitHub renders it in a check run or suite, owned by the `github`
-/// organization.
+/// The account that owns GitHub Actions in this store: a seeded account with the `github`
+/// organization's ID, else one with its login, else that organization. `GET /users/{username}`
+/// and `GET /user/{account_id}` serve the same account.
 #[must_use]
-pub fn app(urls: &Urls) -> Integration {
-    let owner = owner();
+pub fn owner_in(tx: &Tx) -> Account {
+    let builtin = owner();
+    let accounts = tx.table::<Accounts>();
+    accounts
+        .get(builtin.id)
+        .or_else(|| accounts.by_login(&builtin.login))
+        .map_or(builtin, |seeded| (**seeded).clone())
+}
+
+/// GitHub Actions as GitHub renders it in a check run or suite, owned by `owner`.
+#[must_use]
+pub fn app(urls: &Urls, owner: &Account) -> Integration {
     Integration {
         id: APP_ID,
         slug: "github-actions".to_owned(),
         node_id: "MDM6QXBwMTUzNjg=".to_owned(),
         client_id: "Iv1.05c79e9ad1f6bdfa".to_owned(),
-        owner: SimpleUser::new(urls, &owner),
+        owner: SimpleUser::new(urls, owner),
         name: "GitHub Actions".to_owned(),
         description: Some("Automate your workflow from idea to production".to_owned()),
         external_url: "https://help.github.com/en/actions".to_owned(),

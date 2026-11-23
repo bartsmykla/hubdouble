@@ -117,7 +117,8 @@ impl<'a> View<'a> {
 
     pub fn app(&self, id: i64) -> Option<Integration> {
         let Some(app) = self.tx.table::<Apps>().get(id) else {
-            return (id == actions::APP_ID).then(|| actions::app(self.urls));
+            return (id == actions::APP_ID)
+                .then(|| actions::app(self.urls, &actions::owner_in(self.tx)));
         };
         let owner = self.tx.table::<Accounts>().get(app.owner_id)?;
         Some(Integration::new(self.urls, app, owner))

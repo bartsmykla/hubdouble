@@ -63,9 +63,14 @@ fn token(value: &str, (app, installation): (i64, i64)) -> Token {
 }
 
 async fn start(auto_complete: &str) -> TestServer {
+    start_with(auto_complete, []).await
+}
+
+async fn start_with(auto_complete: &str, extra: impl IntoIterator<Item = Value>) -> TestServer {
     let mut builder = TestServer::builder()
         .register(hubdouble_api_checks::register)
         .register(hubdouble_api_actions::register)
+        .register(hubdouble_api_users::register)
         .register(standins::query_repository)
         .register(standins::repository_object)
         .register(parents);
@@ -86,6 +91,9 @@ async fn start(auto_complete: &str) -> TestServer {
             Some("installation") => entry["permissions"] = grant.clone(),
             _ => {}
         }
+        builder = builder.entry(entry);
+    }
+    for entry in extra {
         builder = builder.entry(entry);
     }
     let server = builder
@@ -837,4 +845,31 @@ async fn a_full_rerun_queues_every_job_and_a_job_rerun_queues_it_and_its_depende
             pair("test", "completed"),
         ])
     );
+}
+
+#[tokio::test]
+async fn the_github_actions_app_names_the_seeded_account_that_holds_the_github_login() {
+    // Given a seed whose own organization holds the login github, and a run with a job
+    let server = start_with(
+        "none",
+        [json!({"kind": "org", "id": 7777, "login": "github", "name": "Seeded"})],
+    )
+    .await;
+    let client = app(&server);
+    let (_, after) = push_feature(&server);
+    let id = dispatch(&client, "feature").await;
+    let build = named(&jobs(&client, id, "latest").await, "build")["id"].clone();
+
+    // When the job's check run and the account with that login are read
+    let check = ok(
+        &client.get(&format!("{REPO}/check-runs/{build}")).await,
+        StatusCode::OK,
+    );
+    let account = ok(&client.get("users/github").await, StatusCode::OK);
+
+    // Then the App's owner is that account
+    assert_eq!(check["head_sha"], after);
+    assert_eq!(check["app"]["owner"]["id"], account["id"]);
+    assert_eq!(check["app"]["owner"]["id"], 7777);
+    assert_eq!(check["app"]["owner"]["login"], "github");
 }
