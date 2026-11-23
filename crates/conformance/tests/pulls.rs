@@ -747,8 +747,7 @@ async fn graphql_links_nodes_refs_commits_reviews_and_draft_transitions() {
 
 #[tokio::test]
 async fn a_merge_into_the_default_branch_closes_the_issues_the_pull_request_links() {
-    // Given PR 1 into main and PR 2 into develop, issue 3 named by PR 1's closing keyword,
-    // issue 4 linked to PR 1 by hand, and issue 5 named by PR 2's closing keyword
+    // Given PR 1 into main and PR 2 into develop, issue 3 named by PR 1's closing keyword, issue 4 linked to PR 1 by hand, and issue 5 named by PR 2's closing keyword
     let server = TestServer::builder()
         .fixture()
         .frame(hubdouble_api::register_all)

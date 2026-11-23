@@ -206,8 +206,7 @@ async fn send(client: &GoGithub, method: &Method, path: &str) -> Answer {
 
 #[tokio::test]
 async fn every_repository_route_answers_404_for_a_private_repository_outside_the_installation() {
-    // Given an installation token of the fixture App, whose installation covers only the
-    // public repository, and the org's existing private repository
+    // Given an installation token of the fixture App, whose installation covers only the public repository, and the org's existing private repository
     let server = TestServer::builder()
         .frame(hubdouble_api::register_all)
         .fixture()

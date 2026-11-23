@@ -44,10 +44,12 @@ fn graphql_fields_lists_every_selected_field_with_an_owner() {
     let mut lines = tsv.lines();
     assert_eq!(lines.next(), Some("field\towner\tdocuments"));
     let rows: Vec<Vec<&str>> = lines.map(|l| l.split('\t').collect()).collect();
-    // Then it holds exactly those fields, regenerated with
-    // `cargo run -p hubdouble-gql --example graphql_fields`
+    // Then it holds exactly those fields
     let listed: BTreeSet<String> = rows.iter().map(|r| r[0].to_owned()).collect();
-    assert_eq!(listed, selected);
+    assert_eq!(
+        listed, selected,
+        "regenerate with `cargo run -p hubdouble-gql --example graphql_fields`"
+    );
     // And every row has one owner from the plan's tracks
     for row in &rows {
         assert_eq!(row.len(), 3, "{row:?}");

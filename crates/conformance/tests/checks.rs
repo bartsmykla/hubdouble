@@ -193,8 +193,7 @@ fn annotations(count: usize) -> Vec<Value> {
 
 #[tokio::test]
 async fn check_writes_follow_the_client_batches_and_keep_output() {
-    // Given the client's internal/dispatch/checks.go:131-191, which posts the first batch of 50
-    // annotations with the run facts and patches the next batches without them.
+    // Given the client's internal/dispatch/checks.go:131-191, which posts the first batch of 50 annotations with the run facts and patches the next batches without them
     let server = start(vec![]).await;
     let client = app_client(&server);
     let head = sha(&server, "feature");

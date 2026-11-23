@@ -340,8 +340,7 @@ async fn workflow_runs_leave_out_pull_requests_when_the_client_excludes_them() {
     let list =
         |exclude: &str| format!("{ACTIONS}/runs?{exclude}head_sha={sha}&page=1&per_page=100");
 
-    // When the runs of that head are listed with and without exclude_pull_requests, as
-    // the client's ciSuites lists them (internal/dispatch/ci.go:200)
+    // When the runs of that head are listed with and without exclude_pull_requests, as the client's ciSuites lists them (internal/dispatch/ci.go:200)
     let excluded = valid(
         "list-workflow-runs-for-repo",
         &client.get(&list("exclude_pull_requests=true&")).await,

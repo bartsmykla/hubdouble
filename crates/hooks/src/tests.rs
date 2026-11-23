@@ -319,8 +319,7 @@ fn recipients_follow_installation_coverage_and_subscription() {
 
 #[test]
 fn an_event_reaches_only_installations_granted_its_permission() {
-    // Given two Apps that subscribe to the same events on one repository, and
-    // installation B with contents and checks read but no issues permission
+    // Given two Apps that subscribe to the same events on one repository, and installation B with contents and checks read but no issues permission
     let store = world();
     store
         .update_quiet(|tx| {
@@ -367,8 +366,7 @@ fn an_event_reaches_only_installations_granted_its_permission() {
 
 #[test]
 fn an_app_with_checks_write_gets_check_events_without_subscribing() {
-    // Given App A with checks write and App B with checks read, neither subscribed to check
-    // events, and installations that grant both checks write
+    // Given App A with checks write and App B with checks read, neither subscribed to check events, and installations that grant both checks write
     let store = world();
     store
         .update_quiet(|tx| {
@@ -429,8 +427,7 @@ fn an_app_with_checks_write_gets_check_events_without_subscribing() {
 
 #[test]
 fn an_event_to_an_explicit_installation_needs_access_to_the_repository() {
-    // Given App A suspended on the account, and App B whose installation covers only OTHER,
-    // both with checks write
+    // Given App A suspended on the account, and App B whose installation covers only OTHER, both with checks write
     let store = world();
     store
         .update_quiet(|tx| {
@@ -482,8 +479,7 @@ fn an_event_to_an_explicit_installation_needs_access_to_the_repository() {
         let what = (e.name, e.action, e.installation_id, e.repo_id);
         // When the event for that installation commits
         emit_one(&store, e);
-        // Then a suspended installation gets only its lifecycle event, and an installation
-        // gets no event of a repository it does not cover
+        // Then a suspended installation gets only its lifecycle event, and an installation gets no event of a repository it does not cover
         let got: Vec<i64> = store.take_outbox().iter().map(|c| c.entry.app_id).collect();
         assert_eq!(got, want, "{what:?}");
     }
@@ -1166,8 +1162,7 @@ async fn a_webhook_url_change_drops_the_old_origins_idle_connections() {
     hooks.drain().await.unwrap();
     assert!(bodies.recv().await.is_some());
     assert_eq!(hooks.shared.pool.idle(), 1);
-    // When the App's URL moves to another origin and a delivery after the idle limit returns
-    // its connection
+    // When the App's URL moves to another origin and a delivery after the idle limit returns its connection
     store
         .update_quiet(|tx| {
             let mut a = app(APP_A, "alpha", &["push", "issue_comment"]);
