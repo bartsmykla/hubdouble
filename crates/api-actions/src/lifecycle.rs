@@ -379,7 +379,11 @@ fn apply_job(
     ) || conclusion.is_some_and(|c| {
         !matches!(
             c,
-            Conclusion::Success | Conclusion::Failure | Conclusion::Cancelled | Conclusion::Skipped
+            Conclusion::Success
+                | Conclusion::Failure
+                | Conclusion::Cancelled
+                | Conclusion::Skipped
+                | Conclusion::TimedOut
         )
     }) {
         return Err(crate::invalid("WorkflowJob", "status", "Invalid job state"));
@@ -486,9 +490,11 @@ pub(crate) fn complete(
         .map(|job| WorkflowJob::clone(job))
         .collect();
     let job_conclusion = match conclusion {
-        Conclusion::Success | Conclusion::Failure | Conclusion::Cancelled | Conclusion::Skipped => {
-            conclusion
-        }
+        Conclusion::Success
+        | Conclusion::Failure
+        | Conclusion::Cancelled
+        | Conclusion::Skipped
+        | Conclusion::TimedOut => conclusion,
         _ => Conclusion::Skipped,
     };
     for mut job in unfinished {
@@ -528,7 +534,7 @@ pub(crate) fn rerun(
         .map(|job| {
             let failed = matches!(
                 job.conclusion,
-                Some(Conclusion::Failure | Conclusion::Cancelled)
+                Some(Conclusion::Failure | Conclusion::Cancelled | Conclusion::TimedOut)
             );
             let (key, needs) = keys
                 .get(job.id)

@@ -1,6 +1,7 @@
 //! Response and payload validators: REST bodies against the pinned `OpenAPI` description
 //! (`OpenAPI` 3.0 schemas converted to JSON Schema draft 4), webhook payloads against the pinned
-//! `@octokit/webhooks-schemas` 7.6.1.
+//! `@octokit/webhooks-schemas` 7.6.1, with the newer fields and the `workflow_job` conclusions
+//! that GitHub's own description holds.
 
 use std::sync::LazyLock;
 
@@ -68,10 +69,34 @@ fn allow_newer_fields(mut schema: Value) -> Value {
     schema
 }
 
+fn allow_github_job_conclusions(mut schema: Value) -> Value {
+    let job = "/components/schemas/webhook-workflow-job-completed/properties/workflow_job/allOf";
+    for (github, octokit) in [
+        (
+            "0/properties/conclusion/enum",
+            "/definitions/workflow-job/properties/conclusion/enum",
+        ),
+        (
+            "1/properties/conclusion/enum",
+            "/definitions/workflow_job$completed/properties/workflow_job/allOf/1/properties/conclusion/enum",
+        ),
+    ] {
+        let values = OPENAPI
+            .doc
+            .pointer(&format!("{job}/{github}"))
+            .cloned()
+            .unwrap_or_else(|| panic!("the OpenAPI bundle has no {github} job conclusions"));
+        *schema
+            .pointer_mut(octokit)
+            .unwrap_or_else(|| panic!("octokit has no {octokit}")) = values;
+    }
+    schema
+}
+
 static OCTOKIT_REGISTRY: LazyLock<(Value, Registry<'static>)> = LazyLock::new(|| {
-    let schema: Value = allow_newer_fields(
+    let schema: Value = allow_github_job_conclusions(allow_newer_fields(
         serde_json::from_str(OCTOKIT).unwrap_or_else(|e| panic!("parse the octokit schema: {e}")),
-    );
+    ));
     let registry = Registry::new()
         .draft(Draft::Draft7)
         .retrieve_known_draft_meta_schemas(false)

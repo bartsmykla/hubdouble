@@ -559,6 +559,89 @@ async fn rerun_failed_jobs_queues_dependents_without_a_requested_run_event() {
     assert_eq!(sent, [queued.clone(), queued.clone(), queued]);
 }
 
+#[tokio::test]
+async fn a_timed_out_run_reruns_its_timed_out_jobs() {
+    // Given a run that timed out with build timed out, lint passed, and the rest unfinished
+    let server = server("none").await;
+    let client = client(&server);
+    let run_id = dispatch_workflow(&client, "chain.yml", "main").await["workflow_run_id"]
+        .as_i64()
+        .unwrap();
+    let run_path = format!("{ACTIONS}/runs/{run_id}");
+    let latest = format!("{run_path}/jobs?filter=latest&per_page=100");
+    let jobs = valid("list-jobs-for-workflow-run", &client.get(&latest).await);
+    let finished: Vec<_> = jobs["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|job| match job["name"].as_str().unwrap() {
+            "build" => Some(json!({"id": job["id"], "conclusion": "timed_out"})),
+            "lint" => Some(json!({"id": job["id"], "conclusion": "success"})),
+            _ => None,
+        })
+        .collect();
+    let complete = server
+        .admin(
+            Method::POST,
+            &format!("actions/runs/{run_id}"),
+            Some(&json!({"conclusion": "timed_out", "jobs": finished})),
+        )
+        .await;
+    assert_eq!(complete.status, StatusCode::OK);
+    let done = valid("list-jobs-for-workflow-run", &client.get(&latest).await);
+    let conclusions: BTreeSet<_> = done["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|job| {
+            (
+                job["name"].as_str().unwrap().to_owned(),
+                job["conclusion"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+    assert_eq!(
+        conclusions,
+        BTreeSet::from([
+            pair("build", "timed_out"),
+            pair("deploy", "timed_out"),
+            pair("lint", "success"),
+            pair("test", "timed_out"),
+        ])
+    );
+
+    // When the failed jobs are re-run
+    let retried = client
+        .call(Method::POST, &format!("{run_path}/rerun-failed-jobs"))
+        .await;
+
+    // Then every timed-out job is queued in the next attempt and the passed job is carried
+    assert_eq!(retried.status, StatusCode::CREATED);
+    let next = valid("list-jobs-for-workflow-run", &client.get(&latest).await);
+    let states: BTreeSet<_> = next["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|job| {
+            assert_eq!(job["run_attempt"], 2);
+            pair(
+                job["name"].as_str().unwrap(),
+                job["status"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        states,
+        BTreeSet::from([
+            pair("build", "queued"),
+            pair("deploy", "queued"),
+            pair("lint", "completed"),
+            pair("test", "queued"),
+        ])
+    );
+}
+
 async fn assert_lifecycle_webhooks(server: &TestServer, final_run: &serde_json::Value) {
     let mut completed = Vec::new();
     let mut events = BTreeSet::new();
