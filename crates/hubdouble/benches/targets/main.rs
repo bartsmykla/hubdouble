@@ -21,7 +21,7 @@ use hubdouble_testkit::fixture;
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use mimalloc::MiMalloc;
-use row::{Goal, Row, number};
+use row::{Goal, Row, Scale, number};
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
 use tokio::net::{TcpListener, TcpStream};
@@ -53,6 +53,8 @@ const RSS_GROWTH_MIB: f64 = MEMORY_LIMIT_MIB - IDLE_RSS_MB * 1e6 / MIB;
 const FAST_EVENTS: usize = 50_000;
 const FAST_BATCH: usize = 1_000;
 const TEAMS: usize = 100;
+const CALIBRATION_ROUNDS: usize = 5;
+const CALIBRATION_ITERATIONS: usize = 200;
 
 fn micros(d: Duration) -> f64 {
     d.as_secs_f64() * 1e6
@@ -214,6 +216,7 @@ fn opened(o: &Mutex<Opened>) -> MutexGuard<'_, Opened> {
 
 struct Receiver {
     runtime: Runtime,
+    addr: SocketAddr,
     url: String,
     payload_bytes: Arc<AtomicUsize>,
     accepted: Arc<Mutex<Opened>>,
@@ -261,6 +264,7 @@ impl Receiver {
         });
         Receiver {
             runtime,
+            addr,
             url: format!("http://{addr}/hook"),
             payload_bytes,
             accepted,
@@ -851,13 +855,16 @@ fn rest_rows(runtime: &Runtime, addr: SocketAddr, routes: &[String], rows: &mut 
     for (q, label, goal) in [(0.5, "p50", 100.0), (0.99, "p99", 1000.0)] {
         let measure = format!("REST GET {label}, {count} routes");
         rows.push(match &failed {
-            Some(e) => Row::new(measure, None, "µs", Goal::Below(goal)).note(e.clone()),
+            Some(e) => Row::new(measure, None, "µs", Goal::Below(goal))
+                .scale(Scale::RoundTrip)
+                .note(e.clone()),
             None => Row::new(
                 measure,
                 Some(micros(percentile(&all, q))),
                 "µs",
                 Goal::Below(goal),
-            ),
+            )
+            .scale(Scale::RoundTrip),
         });
     }
     rows.push(Worst::row(
@@ -921,10 +928,69 @@ fn doc_rows(runtime: &Runtime, addr: SocketAddr, docs: &mut [Doc], rows: &mut Ve
                     "ms",
                     Goal::Below(3.0),
                 )
+                .scale(Scale::RoundTrip)
                 .note(note),
             );
         }
     });
+}
+
+fn calibration_document() -> Value {
+    let items: Vec<Value> = (0..60)
+        .map(|i| {
+            json!({"id": i, "node_id": format!("IC_{i:020}"), "body": lines("calibration", 2),
+                   "user": {"login": "calibration", "id": i, "type": "User"},
+                   "created_at": "2026-01-01T00:00:00Z", "reactions": {"total_count": 0}})
+        })
+        .collect();
+    json!({"action": "created", "items": items})
+}
+
+fn calibration_rows(rows: &mut Vec<Row>) {
+    let receiver = Receiver::start(Duration::ZERO);
+    let client_runtime = runtime(4);
+    let round_trip = client_runtime.block_on(async {
+        let mut client = Client::connect(receiver.addr, fixture::ALICE_TOKEN).await;
+        measure_rest(&mut client, "/hook").await
+    });
+    client_runtime.shutdown_background();
+    receiver.runtime.shutdown_background();
+    let round_trip = round_trip.map(|s| micros(percentile(&s, 0.5)));
+    rows.push(
+        Row::new(
+            Scale::RoundTrip.measure(),
+            round_trip.as_ref().ok().copied(),
+            "µs",
+            Goal::Report,
+        )
+        .note(round_trip.err().unwrap_or_else(|| {
+            "GET to an empty hyper service over loopback; scales the REST, GraphQL and mixed rows"
+                .to_owned()
+        })),
+    );
+    let document = calibration_document();
+    let size = serde_json::to_vec(&document).map_or(0, |b| b.len());
+    let mut times: Vec<Duration> = (0..CALIBRATION_ROUNDS)
+        .map(|_| {
+            let started = Instant::now();
+            for _ in 0..CALIBRATION_ITERATIONS {
+                let bytes = serde_json::to_vec(std::hint::black_box(&document))
+                    .unwrap_or_else(|e| fail("encode the calibration document", e));
+                let parsed: Value = serde_json::from_slice(&bytes)
+                    .unwrap_or_else(|e| fail("decode the calibration document", e));
+                std::hint::black_box(parsed);
+            }
+            started.elapsed()
+        })
+        .collect();
+    times.sort();
+    let per = micros(percentile(&times, 0.5)) / float(CALIBRATION_ITERATIONS);
+    rows.push(
+        Row::new(Scale::Compute.measure(), Some(per), "µs", Goal::Report).note(format!(
+            "encode and decode a {size} B document, median of {CALIBRATION_ROUNDS} rounds; \
+             scales the start and enqueue rows"
+        )),
+    );
 }
 
 fn in_process(dir: &Path, rows: &mut Vec<Row>) {
@@ -964,7 +1030,8 @@ fn in_process(dir: &Path, rows: &mut Vec<Row>) {
         (errors == 0).then_some(rps),
         "req/s",
         Goal::Above(5000.0),
-    );
+    )
+    .scale(Scale::RoundTrip);
     rows.push(if errors == 0 {
         row
     } else {
@@ -990,6 +1057,7 @@ fn in_process(dir: &Path, rows: &mut Vec<Row>) {
             "µs",
             Goal::Below(20.0),
         )
+        .scale(Scale::Compute)
         .note(format!(
             "median of {ENQUEUE_ROUNDS} rounds, each after a drain"
         )),
@@ -1693,6 +1761,7 @@ fn container_rows(dir: &Path, rows: &mut Vec<Row>) {
         eprintln!("{measure}: runs {times:?} ms");
         rows.push(
             Row::new(measure, median, "ms", Goal::Below(200.0))
+                .scale(Scale::Compute)
                 .note(error.unwrap_or_else(|| format!("median of {START_RUNS}"))),
         );
     }
@@ -1755,12 +1824,13 @@ fn main() -> ExitCode {
         return memory_rows_child(load, Path::new(file));
     }
     if std::env::args().any(|a| a == "--gate") {
-        let baseline = std::env::var_os("HUBDOUBLE_BENCH_BASELINE").map(PathBuf::from);
-        return gate::run(target, &out, baseline.as_deref());
+        let rounds = std::env::var_os("HUBDOUBLE_BENCH_ROUNDS").map(PathBuf::from);
+        return gate::run(target, rounds.as_deref());
     }
     std::fs::create_dir_all(TMP).unwrap_or_else(|e| fail("make the temporary directory", e));
     let dir = TempDir::new_in(TMP).unwrap_or_else(|e| fail("make a temporary directory", e));
     let mut rows = Vec::new();
+    calibration_rows(&mut rows);
     if std::env::var("HUBDOUBLE_BENCH_DOCKER").as_deref() == Ok("0") {
         eprintln!("bench:targets: HUBDOUBLE_BENCH_DOCKER=0, the container rows are skipped");
     } else {

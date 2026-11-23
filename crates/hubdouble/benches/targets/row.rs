@@ -19,11 +19,43 @@ pub(crate) enum Goal {
     Report,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scale {
+    RoundTrip,
+    Compute,
+}
+
+impl Scale {
+    pub(crate) const ALL: [Scale; 2] = [Scale::RoundTrip, Scale::Compute];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Scale::RoundTrip => "round_trip",
+            Scale::Compute => "compute",
+        }
+    }
+
+    pub(crate) fn measure(self) -> &'static str {
+        match self {
+            Scale::RoundTrip => "Runner calibration: loopback round trip p50",
+            Scale::Compute => "Runner calibration: JSON round trip of 10 KB",
+        }
+    }
+
+    pub(crate) fn reference(self) -> f64 {
+        match self {
+            Scale::RoundTrip => 30.0,
+            Scale::Compute => 60.0,
+        }
+    }
+}
+
 pub(crate) struct Row {
     pub(crate) measure: String,
     pub(crate) value: Option<f64>,
     pub(crate) unit: &'static str,
     pub(crate) goal: Goal,
+    pub(crate) scale: Option<Scale>,
     pub(crate) note: String,
 }
 
@@ -39,6 +71,7 @@ impl Row {
             value,
             unit,
             goal,
+            scale: None,
             note: String::new(),
         }
     }
@@ -48,8 +81,17 @@ impl Row {
         self
     }
 
+    pub(crate) fn scale(mut self, scale: Scale) -> Row {
+        self.scale = Some(scale);
+        self
+    }
+
     pub(crate) fn met(&self) -> bool {
-        match (self.goal, self.value) {
+        self.met_by(self.value)
+    }
+
+    pub(crate) fn met_by(&self, value: Option<f64>) -> bool {
+        match (self.goal, value) {
             (Goal::Report, _) => true,
             (_, None) => false,
             (Goal::Below(t), Some(v)) => v < t,
@@ -72,7 +114,8 @@ impl Row {
             Goal::Report => ("report", None),
         };
         json!({"measure": self.measure, "value": self.value, "unit": self.unit,
-               "goal": goal, "target": target, "met": self.met(), "note": self.note})
+               "goal": goal, "target": target, "met": self.met(), "note": self.note,
+               "scale": self.scale.map(Scale::name)})
     }
 
     pub(crate) fn from_json(v: &Value) -> Option<Row> {
@@ -83,7 +126,8 @@ impl Row {
             ("report", _) => Goal::Report,
             _ => return None,
         };
-        let row = Row::new(v["measure"].as_str()?, v["value"].as_f64(), unit, goal);
+        let mut row = Row::new(v["measure"].as_str()?, v["value"].as_f64(), unit, goal);
+        row.scale = Scale::ALL.into_iter().find(|s| v["scale"] == s.name());
         Some(row.note(v["note"].as_str().unwrap_or_default()))
     }
 }

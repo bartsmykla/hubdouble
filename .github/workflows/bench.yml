@@ -15,6 +15,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   BASE_REF: ${{ github.event_name == 'push' && github.event.before || 'origin/main' }}
+  ROUNDS: 5
 
 jobs:
   bench:
@@ -29,22 +30,61 @@ jobs:
         with:
           version: 2026.11.12
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: benchmarks on the base commit
+      - name: the runner, the base and the head
         run: |
-          echo "HEAD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          git checkout --detach "$BASE_REF"
-          rm -rf target/criterion target/bench-targets.json
-          cargo bench --workspace --exclude hubdouble --bench '*' --locked -- --save-baseline main
-          cargo bench --locked -p hubdouble --bench targets || echo "the base misses some targets"
-          if [ ! -f target/bench-targets.json ]; then
-            echo "::error::the targets bench on the base wrote no report"
-            exit 1
-          fi
-          mv target/bench-targets.json "$RUNNER_TEMP/main-targets.json"
-      - name: benchmarks on the head and the gate against the base
+          lscpu | grep -E '^(Model name|CPU\(s\)|Hypervisor vendor):'
+          {
+            echo "HEAD_SHA=$(git rev-parse HEAD)"
+            echo "BASE_SHA=$(git rev-parse "$BASE_REF")"
+            echo "CRITERION_HOME=$GITHUB_WORKSPACE/target/criterion"
+          } >> "$GITHUB_ENV"
+          rm -rf target/criterion
+      - name: build the benchmarks and the image of the base and the head
         run: |
-          git checkout --detach "$HEAD_SHA"
+          for side in base head; do
+            if [ "$side" = base ]; then sha=$BASE_SHA; else sha=$HEAD_SHA; fi
+            git checkout -q --detach "$sha"
+            mkdir -p "$RUNNER_TEMP/$side"
+            cargo bench --workspace --bench '*' --locked --no-run --message-format=json \
+              | jq -r 'select(.reason == "compiler-artifact" and .executable != null
+                        and (.target.kind | index("bench"))) | "\(.target.name) \(.executable)"' \
+              | while read -r name exe; do cp "$exe" "$RUNNER_TEMP/$side/$name"; done
+            test -x "$RUNNER_TEMP/$side/targets"
+            docker build -q -t "hubdouble:bench-$side" .
+          done
+      - name: criterion benchmarks, each base binary right before its head binary
+        run: |
           status=0
-          cargo bench --workspace --bench '*' --locked --no-fail-fast -- --baseline-lenient main || status=1
-          HUBDOUBLE_BENCH_BASELINE="$RUNNER_TEMP/main-targets.json" mise run bench:gate || status=1
+          for exe in "$RUNNER_TEMP"/head/*; do
+            name=$(basename "$exe")
+            [ "$name" = targets ] && continue
+            if [ -x "$RUNNER_TEMP/base/$name" ]; then
+              "$RUNNER_TEMP/base/$name" --bench --save-baseline main
+            fi
+            "$exe" --bench --baseline-lenient main || status=1
+          done
           exit "$status"
+      - name: plan section 9 targets, base and head rounds interleaved
+        run: |
+          dir="$RUNNER_TEMP/rounds"
+          mkdir -p "$dir"
+          for round in $(seq 1 "$ROUNDS"); do
+            order="base head"
+            if [ $((round % 2)) -eq 0 ]; then order="head base"; fi
+            for side in $order; do
+              if [ "$side" = base ]; then sha=$BASE_SHA; else sha=$HEAD_SHA; fi
+              git checkout -q --detach "$sha"
+              echo "::group::round $round, $side"
+              HUBDOUBLE_BENCH_IMAGE="hubdouble:bench-$side" \
+                HUBDOUBLE_BENCH_OUT="$dir/$side-$round.json" \
+                "$RUNNER_TEMP/$side/targets" || true
+              echo "::endgroup::"
+              if [ ! -f "$dir/$side-$round.json" ]; then
+                echo "::error::round $round of the $side wrote no report"
+                exit 1
+              fi
+            done
+          done
+          git checkout -q --detach "$HEAD_SHA"
+      - name: the gate against the base and the targets
+        run: HUBDOUBLE_BENCH_ROUNDS="$RUNNER_TEMP/rounds" "$RUNNER_TEMP/head/targets" --gate
