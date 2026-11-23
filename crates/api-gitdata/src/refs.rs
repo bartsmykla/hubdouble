@@ -47,6 +47,14 @@ fn render_ref(ctx: &Ctx<'_>, links: &Links, r: &Ref) -> Result<GitRef, ApiError>
     })
 }
 
+pub(crate) fn writable_ref(name: &str, operation: &str) -> Result<(), ApiError> {
+    if name.starts_with("refs/pull/") {
+        return Err(ApiError::unprocessable("Reference update failed")
+            .with_docs(format!("{DOCS}#{operation}")));
+    }
+    Ok(())
+}
+
 fn full_ref(name: &str) -> String {
     format!("refs/{name}")
 }
@@ -94,6 +102,7 @@ pub(crate) fn create_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             "Reference name must be fully qualified and contain at least two slashes",
         ));
     }
+    writable_ref(&body.name, "create-a-reference")?;
     let sha = ref_target(ctx, &body.sha)?;
     let repo = ctx.repo()?.id;
     if exact_ref(ctx, &body.name).is_some() {
@@ -116,6 +125,7 @@ struct UpdateRef {
 
 pub(crate) fn update_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let name = full_ref(ctx.param("ref")?);
+    writable_ref(&name, "update-a-reference")?;
     let current =
         exact_ref(ctx, &name).ok_or_else(|| ApiError::unprocessable("Reference does not exist"))?;
     let body: UpdateRef = ctx.body()?;
@@ -267,6 +277,7 @@ impl Trees<'_> {
 
 pub(crate) fn delete_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let name = full_ref(ctx.param("ref")?);
+    writable_ref(&name, "delete-a-reference")?;
     let current =
         exact_ref(ctx, &name).ok_or_else(|| ApiError::unprocessable("Reference does not exist"))?;
     let repo = ctx.repo()?.id;

@@ -613,6 +613,7 @@ pub(crate) fn update_refs(m: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, G
                 u.name
             )));
         }
+        crate::refs::writable_ref(&u.name, "update-a-reference")?;
         let after = optional_oid(&u.after_oid)?;
         let before = match &u.before_oid {
             Some(b) => optional_oid(b)?,

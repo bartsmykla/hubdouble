@@ -941,3 +941,73 @@ async fn restoring_a_deleted_head_branch_records_it_on_open_and_closed_pull_requ
         );
     }
 }
+
+#[tokio::test]
+async fn writes_to_pull_request_refs_are_refused_on_every_ref_path() {
+    // Given an open pull request with its head and merge refs
+    let server = server(&[pull_request("feature", "main")]).await;
+    let client = alice(&server);
+    let main = tip(&server, "main").to_string();
+    let (head, merge) = (
+        ref_target(&client, HEAD_REF).await,
+        ref_target(&client, MERGE_REF).await,
+    );
+    // When a client creates, moves or deletes a ref under refs/pull through REST
+    let writes = [
+        (
+            Method::POST,
+            "repos/acme/public/git/refs",
+            json!({"ref": "refs/pull/2/head", "sha": main}),
+            "create-a-reference",
+        ),
+        (
+            Method::PATCH,
+            "repos/acme/public/git/refs/pull/1/head",
+            json!({"sha": main, "force": true}),
+            "update-a-reference",
+        ),
+        (
+            Method::DELETE,
+            "repos/acme/public/git/refs/pull/1/merge",
+            json!({}),
+            "delete-a-reference",
+        ),
+    ];
+    for (method, path, body, operation) in writes {
+        let answer = client.call_json(method.clone(), path, &body).await;
+        // Then GitHub's ref update refusal answers, with no field errors and the operation's docs
+        assert_eq!(
+            answer.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{method} {path}: {}",
+            answer.json()
+        );
+        let refusal = answer.json();
+        assert_eq!(refusal.get("errors"), None, "{method} {path}");
+        assert_eq!(
+            refusal["documentation_url"],
+            format!("https://docs.github.com/rest/git/refs#{operation}"),
+            "{method} {path}"
+        );
+    }
+    // When a client moves or deletes one through GraphQL updateRefs
+    let repository = client.get(PULL).await.json()["base"]["repo"]["node_id"].clone();
+    for after in [main.clone(), ObjectId::NULL.to_string()] {
+        let answer = Graphql::new(client.clone())
+            .query(
+                "mutation($input: UpdateRefsInput!) {updateRefs(input: $input) {clientMutationId}}",
+                &json!({"input": {"repositoryId": repository, "refUpdates": [
+                    {"name": "refs/pull/1/head", "afterOid": after, "force": true}
+                ]}}),
+            )
+            .await
+            .json();
+        // Then it is refused as unprocessable
+        assert_eq!(answer["errors"][0]["type"], "UNPROCESSABLE", "{answer}");
+    }
+    // And every pull request ref is as it was
+    assert_eq!(ref_target(&client, HEAD_REF).await, head);
+    assert_eq!(ref_target(&client, MERGE_REF).await, merge);
+    let other = client.get("repos/acme/public/git/ref/pull/2/head").await;
+    assert_eq!(other.status, StatusCode::NOT_FOUND);
+}
