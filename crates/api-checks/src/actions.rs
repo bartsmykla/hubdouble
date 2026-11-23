@@ -10,6 +10,7 @@ use hubdouble_store::{CheckRuns, CheckSuites, TxMut};
 use uuid::Uuid;
 
 use crate::events::{self, To};
+use crate::pushes;
 use crate::view::View;
 
 /// The ID of the GitHub Actions App, which owns the check suite of every workflow run and the
@@ -126,8 +127,6 @@ pub struct Suite {
     pub repo_id: i64,
     pub head_branch: Option<String>,
     pub head_sha: String,
-    pub before: Option<String>,
-    pub after: Option<String>,
     pub created_at: Timestamp,
 }
 
@@ -138,6 +137,7 @@ pub struct Suite {
 ///
 /// Returns a store error when the suite ID is taken.
 pub fn open_suite(tx: &mut TxMut<'_>, suite: Suite) -> Result<(), ApiError> {
+    let (before, after) = pushes::of_commit(tx, suite.repo_id, &suite.head_sha);
     tx.table_mut::<CheckSuites>().insert(CheckSuite {
         id: suite.id,
         node_id: node_id::entity(node_id::CHECK_SUITE, suite.id),
@@ -145,8 +145,8 @@ pub fn open_suite(tx: &mut TxMut<'_>, suite: Suite) -> Result<(), ApiError> {
         app_id: APP_ID,
         head_branch: suite.head_branch,
         head_sha: suite.head_sha,
-        before: suite.before,
-        after: suite.after,
+        before,
+        after,
         status: RunStatus::Queued,
         conclusion: None,
         rerequestable: true,

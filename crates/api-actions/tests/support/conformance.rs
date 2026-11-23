@@ -19,6 +19,7 @@ pub(super) const LIMITED: &str = "ghs_actions_limited";
 
 pub(super) async fn server(auto_complete: &str) -> TestServer {
     let mut builder = TestServer::builder()
+        .register(hubdouble_api_checks::register)
         .register(hubdouble_api_actions::register)
         .entry(json!({
             "kind": "repository", "id": RUNTIME_ID, "owner": "acme", "name": "runtime",

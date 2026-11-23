@@ -9,6 +9,7 @@ pub mod actions;
 pub use runs::{AnnotationInput, annotation};
 mod events;
 mod graphql;
+mod pushes;
 mod runs;
 mod seed;
 mod statuses;
@@ -66,6 +67,7 @@ pub fn register(r: &mut Registrar<'_>) {
         statuses::combined,
     );
     graphql::register(r.gql);
+    r.store.register_table::<pushes::FirstPushes>();
     r.git.on_ref_update(suites::pushed);
     seed::register(r.admin);
 }

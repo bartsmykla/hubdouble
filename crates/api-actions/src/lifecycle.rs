@@ -16,7 +16,6 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::configuration::Settings;
-use crate::pushes;
 use crate::runs::{
     Attempt, Attempts, JobKey, JobKeys, Reusable, RunContext, RunContexts, RunNumber, RunNumbers,
 };
@@ -87,12 +86,6 @@ pub(crate) fn create(
         .values()
         .find_map(|job| reusable(tx, git, repo, &run.head_sha, job.uses.as_deref()?));
     let environment = info.definition.jobs.values().find_map(environment);
-    let (before, after) = pushes::last(
-        tx,
-        repo.id,
-        info.git_ref.strip_prefix("refs/heads/"),
-        &run.head_sha,
-    );
     checks::open_suite(
         tx,
         checks::Suite {
@@ -100,8 +93,6 @@ pub(crate) fn create(
             repo_id: repo.id,
             head_branch: run.head_branch.clone(),
             head_sha: run.head_sha.clone(),
-            before,
-            after,
             created_at: now,
         },
     )?;

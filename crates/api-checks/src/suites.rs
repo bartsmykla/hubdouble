@@ -11,11 +11,10 @@ use hubdouble_store::{Apps, CheckRuns, CheckSuites, Installations, Repos, Tx, Tx
 use serde_json::json;
 
 use crate::events::{self, To};
+use crate::pushes;
 use crate::runs::app_actor;
 use crate::view::{self, View, latest, no_commit};
 use crate::{invalid, page_object};
-
-const ZERO: &str = "0000000000000000000000000000000000000000";
 
 const PRIORITY: [Conclusion; 9] = [
     Conclusion::ActionRequired,
@@ -101,7 +100,8 @@ pub fn for_run(
         return Ok(id);
     }
     let branch = branch_at(tx, git, repo, sha);
-    Ok(insert(tx, (repo.id, app), (branch, sha), (None, None), now)?.id)
+    let pushed = pushes::of_commit(tx, repo.id, sha);
+    Ok(insert(tx, (repo.id, app), (branch, sha), pushed, now)?.id)
 }
 
 /// Sets the suite's status and conclusion from its latest runs and emits
@@ -154,6 +154,7 @@ pub fn reset(tx: &mut TxMut<'_>, suite: i64, now: Timestamp) -> Result<Arc<Check
 /// GitHub makes a suite for every App with `checks: write` on the repository when a branch is
 /// pushed, and asks that App alone to run its checks.
 pub fn pushed(tx: &mut TxMut<'_>, git: &Git, change: &RefChange) -> Result<(), ApiError> {
+    pushes::record(tx, change)?;
     let (Some(branch), Some(new)) = (change.name.strip_prefix("refs/heads/"), change.new) else {
         return Ok(());
     };
@@ -177,15 +178,13 @@ pub fn pushed(tx: &mut TxMut<'_>, git: &Git, change: &RefChange) -> Result<(), A
         .filter(|&app| newest(tx, repo.id, app, &sha).is_none())
         .collect();
     let now = git.now();
-    let before = change
-        .old
-        .map_or_else(|| ZERO.to_owned(), |old| old.to_string());
+    let pushed = pushes::of_commit(tx, repo.id, &sha);
     for app in asked {
         let suite = insert(
             tx,
             (repo.id, app),
             (Some(branch.to_owned()), &sha),
-            (Some(before.clone()), Some(sha.clone())),
+            pushed.clone(),
             now,
         )?;
         events::check_suite(

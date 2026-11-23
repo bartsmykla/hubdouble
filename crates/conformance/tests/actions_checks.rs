@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use http::{Method, StatusCode};
 use hubdouble_admin::Registrar;
-use hubdouble_git::{CommitNode, EntryMode, FileChange, Signature};
+use hubdouble_git::{Commit, CommitNode, EntryMode, FileChange, ObjectData, Signature};
 use hubdouble_model::{
     Access, ApiError, Issue, IssueState, Pull, PullRef, Repo, Timestamp, Token, TokenKind, node_id,
 };
@@ -161,6 +161,69 @@ fn push_feature(server: &TestServer) -> (String, String) {
             Ok::<_, ApiError>((old.to_string(), new.to_string()))
         })
         .unwrap()
+}
+
+fn tag_new_commit(server: &TestServer, tag: &str) -> String {
+    let services = server.server.services();
+    services
+        .store
+        .update(|tx| {
+            let git = &services.git;
+            let parent = git.resolve_ref(tx, PUBLIC_REPO_ID, "refs/heads/feature")?;
+            let ObjectData::Commit(commit) = git.object(tx, PUBLIC_REPO_ID, parent)?.data else {
+                return Err(ApiError::not_found());
+            };
+            let head = git.write_commit(
+                tx,
+                PUBLIC_REPO_ID,
+                &Commit {
+                    tree: commit.tree,
+                    parents: vec![parent],
+                    author: Signature::seed(),
+                    committer: Signature::seed(),
+                    message: "Release".to_owned(),
+                    gpg_signature: None,
+                },
+            )?;
+            git.update_ref(tx, PUBLIC_REPO_ID, ALICE_ID, tag, None, Some(head), false)?;
+            Ok(head.to_string())
+        })
+        .unwrap()
+}
+
+fn move_branch(server: &TestServer, branch: &str, sha: &str) {
+    let services = server.server.services();
+    services
+        .store
+        .update(|tx| {
+            let git = &services.git;
+            let name = format!("refs/heads/{branch}");
+            let old = git.resolve_ref(tx, PUBLIC_REPO_ID, &name)?;
+            let new = sha.parse().map_err(|_| ApiError::not_found())?;
+            git.update_ref(
+                tx,
+                PUBLIC_REPO_ID,
+                ALICE_ID,
+                &name,
+                Some(old),
+                Some(new),
+                true,
+            )?;
+            Ok::<_, ApiError>(())
+        })
+        .unwrap();
+}
+
+async fn suite_of_run(client: &GoGithub, sha: &str, run_id: i64) -> Value {
+    let suite = run(client, run_id).await["check_suite_id"].clone();
+    let path = format!("{REPO}/commits/{sha}/check-suites?app_id={ACTIONS_APP_ID}&per_page=100");
+    ok(&client.get(&path).await, StatusCode::OK)["check_suites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|listed| listed["id"] == suite)
+        .unwrap()
+        .clone()
 }
 
 fn open_pull_request(server: &TestServer, sha: &str) -> i64 {
@@ -464,6 +527,47 @@ async fn check_runs_for_a_ref_count_attempts_as_github_filters_them() {
         (json!("queued"), Value::Null)
     );
     assert_eq!(suite["latest_check_runs_count"], 4);
+}
+
+#[tokio::test]
+async fn every_suite_on_a_head_that_a_new_tag_brought_in_has_zeros_as_before() {
+    // Given a commit that a new tag brought in, and the feature branch moved to it later, as
+    // every suite on goreleaser/goreleaser commit a6edafa, tag v2.20.3, shows
+    let server = start("none").await;
+    let client = app(&server);
+    let head = tag_new_commit(&server, "refs/tags/v9.9.9");
+    let on_tag = dispatch(&client, "v9.9.9").await;
+    move_branch(&server, "feature", &head);
+    let on_branch = dispatch(&client, "feature").await;
+
+    for id in [on_tag, on_branch] {
+        // When the suite of each run is read
+        let suite = suite_of_run(&client, &head, id).await;
+
+        // Then it has zeros as before and the head as after
+        assert_eq!(suite["before"], "0000000000000000000000000000000000000000");
+        assert_eq!(suite["after"], head);
+    }
+}
+
+#[tokio::test]
+async fn a_suite_takes_before_from_the_first_push_of_its_head_after_that_branch_moved() {
+    // Given a head first pushed onto feature, feature moved on, and main pushed to the head
+    // later, as the suites on cli/cli commit 233b470 made days after its push show
+    let server = start("none").await;
+    let client = app(&server);
+    let (before, head) = push_feature(&server);
+    push_feature(&server);
+    move_branch(&server, "main", &head);
+
+    // When a run on main opens its suite
+    let id = dispatch(&client, "main").await;
+    let suite = suite_of_run(&client, &head, id).await;
+
+    // Then the suite has the before and after of the head's first push
+    assert_eq!(suite["head_branch"], "main");
+    assert_eq!(suite["before"], before);
+    assert_eq!(suite["after"], head);
 }
 
 #[tokio::test]

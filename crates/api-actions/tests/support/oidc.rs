@@ -164,6 +164,7 @@ fn assert_admin_claims(claims: &ExtraClaims, id: i64, job: i64, sha: &str, pin: 
 #[tokio::test]
 async fn generated_oidc_key_survives_reset() {
     let server = TestServer::builder()
+        .register(hubdouble_api_checks::register)
         .register(hubdouble_api_actions::register)
         .start()
         .await;
