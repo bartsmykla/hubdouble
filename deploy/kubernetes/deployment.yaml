@@ -33,7 +33,7 @@ spec:
             - name: HUBDOUBLE_WEB_URL
               value: https://github.com
             - name: HUBDOUBLE_SEED
-              value: /seed/client-v5.yaml
+              value: /seed/client.yaml
           envFrom:
             - secretRef:
                 name: hubdouble-secrets

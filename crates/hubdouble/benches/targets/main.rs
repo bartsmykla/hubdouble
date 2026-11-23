@@ -1572,8 +1572,8 @@ fn container_rows(dir: &Path, rows: &mut Vec<Row>) {
             for measure in [
                 "Image size",
                 "Start to ready, fixture seed",
-                "Start to ready, client v5 seed",
-                "Idle RSS, client v5 seed",
+                "Start to ready, client seed",
+                "Idle RSS, client seed",
             ] {
                 rows.push(Row::new(measure, None, "", Goal::Below(0.0)).note(e.clone()));
             }
@@ -1594,7 +1594,7 @@ fn container_rows(dir: &Path, rows: &mut Vec<Row>) {
     )
     .unwrap_or_else(|e| fail("write the seed", e));
     let examples = format!("{ROOT}/examples");
-    let v5_env = [
+    let client_env = [
         ("HUBDOUBLE_APP_PUBLIC_KEY", fixture::APP_PUBLIC_KEY),
         ("HUBDOUBLE_APP_WEBHOOK_URL", "http://127.0.0.1:9/webhook"),
         ("HUBDOUBLE_APP_WEBHOOK_SECRET", "bench-secret"),
@@ -1610,10 +1610,10 @@ fn container_rows(dir: &Path, rows: &mut Vec<Row>) {
             rss: false,
         },
         StartCase {
-            measure: "Start to ready, client v5 seed",
+            measure: "Start to ready, client seed",
             dir: Path::new(&examples),
-            seed: "client-v5.yaml",
-            env: &v5_env,
+            seed: "client.yaml",
+            env: &client_env,
             rss: true,
         },
     ];
@@ -1651,7 +1651,7 @@ fn container_rows(dir: &Path, rows: &mut Vec<Row>) {
     };
     rows.push(
         Row::new(
-            "Idle RSS, client v5 seed",
+            "Idle RSS, client seed",
             value,
             "MB",
             Goal::Below(IDLE_RSS_MB),

@@ -510,4 +510,4 @@ kubectl apply -f /path/to/your/secret.yaml
 kubectl apply -f deploy/kubernetes/configmap.yaml -f deploy/kubernetes/deployment.yaml -f deploy/kubernetes/service.yaml
 ```
 
-Keep the [ConfigMap](../deploy/kubernetes/configmap.yaml) in sync with [the example seed](../examples/client-v5.yaml).
+Keep the [ConfigMap](../deploy/kubernetes/configmap.yaml) in sync with [the example seed](../examples/client.yaml).

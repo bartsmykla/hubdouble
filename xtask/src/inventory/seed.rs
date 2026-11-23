@@ -32,7 +32,7 @@ pub(super) fn check(
             .ok_or_else(|| format!("{path}: missing version constant {name}"))?;
         expected.insert(field, rename(&value, names));
     }
-    let seed = std::fs::read_to_string(root.join("examples/client-v5.yaml"))?;
+    let seed = std::fs::read_to_string(root.join("examples/client.yaml"))?;
     let entries: Vec<Value> = serde_saphyr::from_str(&seed)?;
     let repo = entries
         .iter()

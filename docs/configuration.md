@@ -14,9 +14,9 @@ Set the server variables before you start `hubdouble serve`. A server variable t
 
 Use an `http://` or `https://` URL for the base, web, and issuer URLs. The server removes trailing slashes. Use a separate admin token if other processes can access the server. For a loopback-only Docker port, follow the [Docker quick start](../README.md#docker-quick-start).
 
-## Client v5 seed
+## Client seed
 
-The [example seed](../examples/client-v5.yaml) reads these values from the environment at startup. They have no server defaults. If a value is absent or empty, this seed fails to load.
+The [example seed](../examples/client.yaml) reads these values from the environment at startup. They have no server defaults. If a value is absent or empty, this seed fails to load.
 
 | Variable | Effect |
 | --- | --- |

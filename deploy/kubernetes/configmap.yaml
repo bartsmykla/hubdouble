@@ -3,7 +3,7 @@ kind: ConfigMap
 metadata:
   name: hubdouble-seed
 data:
-  client-v5.yaml: |
+  client.yaml: |
     - kind: user
       login: local-user
       name: AGENT Local User

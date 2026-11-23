@@ -136,7 +136,7 @@ mod tests {
             ("HUBDOUBLE_ADDR", ":8000"),
             ("HUBDOUBLE_BASE_URL", "http://hubdouble:8000/"),
             ("HUBDOUBLE_WEB_URL", "https://github.com"),
-            ("HUBDOUBLE_SEED", "/seed/client-v5.yaml"),
+            ("HUBDOUBLE_SEED", "/seed/client.yaml"),
             ("HUBDOUBLE_ADMIN_TOKEN", "s3cret"),
             ("HUBDOUBLE_WORKERS", "2"),
             ("HUBDOUBLE_OIDC_ISSUER", ""),
@@ -145,7 +145,7 @@ mod tests {
         assert_eq!(c.base_url, "http://hubdouble:8000");
         assert_eq!(c.web_url, "https://github.com");
         assert_eq!(c.oidc_issuer, "http://hubdouble:8000/_actions");
-        assert_eq!(c.seed, Some(PathBuf::from("/seed/client-v5.yaml")));
+        assert_eq!(c.seed, Some(PathBuf::from("/seed/client.yaml")));
         assert_eq!(c.admin_token, "s3cret");
         assert_eq!(c.workers, Some(2));
     }

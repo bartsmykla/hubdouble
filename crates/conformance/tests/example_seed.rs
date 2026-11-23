@@ -8,7 +8,7 @@ use hubdouble_testkit::{Answer, GoGithub, Graphql, Receiver, TestServer, fixture
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const SEED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/client-v5.yaml");
+const SEED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/client.yaml");
 const CONFIG_MAP: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../deploy/kubernetes/configmap.yaml"
@@ -194,7 +194,7 @@ fn the_kubernetes_config_map_holds_the_example_seed_unchanged() {
     let config_map = std::fs::read_to_string(CONFIG_MAP).unwrap();
 
     // When
-    let (_, block) = config_map.split_once("  client-v5.yaml: |\n").unwrap();
+    let (_, block) = config_map.split_once("  client.yaml: |\n").unwrap();
     let embedded: String = block
         .lines()
         .flat_map(|line| [line.strip_prefix("    ").unwrap_or(line), "\n"])

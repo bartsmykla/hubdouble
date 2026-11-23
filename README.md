@@ -27,7 +27,7 @@ Install mise, Rust, Docker, kind, and kubectl. Start Docker. Allow access to the
 mise run smoke:kind
 ```
 
-The task builds a local image and deploys the [client v5 seed](examples/client-v5.yaml) in a temporary kind cluster. It checks App authentication, the seeded pull request, a review thread, a check run, and a workflow dispatch. It verifies the runner OIDC token with the public key from the JSON Web Key Set (JWKS).
+The task builds a local image and deploys the [client seed](examples/client.yaml) in a temporary kind cluster. It checks App authentication, the seeded pull request, a review thread, a check run, and a workflow dispatch. It verifies the runner OIDC token with the public key from the JSON Web Key Set (JWKS).
 
 The task uses a separate kubeconfig and the `kind-hubdouble-smoke` context. If the cluster already exists, the task stops. The task removes its cluster and image after the checks, even if a check fails.
 
