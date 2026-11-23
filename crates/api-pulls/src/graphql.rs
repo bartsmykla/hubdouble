@@ -63,9 +63,11 @@ pub(crate) fn register(r: &mut Registry) {
         "reviewDecision" => |cx, issue, p| decision(cx, issue, p),
         "url" => |cx, issue, _p| format!("{}/{}/pull/{}", cx.urls.web, render::full_name(cx.tx, issue.repo_id)?, issue.number),
     );
+    r.object::<DraftPayload>("ReopenPullRequestPayload");
     for kind in [
         "MarkPullRequestReadyForReviewPayload",
         "ConvertPullRequestToDraftPayload",
+        "ReopenPullRequestPayload",
     ] {
         r.field(kind, "pullRequest", |_, obj, _| {
             Ok(pull_object(&obj.get::<DraftPayload>()?.issue))
@@ -77,6 +79,7 @@ pub(crate) fn register(r: &mut Registry) {
     r.mutation("convertPullRequestToDraft", |cx, args| {
         draft(cx, args, true)
     });
+    r.mutation("reopenPullRequest", reopen);
 }
 
 fn scalar(value: impl Serialize) -> Resolved {
@@ -346,18 +349,65 @@ struct DraftPayload {
     client_mutation_id: Option<String>,
 }
 
-fn draft(cx: &mut MutCtx<'_>, args: &Args, draft: bool) -> Result<Resolved, GqlError> {
-    let input: DraftInput = required(args, "input")?;
+fn load_pull(cx: &MutCtx<'_>, id: &str) -> Result<Arc<Issue>, GqlError> {
     let Resolved::Object {
         type_name: "PullRequest",
         value,
-    } = cx.load(Target::Node(&input.pull_request_id))?
+    } = cx.load(Target::Node(id))?
     else {
         return Err(ApiError::not_found().into());
     };
-    let mut issue = value
+    Ok(value
         .downcast::<Issue>()
-        .map_err(|_| ApiError::not_found())?;
+        .map_err(|_| ApiError::not_found())?)
+}
+
+fn reopen(cx: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, GqlError> {
+    let input: DraftInput = required(args, "input")?;
+    let mut issue = load_pull(cx, &input.pull_request_id)?;
+    let repo = cx
+        .tx
+        .table::<Repos>()
+        .get(issue.repo_id)
+        .ok_or_else(ApiError::not_found)?
+        .clone();
+    cx.authorize(&WRITE, &repo)?;
+    change::may_change(&cx.tx, cx.actor, &repo, &issue)?;
+    if issue.state == IssueState::Closed {
+        let mut updated = Issue::clone(&issue);
+        crate::reopen(&cx.tx, cx.git, &mut updated).map_err(|e| {
+            if e.status == 422 {
+                GqlError::new(ErrorType::Unprocessable, "Could not open the pull request.")
+            } else {
+                e.into()
+            }
+        })?;
+        updated.updated_at = cx.clock.now();
+        issue = Arc::new(updated);
+        cx.tx
+            .table_mut::<Issues>()
+            .replace(issue.clone())
+            .map_err(ApiError::from)?;
+        crate::reopened(
+            &mut cx.tx,
+            cx.git,
+            &issue,
+            change::sender(cx.actor)?,
+            crate::timeline::via_app(cx.actor),
+        )?;
+    }
+    Ok(Resolved::Object {
+        type_name: "ReopenPullRequestPayload",
+        value: Arc::new(DraftPayload {
+            issue,
+            client_mutation_id: input.client_mutation_id,
+        }),
+    })
+}
+
+fn draft(cx: &mut MutCtx<'_>, args: &Args, draft: bool) -> Result<Resolved, GqlError> {
+    let input: DraftInput = required(args, "input")?;
+    let mut issue = load_pull(cx, &input.pull_request_id)?;
     let repo = cx
         .tx
         .table::<Repos>()

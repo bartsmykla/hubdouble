@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use hubdouble_api_pulls::StateEvents;
 use hubdouble_git::ObjectId;
 use hubdouble_model::{ApiError, Issue, IssueState, StateReason, Timestamp, node_id};
 use hubdouble_rest::{Ctx, Reply};
@@ -164,7 +165,26 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .table::<IssueEvents>()
         .children(issue.id)
         .map(|e| IssueEvent::clone(e))
+        .chain(
+            tx.table::<StateEvents>()
+                .children(issue.id)
+                .map(|e| IssueEvent {
+                    id: e.id,
+                    node_id: e.node_id.clone(),
+                    repo_id: e.repo_id,
+                    issue_id: e.issue_id,
+                    actor_id: e.actor_id,
+                    via_app: e.via_app,
+                    what: if e.reopened {
+                        What::Reopened
+                    } else {
+                        What::Closed(None)
+                    },
+                    created_at: e.created_at,
+                }),
+        )
         .collect();
+    events.sort_by_key(|e| (e.created_at, e.id));
     let extra = synthesized(&issue, &events);
     events.extend(extra);
     events.sort_by_key(|e| e.created_at);

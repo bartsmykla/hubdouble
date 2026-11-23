@@ -6,7 +6,12 @@ mod events;
 mod graphql;
 mod read;
 mod render;
+mod reopen;
 mod state;
+mod timeline;
+
+pub use reopen::{reopen, reopened};
+pub use timeline::{StateEvent, StateEvents};
 
 const fn repo_requirement(grants: &'static [Grant]) -> Requirement {
     Requirement {
@@ -23,6 +28,7 @@ const CONTENTS_WRITE: Requirement = repo_requirement(&[Grant::write("contents")]
 
 pub fn register(r: &mut Registrar<'_>) {
     r.store.register_table::<state::PullBases>();
+    r.store.register_table::<StateEvents>();
     r.rest.handle("pulls/list", READ, read::list);
     r.rest.handle("pulls/create", WRITE, change::create);
     r.rest.handle("pulls/get", GET, read::get);

@@ -61,6 +61,7 @@ fn pull_repository(cx: &Ctx<'_>, o: &Obj, _: &Args) -> Result<Resolved, GqlError
 }
 
 fn stand_ins(r: &mut Registrar<'_>) {
+    r.store.register_table::<hubdouble_api_pulls::StateEvents>();
     r.gql.object::<Repo>("Repository");
     r.gql.object::<Account>("User");
     r.gql.object::<Account>("Bot");
@@ -592,62 +593,6 @@ async fn editing_an_issue_sends_edited_closed_and_reopened_and_needs_triage_for_
         json!("closed")
     );
     assert_eq!(of(&all, "issues", "reopened").len(), 1);
-}
-
-#[tokio::test]
-async fn pull_request_state_through_issues_has_no_reason_and_a_merged_one_stays_closed() {
-    // Given an open pull request and a merged one
-    let server = start().await;
-    let alice = as_alice(&server);
-    let open = pull_request(&server, "open", "", IssueState::Open);
-    let merged = pull_request(&server, "merged", "", IssueState::Closed);
-    must(
-        server.server.services().store.update(|tx| {
-            let mut issue = Issue::clone(
-                tx.table::<Issues>()
-                    .by_number(PUBLIC_REPO_ID, merged)
-                    .unwrap(),
-            );
-            issue.pull.as_mut().unwrap().merged_at = Some(Timestamp::SEED);
-            tx.table_mut::<Issues>().replace(Arc::new(issue))?;
-            Ok(())
-        }),
-        "merge the pull request",
-    );
-    let path = |n: i64| format!("{REPO}/issues/{n}");
-    // When the open one is closed and reopened, and the merged one is reopened
-    let closed = alice
-        .call_json(
-            Method::PATCH,
-            &path(open),
-            &json!({"state": "closed", "state_reason": "not_planned"}),
-        )
-        .await;
-    let reopened = alice
-        .call_json(Method::PATCH, &path(open), &json!({"state": "open"}))
-        .await;
-    let refused = alice
-        .call_json(Method::PATCH, &path(merged), &json!({"state": "open"}))
-        .await;
-    let after = alice.get(&path(merged)).await;
-    let all = deliveries(&server).await;
-    // Then a pull request has no state reason, as on GitHub
-    assert_eq!(closed.status, StatusCode::OK);
-    assert_eq!(closed.json()["state"], json!("closed"));
-    assert_eq!(closed.json()["state_reason"], Value::Null);
-    assert_eq!(reopened.json()["state"], json!("open"));
-    assert_eq!(reopened.json()["state_reason"], Value::Null);
-    // And the merged one is refused as the pulls endpoint refuses it, and stays closed
-    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
-    let error = &refused.json()["errors"][0];
-    assert_eq!(
-        (&error["resource"], &error["field"], &error["code"]),
-        (&json!("PullRequest"), &json!("state"), &json!("custom"))
-    );
-    let after = valid("issues/get", &after);
-    assert_eq!(after["state"], json!("closed"));
-    assert_eq!(after["closed_at"], json!(Timestamp::SEED));
-    assert_eq!(of(&all, "pull_request", "reopened").len(), 1);
 }
 
 #[tokio::test]

@@ -12,7 +12,7 @@ use hubdouble_store::{Accounts, Counters, Issues, Repos, Sequence, Tx, TxMut};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::{events, read, render, state};
+use crate::{events, read, render, reopen, state, timeline};
 
 #[derive(Deserialize)]
 struct Create {
@@ -229,7 +229,21 @@ fn ensure_unique(
     head_name: &str,
     except: Option<i64>,
 ) -> Result<(), ApiError> {
-    if tx.table::<Issues>().in_repo(base).any(|issue| {
+    if open_between(tx, base, base_name, head, head_name, except) {
+        return Err(validation("head", "custom"));
+    }
+    Ok(())
+}
+
+pub(crate) fn open_between(
+    tx: &Tx,
+    base: i64,
+    base_name: &str,
+    head: i64,
+    head_name: &str,
+    except: Option<i64>,
+) -> bool {
+    tx.table::<Issues>().in_repo(base).any(|issue| {
         Some(issue.id) != except
             && issue.state == IssueState::Open
             && issue.pull.as_ref().is_some_and(|p| {
@@ -237,10 +251,7 @@ fn ensure_unique(
                     && p.head.ref_name == head_name
                     && p.base.ref_name == base_name
             })
-    }) {
-        return Err(validation("head", "custom"));
-    }
-    Ok(())
+    })
 }
 
 #[derive(Deserialize)]
@@ -270,6 +281,7 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     may_edit(ctx, &issue)?;
     let before = issue.state;
     let author = sender(ctx.actor())?;
+    let via_app = timeline::via_app(ctx.actor());
     let now = ctx.now();
     let (tx, git) = ctx.tx_mut_and_git()?;
     let changed = edit(tx, git, &mut issue, input, author, now)?;
@@ -294,12 +306,12 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         )?;
     }
     if before != issue.state {
-        let action = if issue.state == IssueState::Closed {
-            "closed"
+        if issue.state == IssueState::Closed {
+            timeline::record(tx, &issue, (author, via_app), false)?;
+            events::emit(tx, git, &issue, author, "closed", json!({}))?;
         } else {
-            "reopened"
-        };
-        events::emit(tx, git, &issue, author, action, json!({}))?;
+            reopen::reopened(tx, git, &issue, author, via_app)?;
+        }
     }
     Reply::json(&render::detail(ctx.git(), ctx.tx(), ctx.urls(), &issue)?)
 }
@@ -312,8 +324,15 @@ fn can_push(tx: &Tx, actor: &Actor, repo: &Repo) -> bool {
 }
 
 fn may_edit(ctx: &Ctx<'_>, issue: &Issue) -> Result<(), ApiError> {
-    let tx = ctx.tx();
-    let actor = ctx.actor();
+    may_change(ctx.tx(), ctx.actor(), ctx.repo()?, issue)
+}
+
+pub(crate) fn may_change(
+    tx: &Tx,
+    actor: &Actor,
+    repo: &Repo,
+    issue: &Issue,
+) -> Result<(), ApiError> {
     if let Actor::User { user, .. } = actor
         && user.id == issue.user_id
     {
@@ -324,7 +343,7 @@ fn may_edit(ctx: &Ctx<'_>, issue: &Issue) -> Result<(), ApiError> {
         .as_ref()
         .and_then(|p| p.head.repo_id)
         .and_then(|id| tx.table::<Repos>().get(id));
-    if can_push(tx, actor, ctx.repo()?) || head.is_some_and(|h| can_push(tx, actor, h)) {
+    if can_push(tx, actor, repo) || head.is_some_and(|h| can_push(tx, actor, h)) {
         Ok(())
     } else {
         Err(ApiError::forbidden(
@@ -342,7 +361,9 @@ fn edit(
     now: Timestamp,
 ) -> Result<Map<String, Value>, ApiError> {
     let mut changes = Map::new();
-    let p = issue.pull.as_mut().ok_or_else(ApiError::not_found)?;
+    if issue.pull.is_none() {
+        return Err(ApiError::not_found());
+    }
     if let Some(title) = input.title.filter(|title| *title != issue.title) {
         if title.trim().is_empty() {
             return Err(validation("title", "missing_field"));
@@ -366,53 +387,41 @@ fn edit(
         .map(|state| IssueState::from_rest(state).ok_or_else(|| validation("state", "invalid")))
         .transpose()?
         .unwrap_or(issue.state);
-    let retarget = input.base.filter(|base| *base != p.base.ref_name);
-    if target == IssueState::Open && (issue.state != target || retarget.is_some()) {
+    if target == IssueState::Open && issue.state == IssueState::Closed {
+        reopen::reopen(tx, git, issue)?;
+    }
+    let p = issue.pull.as_mut().ok_or_else(ApiError::not_found)?;
+    if let Some(name) = input.base.filter(|base| *base != p.base.ref_name) {
+        if target != IssueState::Open {
+            return Err(validation("base", "invalid"));
+        }
         let head_repo = p
             .head
             .repo_id
             .ok_or_else(|| validation("head", "invalid"))?;
-        let name = retarget.as_deref().unwrap_or(&p.base.ref_name);
-        if p.merged_at.is_some() && issue.state != target {
-            return Err(
-                ApiError::unprocessable("Validation Failed").with_error(FieldError {
-                    resource: "PullRequest".into(),
-                    field: "state".into(),
-                    code: "custom".into(),
-                    message: Some(
-                        "state cannot be changed. The pull request cannot be reopened.".into(),
-                    ),
-                    value: None,
-                }),
-            );
-        }
         if p.merged_at.is_some() || (head_repo == issue.repo_id && p.head.ref_name == name) {
             return Err(validation("state", "invalid"));
         }
         ensure_unique(
             tx,
             issue.repo_id,
-            name,
+            &name,
             head_repo,
             &p.head.ref_name,
             Some(issue.id),
         )?;
-        let base = state::branch(git, tx, issue.repo_id, name)
+        let base = state::branch(git, tx, issue.repo_id, &name)
             .map_err(|_| validation("base", "invalid"))?;
         let head = state::branch(git, tx, head_repo, &p.head.ref_name)
             .map_err(|_| validation("head", "invalid"))?;
-        if retarget.is_some() {
-            changes.insert(
-                "base".into(),
-                json!({"ref": {"from": p.base.ref_name}, "sha": {"from": p.base.sha}}),
-            );
-            p.base.ref_name = name.to_owned();
-        }
+        changes.insert(
+            "base".into(),
+            json!({"ref": {"from": p.base.ref_name}, "sha": {"from": p.base.sha}}),
+        );
+        p.base.ref_name = name;
         p.base.sha = base.to_string();
         p.head.sha = head.to_string();
         p.mergeable = Some(git.mergeable(tx, issue.repo_id, base, head)?);
-    } else if retarget.is_some() {
-        return Err(validation("base", "invalid"));
     }
     if let Some(allow) = input.maintainer_can_modify {
         p.maintainer_can_modify = allow;

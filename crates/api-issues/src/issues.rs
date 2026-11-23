@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use hubdouble_git::Git;
 use hubdouble_model::{
-    ApiError, FieldError, Issue, IssueState, Label, Repo, RepoRole, StateReason, Timestamp, node_id,
+    ApiError, Issue, IssueState, Label, Repo, RepoRole, StateReason, Timestamp, node_id,
 };
 use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::{Accounts, Counters, IssueComments, Issues, Labels, Tx, TxMut};
@@ -94,12 +95,21 @@ struct Change<'a> {
 }
 
 impl Change<'_> {
-    fn state(&self, tx: &mut TxMut<'_>, issue: &Issue, to: IssueState) -> Result<(), ApiError> {
+    fn state(
+        &self,
+        tx: &mut TxMut<'_>,
+        git: &Git,
+        issue: &Issue,
+        to: IssueState,
+    ) -> Result<(), ApiError> {
         let (what, action) = match to {
             IssueState::Closed => (What::Closed(issue.state_reason), "closed"),
             IssueState::Open => (What::Reopened, "reopened"),
         };
         let sender = self.who.account.id;
+        if to == IssueState::Open && issue.pull.is_some() {
+            return hubdouble_api_pulls::reopened(tx, git, issue, sender, self.who.via_app);
+        }
         events::record(tx, issue, sender, self.who.via_app, what, self.now)?;
         emit_issue(tx, self.repo, issue, action, sender, Vec::new())
     }
@@ -430,23 +440,6 @@ pub(crate) fn apply_state(
     }
 }
 
-fn refuse_merged_reopen(issue: &Issue, to: Option<IssueState>) -> Result<(), ApiError> {
-    if to == Some(IssueState::Open) && issue.pull.as_ref().is_some_and(|p| p.merged_at.is_some()) {
-        return Err(
-            ApiError::unprocessable("Validation Failed").with_error(FieldError {
-                resource: "PullRequest".to_owned(),
-                field: "state".to_owned(),
-                code: "custom".to_owned(),
-                message: Some(
-                    "state cannot be changed. The pull request cannot be reopened.".to_owned(),
-                ),
-                value: None,
-            }),
-        );
-    }
-    Ok(())
-}
-
 pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let Edit {
         title,
@@ -461,7 +454,7 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let who = who(ctx, &repo)?;
     let urls = ctx.urls().clone();
     let now = ctx.now();
-    let tx = ctx.tx_mut()?;
+    let (tx, git) = ctx.tx_mut_and_git()?;
     let old = issue_by_number(tx, &repo, number)?;
     if !who.can(RepoRole::Triage) && old.user_id != who.account.id {
         return Err(ApiError::forbidden("Must have admin rights to Repository."));
@@ -484,7 +477,9 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         issue.last_edited_at = Some(now);
     }
     let reopened_or_closed = state.filter(|s| *s != old.state);
-    refuse_merged_reopen(&old, reopened_or_closed)?;
+    if reopened_or_closed == Some(IssueState::Open) && issue.pull.is_some() {
+        hubdouble_api_pulls::reopen(tx, git, &mut issue)?;
+    }
     apply_state(&mut issue, reopened_or_closed, reason, who.account.id, now);
     let (added_labels, removed_labels) = match names.filter(|_| pushes) {
         Some(names) => {
@@ -535,7 +530,7 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         now,
     };
     if let Some(to) = reopened_or_closed {
-        change.state(tx, &issue, to)?;
+        change.state(tx, git, &issue, to)?;
     }
     change.labels(tx, &issue, &added_labels, true)?;
     change.labels(tx, &issue, &removed_labels, false)?;
