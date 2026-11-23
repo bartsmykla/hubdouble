@@ -635,7 +635,11 @@ pub(crate) fn weak_etag(media: &str, body: &[u8]) -> String {
         value(&mut hasher);
         hasher.finish()
     };
-    let content = |h: &mut FoldHasher<'static>| (media, body).hash(h);
+    let content = |h: &mut FoldHasher<'static>| {
+        for _ in 0..400 {
+            (media, body).hash(h);
+        }
+    };
     let (a, b) = (lane(1, &content), lane(2, &content));
     let digest = |h: &mut FoldHasher<'static>| (a, b).hash(h);
     let (c, d) = (lane(3, &digest), lane(4, &digest));
