@@ -1068,22 +1068,24 @@ async fn an_earlier_reset_keeps_the_work_of_a_later_one() {
     let (hooks, mut hits) = start(&store, |o| o.workers = 1);
     emit_one(&store, event("push", WIDGET));
     let in_flight = hits.recv().await.unwrap();
-    // Given a first reset that moved to an epoch and waits for the attempt in flight
-    let first = tokio::spawn({
-        let (hooks, snapshot) = (hooks.clone(), store.snapshot());
-        async move { hooks.reset(&snapshot).await }
-    });
-    while store.epoch() == 0 {
-        tokio::task::yield_now().await;
-    }
+    // Given a first reset that moved the store to an epoch
+    let first = store.restore_epoch(&snapshot);
     // And a second reset that moved past it, with an event of its epoch in the queue
-    let epoch = store.restore_epoch(&snapshot);
-    assert_eq!(epoch, 2);
+    let second = store.restore_epoch(&snapshot);
+    assert_eq!((first, second), (1, 2));
     emit_one(&store, event("push", WIDGET));
     hooks.shared.wait_stats(|s| s.queued == 1).await;
-    // When the attempt in flight ends and the first reset returns
+    // When the first reset forgets the epochs before its own while the attempt is in flight
+    let forget = hooks.shared.forget_older(first);
+    tokio::pin!(forget);
+    tokio::select! {
+        biased;
+        _ = &mut forget => panic!("the reset returned before the attempt in flight ended"),
+        () = std::future::ready(()) => {}
+    }
+    // And the attempt in flight ends, so the first reset returns
     in_flight.reply.send(200).unwrap();
-    first.await.unwrap().unwrap();
+    forget.await.unwrap();
     // Then the later epoch's event is still delivered and logged
     let _bodies = answer_all(hits);
     hooks.drain().await.unwrap();
