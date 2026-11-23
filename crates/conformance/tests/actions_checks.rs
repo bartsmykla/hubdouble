@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use http::{Method, StatusCode};
 use hubdouble_admin::Registrar;
-use hubdouble_git::{Commit, CommitNode, EntryMode, FileChange, ObjectData, Signature};
+use hubdouble_git::{
+    Commit, CommitNode, EntryMode, FileChange, ObjectData, ObjectKind, Signature, Tag,
+};
 use hubdouble_model::{
     Access, ApiError, Config, Issue, IssueState, ManualClock, Pull, PullRef, Repo, Timestamp,
     Token, TokenKind, node_id,
@@ -175,6 +177,10 @@ fn push_feature(server: &TestServer) -> (String, String) {
 }
 
 fn tag_new_commit(server: &TestServer, tag: &str) -> String {
+    tag_new_commit_as(server, tag, false)
+}
+
+fn tag_new_commit_as(server: &TestServer, tag: &str, annotated: bool) -> String {
     let services = server.server.services();
     services
         .store
@@ -196,7 +202,23 @@ fn tag_new_commit(server: &TestServer, tag: &str) -> String {
                     gpg_signature: None,
                 },
             )?;
-            git.update_ref(tx, PUBLIC_REPO_ID, ALICE_ID, tag, None, Some(head), false)?;
+            let target = if annotated {
+                git.write_tag(
+                    tx,
+                    PUBLIC_REPO_ID,
+                    &Tag {
+                        target: head,
+                        target_kind: ObjectKind::Commit,
+                        name: tag.trim_start_matches("refs/tags/").to_owned(),
+                        tagger: Some(Signature::seed()),
+                        message: "Release\n".to_owned(),
+                        gpg_signature: None,
+                    },
+                )?
+            } else {
+                head
+            };
+            git.update_ref(tx, PUBLIC_REPO_ID, ALICE_ID, tag, None, Some(target), false)?;
             Ok(head.to_string())
         })
         .unwrap()
@@ -556,6 +578,51 @@ async fn every_suite_on_a_head_that_a_new_tag_brought_in_has_zeros_as_before() {
         assert_eq!(suite["before"], "0000000000000000000000000000000000000000");
         assert_eq!(suite["after"], head);
     }
+}
+
+#[tokio::test]
+async fn a_suite_on_a_commit_an_annotated_tag_brought_in_has_zeros_and_the_commit() {
+    // Given a commit that a new annotated tag object brought in, and the feature branch moved to it later, as goreleaser/goreleaser tag v2.20.3 (tag object 2f30744) and suite 120915285440 show
+    let server = start("none").await;
+    let client = app(&server);
+    let head = tag_new_commit_as(&server, "refs/tags/v9.9.9", true);
+    move_branch(&server, "feature", &head);
+
+    // When a run on the branch opens its suite
+    let id = dispatch(&client, "feature").await;
+    let suite = suite_of_run(&client, &head, id).await;
+
+    // Then the suite has zeros as before and the commit as after
+    assert_eq!(suite["head_sha"], head);
+    assert_eq!(suite["before"], "0000000000000000000000000000000000000000");
+    assert_eq!(suite["after"], head);
+}
+
+#[tokio::test]
+async fn a_ref_outside_branches_and_tags_is_not_the_first_push_of_a_commit() {
+    // Given a new commit that a ref outside refs/heads and refs/tags points at first, and the feature branch moved to it later
+    let server = start("none").await;
+    let client = app(&server);
+    let services = server.server.services();
+    let before = services
+        .store
+        .view(|tx| {
+            Ok(services
+                .git
+                .resolve_ref(tx, PUBLIC_REPO_ID, "refs/heads/feature")?)
+        })
+        .unwrap()
+        .to_string();
+    let head = tag_new_commit(&server, "refs/notes/release");
+    move_branch(&server, "feature", &head);
+
+    // When a run on the branch opens its suite
+    let id = dispatch(&client, "feature").await;
+    let suite = suite_of_run(&client, &head, id).await;
+
+    // Then the suite has the branch move as its push
+    assert_eq!(suite["before"], before);
+    assert_eq!(suite["after"], head);
 }
 
 #[tokio::test]

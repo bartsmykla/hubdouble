@@ -1,4 +1,4 @@
-use hubdouble_git::{ObjectId, RefChange};
+use hubdouble_git::{Git, ObjectId, RefChange};
 use hubdouble_model::ApiError;
 use hubdouble_store::{Entity, Rows, Tx, TxMut};
 
@@ -23,21 +23,25 @@ fn key(repo: i64, sha: &str) -> String {
     format!("{repo}/{sha}")
 }
 
-pub(crate) fn record(tx: &mut TxMut<'_>, change: &RefChange) -> Result<(), ApiError> {
-    let Some(new) = change.new else {
+pub(crate) fn record(tx: &mut TxMut<'_>, git: &Git, change: &RefChange) -> Result<(), ApiError> {
+    if !(change.name.starts_with("refs/heads/") || change.name.starts_with("refs/tags/")) {
+        return Ok(());
+    }
+    let peel = |id: ObjectId| git.peel_to_commit(tx, change.repo_id, id).ok();
+    let Some(new) = change.new.and_then(peel) else {
         return Ok(());
     };
+    let before = change
+        .old
+        .map_or(ObjectId::NULL, |old| peel(old).unwrap_or(old));
     let key = key(change.repo_id, &new.to_string());
     let pushes = tx.table::<FirstPushes>();
     if pushes.by_key(&key).is_some() {
         return Ok(());
     }
     let id = i64::try_from(pushes.len()).unwrap_or(i64::MAX - 1) + 1;
-    tx.table_mut::<FirstPushes>().insert(FirstPush {
-        id,
-        key,
-        before: change.old.unwrap_or(ObjectId::NULL),
-    })?;
+    tx.table_mut::<FirstPushes>()
+        .insert(FirstPush { id, key, before })?;
     Ok(())
 }
 

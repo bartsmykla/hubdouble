@@ -154,7 +154,7 @@ pub fn reset(tx: &mut TxMut<'_>, suite: i64, now: Timestamp) -> Result<Arc<Check
 /// GitHub makes a suite for every App with `checks: write` on the repository when a branch is
 /// pushed, and asks that App alone to run its checks.
 pub fn pushed(tx: &mut TxMut<'_>, git: &Git, change: &RefChange) -> Result<(), ApiError> {
-    pushes::record(tx, change)?;
+    pushes::record(tx, git, change)?;
     let (Some(branch), Some(new)) = (change.name.strip_prefix("refs/heads/"), change.new) else {
         return Ok(());
     };
