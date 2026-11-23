@@ -52,18 +52,22 @@ jobs:
             test -x "$RUNNER_TEMP/$side/targets"
             docker build -q -t "hubdouble:bench-$side" .
           done
-      - name: criterion benchmarks, each base binary right before its head binary
+      - name: criterion benchmarks, base and head rounds interleaved
         run: |
-          status=0
           for exe in "$RUNNER_TEMP"/head/*; do
             name=$(basename "$exe")
             [ "$name" = targets ] && continue
-            if [ -x "$RUNNER_TEMP/base/$name" ]; then
-              "$RUNNER_TEMP/base/$name" --bench --save-baseline main
-            fi
-            "$exe" --bench --baseline-lenient main || status=1
+            for round in $(seq 1 "$ROUNDS"); do
+              order="base head"
+              if [ $((round % 2)) -eq 0 ]; then order="head base"; fi
+              for side in $order; do
+                if [ -x "$RUNNER_TEMP/$side/$name" ]; then
+                  "$RUNNER_TEMP/$side/$name" --bench --warm-up-time 1 --measurement-time 1 \
+                    --save-baseline "$side-$round"
+                fi
+              done
+            done
           done
-          exit "$status"
       - name: plan section 9 targets, base and head rounds interleaved
         run: |
           dir="$RUNNER_TEMP/rounds"

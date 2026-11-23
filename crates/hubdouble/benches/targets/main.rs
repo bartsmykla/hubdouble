@@ -946,7 +946,12 @@ fn calibration_document() -> Value {
     json!({"action": "created", "items": items})
 }
 
-fn calibration_rows(rows: &mut Vec<Row>) {
+struct Calibration {
+    round_trip: Result<f64, String>,
+    compute: f64,
+}
+
+fn calibrate() -> Calibration {
     let receiver = Receiver::start(Duration::ZERO);
     let client_runtime = runtime(4);
     let round_trip = client_runtime.block_on(async {
@@ -955,21 +960,7 @@ fn calibration_rows(rows: &mut Vec<Row>) {
     });
     client_runtime.shutdown_background();
     receiver.runtime.shutdown_background();
-    let round_trip = round_trip.map(|s| micros(percentile(&s, 0.5)));
-    rows.push(
-        Row::new(
-            Scale::RoundTrip.measure(),
-            round_trip.as_ref().ok().copied(),
-            "µs",
-            Goal::Report,
-        )
-        .note(round_trip.err().unwrap_or_else(|| {
-            "GET to an empty hyper service over loopback; scales the REST, GraphQL and mixed rows"
-                .to_owned()
-        })),
-    );
     let document = calibration_document();
-    let size = serde_json::to_vec(&document).map_or(0, |b| b.len());
     let mut times: Vec<Duration> = (0..CALIBRATION_ROUNDS)
         .map(|_| {
             let started = Instant::now();
@@ -984,11 +975,40 @@ fn calibration_rows(rows: &mut Vec<Row>) {
         })
         .collect();
     times.sort();
-    let per = micros(percentile(&times, 0.5)) / float(CALIBRATION_ITERATIONS);
+    Calibration {
+        round_trip: round_trip.map(|s| micros(percentile(&s, 0.5))),
+        compute: micros(percentile(&times, 0.5)) / float(CALIBRATION_ITERATIONS),
+    }
+}
+
+fn calibration_rows(before: Calibration, after: Calibration, rows: &mut Vec<Row>) {
+    let round_trip = before
+        .round_trip
+        .and_then(|a| after.round_trip.map(|b| a.min(b)));
     rows.push(
-        Row::new(Scale::Compute.measure(), Some(per), "µs", Goal::Report).note(format!(
-            "encode and decode a {size} B document, median of {CALIBRATION_ROUNDS} rounds; \
-             scales the start and enqueue rows"
+        Row::new(
+            Scale::RoundTrip.measure(),
+            round_trip.as_ref().ok().copied(),
+            "µs",
+            Goal::Report,
+        )
+        .note(round_trip.err().unwrap_or_else(|| {
+            "GET to an empty hyper service over loopback, the faster of the runs before and after \
+             the rows; scales the REST, GraphQL and mixed rows"
+                .to_owned()
+        })),
+    );
+    let size = serde_json::to_vec(&calibration_document()).map_or(0, |b| b.len());
+    rows.push(
+        Row::new(
+            Scale::Compute.measure(),
+            Some(before.compute.min(after.compute)),
+            "µs",
+            Goal::Report,
+        )
+        .note(format!(
+            "encode and decode a {size} B document, median of {CALIBRATION_ROUNDS} rounds, the \
+             faster of the runs before and after the rows; scales the start and enqueue rows"
         )),
     );
 }
@@ -1830,13 +1850,14 @@ fn main() -> ExitCode {
     std::fs::create_dir_all(TMP).unwrap_or_else(|e| fail("make the temporary directory", e));
     let dir = TempDir::new_in(TMP).unwrap_or_else(|e| fail("make a temporary directory", e));
     let mut rows = Vec::new();
-    calibration_rows(&mut rows);
+    let before = calibrate();
     if std::env::var("HUBDOUBLE_BENCH_DOCKER").as_deref() == Ok("0") {
         eprintln!("bench:targets: HUBDOUBLE_BENCH_DOCKER=0, the container rows are skipped");
     } else {
         container_rows(dir.path(), &mut rows);
     }
     in_process(dir.path(), &mut rows);
+    calibration_rows(before, calibrate(), &mut rows);
     let table = report(&rows);
     let _ = std::io::stdout().lock().write_all(table.as_bytes());
     let json = json!({"rows": rows.iter().map(Row::json).collect::<Vec<_>>()});

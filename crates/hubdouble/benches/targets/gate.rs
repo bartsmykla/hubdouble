@@ -164,24 +164,17 @@ fn relative(rounds: &[Round], out: &mut String) -> usize {
     failed
 }
 
-fn factors(round: &Round) -> BTreeMap<&'static str, Option<f64>> {
-    Scale::ALL
-        .into_iter()
-        .map(|s| {
-            let factor = find(&round.head, s.measure())
-                .and_then(|r| r.value)
-                .filter(|v| *v > 0.0)
-                .map(|v| v / s.reference());
-            (s.name(), factor)
-        })
-        .collect()
+fn factor(round: &Round, scale: Scale) -> Option<f64> {
+    find(&round.head, scale.measure())
+        .and_then(|r| r.value)
+        .filter(|v| *v > 0.0)
+        .map(|v| v / scale.reference())
 }
 
 fn absolute(rounds: &[Round], out: &mut String) -> usize {
     let mut failed = 0;
-    let factors: Vec<_> = rounds.iter().map(factors).collect();
     for scale in Scale::ALL {
-        let seen: Vec<f64> = factors.iter().filter_map(|f| f[scale.name()]).collect();
+        let seen: Vec<f64> = rounds.iter().filter_map(|r| factor(r, scale)).collect();
         let runs: Vec<String> = seen.iter().map(|f| format!("{f:.2}")).collect();
         let _ = writeln!(
             out,
@@ -198,13 +191,13 @@ fn absolute(rounds: &[Round], out: &mut String) -> usize {
         }
         let mut raw = Vec::new();
         let mut judged = Vec::new();
-        for (round, factor) in rounds.iter().zip(&factors) {
+        for round in rounds {
             let Some(value) = find(&round.head, &row.measure).and_then(|r| r.value) else {
                 continue;
             };
             let scaled = match row.scale {
                 None => Some(value),
-                Some(s) => factors_value(factor, s).map(|f| match row.goal {
+                Some(s) => factor(round, s).map(|f| match row.goal {
                     Goal::Above(_) => value * f,
                     _ => value / f,
                 }),
@@ -239,49 +232,66 @@ fn absolute(rounds: &[Round], out: &mut String) -> usize {
     failed
 }
 
-fn factors_value(factors: &BTreeMap<&'static str, Option<f64>>, scale: Scale) -> Option<f64> {
-    factors.get(scale.name()).copied().flatten()
-}
+type Baselines = BTreeMap<String, BTreeMap<(&'static str, u32), f64>>;
 
-fn estimates(dir: &Path, found: &mut Vec<PathBuf>) {
+fn baselines(root: &Path, dir: &Path, found: &mut Baselines) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == "change") {
-                let file = path.join("estimates.json");
-                if file.is_file() {
-                    found.push(file);
-                }
-            } else {
-                estimates(&path, found);
-            }
+    for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+        if !path.is_dir() {
+            continue;
+        }
+        let round = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.split_once('-'))
+            .and_then(|(side, n)| {
+                let side = ["base", "head"].into_iter().find(|s| *s == side)?;
+                Some((side, n.parse::<u32>().ok()?))
+            });
+        let Some(round) = round else {
+            baselines(root, &path, found);
+            continue;
+        };
+        let median = read(&path.join("estimates.json"))
+            .ok()
+            .and_then(|v| v["median"]["point_estimate"].as_f64());
+        let name = dir
+            .strip_prefix(root)
+            .map_or_else(|_| String::new(), |p| p.display().to_string());
+        if let Some(median) = median {
+            found.entry(name).or_default().insert(round, median);
         }
     }
 }
 
 fn criterion(dir: &Path, out: &mut String) -> usize {
-    let mut found = Vec::new();
-    estimates(dir, &mut found);
-    found.sort();
+    let mut found = Baselines::new();
+    baselines(dir, dir, &mut found);
     let mut failed = 0;
-    for file in found {
-        let Ok(value) = read(&file) else { continue };
-        let name = file
-            .parent()
-            .and_then(Path::parent)
-            .and_then(|p| p.strip_prefix(dir).ok())
-            .map_or_else(String::new, |p| p.display().to_string());
-        let mean = &value["mean"];
-        let (Some(point), Some(lower)) = (
-            mean["point_estimate"].as_f64(),
-            mean["confidence_interval"]["lower_bound"].as_f64(),
+    for (name, runs) in found {
+        let pairs: Vec<(f64, f64)> = runs
+            .iter()
+            .filter(|((side, _), _)| *side == "base")
+            .filter_map(|(&(_, n), &old)| Some((old, *runs.get(&("head", n))?)))
+            .collect();
+        if pairs.is_empty() {
+            let _ = writeln!(out, "new      criterion {name}");
+            continue;
+        }
+        let changes = pairs
+            .iter()
+            .filter_map(|&(old, new)| regression(Goal::Below(0.0), old, new))
+            .collect();
+        let (Some(change), Some(old), Some(new)) = (
+            median(changes),
+            median(pairs.iter().map(|p| p.0).collect()),
+            median(pairs.iter().map(|p| p.1).collect()),
         ) else {
             continue;
         };
-        let verdict = if lower > BUDGET {
+        let verdict = if change > BUDGET {
             failed += 1;
             "REGRESS"
         } else {
@@ -289,9 +299,11 @@ fn criterion(dir: &Path, out: &mut String) -> usize {
         };
         let _ = writeln!(
             out,
-            "{verdict:8} criterion {name}: {:+.1} % (lower bound {:+.1} %)",
-            point * 100.0,
-            lower * 100.0
+            "{verdict:8} criterion {name}: {} ns -> {} ns ({:+.1} %, median of {} paired rounds)",
+            number(old),
+            number(new),
+            change * 100.0,
+            pairs.len()
         );
     }
     failed

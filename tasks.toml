@@ -34,7 +34,7 @@ description = "Measure every row of plan section 9 on the release profile on one
 run = "cargo bench --locked -p hubdouble --bench targets"
 
 ["bench:gate"]
-description = "Compare the paired base-N.json and head-N.json rounds in HUBDOUBLE_BENCH_ROUNDS and criterion's main baseline; fails on a regression over 20 % or a missed target"
+description = "Compare the paired base-N.json and head-N.json rounds in HUBDOUBLE_BENCH_ROUNDS and criterion's base-N and head-N baselines; fails on a regression over 20 % or a missed target"
 run = "cargo bench --locked -p hubdouble --bench targets -- --gate"
 
 [gen]
