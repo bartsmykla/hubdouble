@@ -416,14 +416,23 @@ async fn lifecycle_preserves_attempts_and_serves_ranged_job_logs() {
     assert_eq!(first_jobs["jobs"][0]["id"], job);
     assert_eq!(first_jobs["jobs"][1]["conclusion"], "success");
     let latest = valid("list-jobs-for-workflow-run", &client.get(&latest).await);
-    assert_eq!(latest["total_count"], 1);
+    assert_eq!(latest["total_count"], 2);
     assert_eq!(latest["jobs"][0]["name"], "fail");
     assert_ne!(latest["jobs"][0]["id"], job);
+    assert_eq!(latest["jobs"][0]["status"], "queued");
+    assert_carried(&first_jobs["jobs"][1], &latest["jobs"][1], &run);
+    let second_jobs = client
+        .get(&format!("{run_path}/attempts/2/jobs?per_page=100"))
+        .await;
+    assert_eq!(
+        valid("list-jobs-for-workflow-run-attempt", &second_jobs),
+        latest
+    );
     let all = valid(
         "list-jobs-for-workflow-run",
         &client.get(&format!("{run_path}/jobs?filter=all")).await,
     );
-    assert_eq!(all["total_count"], 3);
+    assert_eq!(all["total_count"], 4);
     assert_eq!(
         client
             .call(Method::POST, &format!("{run_path}/cancel"))
@@ -442,6 +451,26 @@ async fn lifecycle_preserves_attempts_and_serves_ranged_job_logs() {
     assert_eq!(final_run["conclusion"], "cancelled");
     drain(&server).await;
     assert_lifecycle_webhooks(&server, &final_run).await;
+}
+
+fn assert_carried(
+    before: &serde_json::Value,
+    carried: &serde_json::Value,
+    run: &serde_json::Value,
+) {
+    assert_ne!(carried["id"], before["id"]);
+    assert_eq!(carried["run_attempt"], run["run_attempt"]);
+    assert_eq!(carried["created_at"], run["run_started_at"]);
+    for field in [
+        "name",
+        "status",
+        "conclusion",
+        "started_at",
+        "completed_at",
+        "steps",
+    ] {
+        assert_eq!(carried[field], before[field], "{field}");
+    }
 }
 
 #[tokio::test]
@@ -487,15 +516,28 @@ async fn rerun_failed_jobs_queues_dependents_without_a_requested_run_event() {
 
     // Then the failed job and every job that needs it, directly or not, are queued again
     let latest = valid("list-jobs-for-workflow-run", &client.get(&latest).await);
-    let names: BTreeSet<_> = latest["jobs"]
+    let states: BTreeSet<_> = latest["jobs"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|job| job["name"].as_str().unwrap().to_owned())
+        .map(|job| {
+            assert_eq!(job["run_attempt"], 2);
+            (
+                job["name"].as_str().unwrap().to_owned(),
+                job["status"].as_str().unwrap().to_owned(),
+            )
+        })
         .collect();
+    let state = |name: &str, status: &str| (name.to_owned(), status.to_owned());
+    // And the job that passed is carried into the new attempt as it finished
     assert_eq!(
-        names,
-        BTreeSet::from(["build", "deploy", "test"].map(str::to_owned))
+        states,
+        BTreeSet::from([
+            state("build", "queued"),
+            state("deploy", "queued"),
+            state("lint", "completed"),
+            state("test", "queued"),
+        ])
     );
     // And only the new jobs' queued events are sent, with no workflow_run requested
     drain(&server).await;

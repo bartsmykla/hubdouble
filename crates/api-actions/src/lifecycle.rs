@@ -203,6 +203,49 @@ fn queue_job(
     save_job(tx, job, actor, Some("queued"))
 }
 
+fn carry_job(
+    tx: &mut TxMut<'_>,
+    run: &WorkflowRun,
+    old: &WorkflowJob,
+    key: String,
+    needs: Vec<String>,
+    now: Timestamp,
+) -> Result<(), ApiError> {
+    let fresh = new_job(tx, run, old.name.clone(), now);
+    let log_blob_id = match old
+        .log_blob_id
+        .as_deref()
+        .and_then(|id| tx.table::<Blobs>().get(id))
+    {
+        Some(blob) => {
+            let blob = Blob::clone(blob);
+            let id = Uuid::new_v4().to_string();
+            tx.table_mut::<Blobs>().insert(id.clone(), blob);
+            Some(id)
+        }
+        None => None,
+    };
+    let job = WorkflowJob {
+        status: old.status,
+        conclusion: old.conclusion,
+        steps: old.steps.clone(),
+        labels: old.labels.clone(),
+        runner_id: old.runner_id,
+        runner_name: old.runner_name.clone(),
+        log_blob_id,
+        started_at: old.started_at,
+        completed_at: old.completed_at,
+        ..fresh
+    };
+    tx.table_mut::<JobKeys>().insert(JobKey {
+        job: job.id,
+        key,
+        needs,
+    })?;
+    tx.table_mut::<WorkflowJobs>().replace(job)?;
+    Ok(())
+}
+
 fn save_job(
     tx: &mut TxMut<'_>,
     job: WorkflowJob,
@@ -490,7 +533,7 @@ pub(crate) fn rerun(
             let (key, needs) = keys
                 .get(job.id)
                 .map_or_default(|row| (row.key.clone(), row.needs.clone()));
-            (failed, job.name.clone(), key, needs)
+            (failed, Arc::clone(job), key, needs)
         })
         .collect();
     if !jobs.iter().any(|(failed, ..)| *failed) {
@@ -507,7 +550,6 @@ pub(crate) fn rerun(
         job.0 = true;
         chosen.insert(job.2.clone());
     }
-    jobs.retain(|(rerun, ..)| *rerun);
     let mut run = WorkflowRun::clone(&old);
     run.run_attempt += 1;
     run.status = RunStatus::Queued;
@@ -521,8 +563,12 @@ pub(crate) fn rerun(
     };
     tx.table_mut::<Attempts>().insert(archive)?;
     let run = store_run(tx, run)?;
-    for (_, name, key, needs) in jobs {
-        queue_job(tx, &run, name, key, needs, now, actor)?;
+    for (rerun, old, key, needs) in jobs {
+        if rerun {
+            queue_job(tx, &run, old.name.clone(), key, needs, now, actor)?;
+        } else {
+            carry_job(tx, &run, &old, key, needs, now)?;
+        }
     }
     if let Some(conclusion) = tx.table::<Settings>().conclusion() {
         complete(tx, git, &run, now, actor, conclusion)?;
