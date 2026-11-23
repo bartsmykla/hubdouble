@@ -568,6 +568,12 @@ pub(crate) fn merge(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .unwrap_or_else(|| format!("Merge pull request #{}", issue.number));
     let detail = input.commit_message.as_deref().unwrap_or(&issue.title);
     let message = format!("{title}\n\n{detail}");
+    let deletes = ctx
+        .tx()
+        .table::<Repos>()
+        .get(head_repo)
+        .is_some_and(|h| h.delete_branch_on_merge && can_push(ctx.tx(), ctx.actor(), h));
+    let who = (actor, timeline::via_app(ctx.actor()));
     let (tx, git) = ctx.tx_mut_and_git()?;
     let result = git
         .merge(tx, repo_id, actor, &p.base.ref_name, &sha, &message)
@@ -577,9 +583,62 @@ pub(crate) fn merge(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             }
             other => other.into(),
         })?;
+    if deletes {
+        delete_head(tx, git, &issue, who)?;
+    }
     Reply::json(
         &json!({"sha": result.commit, "merged": true, "message": "Pull Request successfully merged"}),
     )
+}
+
+fn delete_head(
+    tx: &mut TxMut<'_>,
+    git: &Git,
+    merged: &Issue,
+    who: (i64, Option<i64>),
+) -> Result<(), ApiError> {
+    let p = state::pull(merged)?;
+    let head_repo = p.head.repo_id.ok_or_else(ApiError::not_found)?;
+    let name = format!("refs/heads/{}", p.head.ref_name);
+    let Ok(tip) = git.resolve_ref(tx, head_repo, &name) else {
+        return Ok(());
+    };
+    let dependents: Vec<_> = tx
+        .table::<Issues>()
+        .in_repo(head_repo)
+        .filter(|issue| {
+            head_repo == merged.repo_id
+                && issue.state == IssueState::Open
+                && issue.pull.as_ref().is_some_and(|d| {
+                    d.base.ref_name == p.head.ref_name && d.head.repo_id == Some(head_repo)
+                })
+        })
+        .cloned()
+        .collect();
+    let mut retargeted = Vec::new();
+    for dependent in dependents {
+        let mut dependent = Issue::clone(&dependent);
+        if let Ok(from) = retarget(tx, git, &mut dependent, p.base.ref_name.clone())? {
+            dependent.updated_at = git.now();
+            tx.table_mut::<Issues>().replace(dependent.clone())?;
+            state::sync_refs(tx, git, &dependent)?;
+            timeline::record(tx, &dependent, who, StateKind::AutomaticBaseChangeSucceeded)?;
+            retargeted.push((dependent, from));
+        }
+    }
+    git.update_ref(tx, head_repo, who.0, &name, Some(tip), None, true)?;
+    for (dependent, from) in retargeted {
+        timeline::record(tx, &dependent, who, StateKind::BaseRefChanged)?;
+        events::emit(
+            tx,
+            git,
+            &dependent,
+            who.0,
+            "edited",
+            json!({"changes": {"base": from}}),
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn sender(actor: &Actor) -> Result<i64, ApiError> {

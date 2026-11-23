@@ -5,6 +5,7 @@ use hubdouble_model::{ApiError, Issue, IssueState, Pull, PullRef};
 use hubdouble_store::{Entity, Issues, Rows, Tx, TxMut};
 
 use crate::events;
+use crate::timeline::{self, StateKind};
 
 pub(crate) type PullBases = Rows<PullBase>;
 
@@ -134,6 +135,9 @@ pub(crate) fn ref_updated(
     let Some(name) = change.name.strip_prefix("refs/heads/") else {
         return Ok(());
     };
+    if change.new.is_none() {
+        return deleted(tx, git, change, name);
+    }
     let affected: Vec<_> = tx
         .table::<Issues>()
         .pulls_on_branch(change.repo_id, name)
@@ -142,6 +146,48 @@ pub(crate) fn ref_updated(
         .collect();
     for issue in affected {
         update_refs(tx, git, change, name, &issue)?;
+    }
+    Ok(())
+}
+
+fn deleted(tx: &mut TxMut<'_>, git: &Git, change: &RefChange, name: &str) -> Result<(), ApiError> {
+    let now = git.now();
+    let who = (change.sender, None);
+    let on_branch: Vec<_> = tx
+        .table::<Issues>()
+        .pulls_on_branch(change.repo_id, name)
+        .cloned()
+        .collect();
+    for issue in on_branch {
+        let mut issue = Issue::clone(&issue);
+        let open = issue.state == IssueState::Open;
+        let p = pull_mut(&mut issue)?;
+        let head = p.head.repo_id == Some(change.repo_id) && p.head.ref_name == name;
+        if !head && !open {
+            continue;
+        }
+        p.mergeable = None;
+        issue.updated_at = now;
+        if head {
+            tx.table_mut::<Issues>().replace(issue.clone())?;
+            timeline::record(tx, &issue, who, StateKind::HeadRefDeleted)?;
+            continue;
+        }
+        issue.state = IssueState::Closed;
+        issue.closed_at = Some(now);
+        issue.closed_by = Some(change.sender);
+        tx.table_mut::<Issues>().replace(issue.clone())?;
+        sync_refs(tx, git, &issue)?;
+        timeline::record(tx, &issue, who, StateKind::BaseRefDeleted)?;
+        timeline::record(tx, &issue, who, StateKind::Closed)?;
+        events::emit(
+            tx,
+            git,
+            &issue,
+            change.sender,
+            "closed",
+            serde_json::json!({}),
+        )?;
     }
     Ok(())
 }

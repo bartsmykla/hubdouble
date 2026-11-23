@@ -9,6 +9,7 @@ pub enum StateKind {
     Reopened,
     Renamed { from: String, to: String },
     BaseRefChanged,
+    AutomaticBaseChangeSucceeded,
     HeadRefDeleted,
     BaseRefDeleted,
 }
@@ -22,6 +23,7 @@ impl StateKind {
             StateKind::Reopened => "reopened",
             StateKind::Renamed { .. } => "renamed",
             StateKind::BaseRefChanged => "base_ref_changed",
+            StateKind::AutomaticBaseChangeSucceeded => "automatic_base_change_succeeded",
             StateKind::HeadRefDeleted => "head_ref_deleted",
             StateKind::BaseRefDeleted => "base_ref_deleted",
         }
@@ -33,6 +35,7 @@ impl StateKind {
             StateKind::Reopened => "REE",
             StateKind::Renamed { .. } => "RTE",
             StateKind::BaseRefChanged => "BRCE",
+            StateKind::AutomaticBaseChangeSucceeded => "ABCSE",
             StateKind::HeadRefDeleted => "HRDE",
             StateKind::BaseRefDeleted => "BRDE",
         }
@@ -40,8 +43,8 @@ impl StateKind {
 }
 
 /// An issue event that T5 records for a pull request: a `reopened` one from any path, and the
-/// `closed`, `renamed`, `base_ref_changed`, `head_ref_deleted` and `base_ref_deleted` ones of
-/// T5's own writes and of branch deletions. T7 records the other closes itself, and its
+/// `closed`, `renamed`, `base_ref_changed`, `automatic_base_change_succeeded`,
+/// `head_ref_deleted` and `base_ref_deleted` ones of T5's own writes and of branch deletions. T7 records the other closes itself, and its
 /// `GET .../issues/{n}/events` lists these rows with its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateEvent {

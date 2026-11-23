@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use http::{Method, StatusCode};
 use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
+use hubdouble_model::Repo;
+use hubdouble_store::Repos;
 use hubdouble_testkit::fixture::{ALICE_ID, ALICE_TOKEN, PUBLIC_REPO_ID, WEBHOOK_SECRET};
 use hubdouble_testkit::validate::webhook_payload;
 use hubdouble_testkit::{Delivery, GoGithub, Graphql, TestServer};
@@ -543,4 +545,238 @@ async fn a_merged_pull_request_names_its_merge_commit_and_loses_its_merge_ref() 
     assert_eq!(ref_target(&client, MERGE_REF).await, None);
     let head = tip(&server, "feature").to_string();
     assert_eq!(ref_target(&client, HEAD_REF).await, Some(head));
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Deletion {
+    Rest,
+    Graphql,
+}
+
+async fn delete_branch(client: &GoGithub, how: Deletion, branch: &str) {
+    match how {
+        Deletion::Rest => {
+            let answer = client
+                .call_json(
+                    Method::DELETE,
+                    &format!("repos/acme/public/git/refs/heads/{branch}"),
+                    &json!({}),
+                )
+                .await;
+            assert_eq!(answer.status, StatusCode::NO_CONTENT, "{}", answer.json());
+        }
+        Deletion::Graphql => {
+            let repository = client.get(PULL).await.json()["base"]["repo"]["node_id"].clone();
+            let answer = Graphql::new(client.clone())
+                .query(
+                    "mutation($input: UpdateRefsInput!) {updateRefs(input: $input) {clientMutationId}}",
+                    &json!({"input": {"repositoryId": repository, "refUpdates": [
+                        {"name": format!("refs/heads/{branch}"), "afterOid": ObjectId::NULL.to_string()}
+                    ]}}),
+                )
+                .await
+                .json();
+            assert_eq!(answer.get("errors"), None, "{answer}");
+        }
+    }
+}
+
+fn keys(event: &Value) -> Vec<String> {
+    let mut keys: Vec<_> = event
+        .as_object()
+        .map_or_default(|o| o.keys().cloned().collect());
+    keys.sort();
+    keys
+}
+
+const REF_EVENT_KEYS: [&str; 9] = [
+    "actor",
+    "commit_id",
+    "commit_url",
+    "created_at",
+    "event",
+    "id",
+    "node_id",
+    "performed_via_github_app",
+    "url",
+];
+
+#[tokio::test]
+async fn deleting_a_base_branch_closes_its_open_pull_requests_on_every_path() {
+    for how in [Deletion::Rest, Deletion::Graphql] {
+        // Given an open pull request into develop
+        let server = server(&[pull_request("feature", "develop")]).await;
+        let client = alice(&server);
+        deliveries(&server).await;
+        // When develop is deleted
+        delete_branch(&client, how, "develop").await;
+        // Then the pull request is closed by the deleter and keeps its base
+        let pull = client.get(PULL).await.json();
+        assert_eq!(
+            (&pull["state"], &pull["merged"], &pull["base"]["ref"]),
+            (&json!("closed"), &json!(false), &json!("develop")),
+            "{how:?}"
+        );
+        assert_eq!(ref_target(&client, MERGE_REF).await, None, "{how:?}");
+        // And the timeline records the base deletion and then the close, as GitHub does
+        let recorded = events(&client, 1).await;
+        assert_eq!(names(&recorded), ["base_ref_deleted", "closed"], "{how:?}");
+        assert_eq!(
+            keys(&recorded[0]),
+            REF_EVENT_KEYS.map(String::from),
+            "{how:?}"
+        );
+        assert_eq!(
+            recorded[0]["node_id"].as_str().map(|id| &id[..5]),
+            Some("BRDE_")
+        );
+        assert_eq!(
+            (&recorded[1]["actor"]["login"], &recorded[1]["state_reason"]),
+            (&json!("alice"), &Value::Null),
+            "{how:?}"
+        );
+        // And a closed webhook goes out
+        let hooks = pull_hooks(&deliveries(&server).await, 1);
+        let actions: Vec<_> = hooks.iter().map(|(action, _)| action.as_str()).collect();
+        assert_eq!(actions, ["closed"], "{how:?}");
+        assert_eq!(hooks[0].1["sender"]["login"], "alice", "{how:?}");
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_head_branch_records_it_and_leaves_the_pull_request_open() {
+    for how in [Deletion::Rest, Deletion::Graphql] {
+        // Given an open pull request from feature
+        let server = server(&[pull_request("feature", "main")]).await;
+        let client = alice(&server);
+        let head = tip(&server, "feature").to_string();
+        deliveries(&server).await;
+        // When feature is deleted
+        delete_branch(&client, how, "feature").await;
+        // Then the pull request stays open on its last head, with no mergeability
+        let pull = client.get(PULL).await.json();
+        assert_eq!(
+            (&pull["state"], &pull["head"]["sha"], &pull["mergeable"]),
+            (&json!("open"), &json!(head), &Value::Null),
+            "{how:?}"
+        );
+        assert_eq!(ref_target(&client, HEAD_REF).await, Some(head), "{how:?}");
+        // And the timeline records only the head deletion, with no pull_request webhook
+        let recorded = events(&client, 1).await;
+        assert_eq!(names(&recorded), ["head_ref_deleted"], "{how:?}");
+        assert_eq!(
+            keys(&recorded[0]),
+            REF_EVENT_KEYS.map(String::from),
+            "{how:?}"
+        );
+        assert_eq!(
+            recorded[0]["node_id"].as_str().map(|id| &id[..5]),
+            Some("HRDE_")
+        );
+        assert!(
+            pull_hooks(&deliveries(&server).await, 1).is_empty(),
+            "{how:?}"
+        );
+    }
+}
+
+fn delete_branch_on_merge(server: &TestServer) {
+    let store = &server.server.services().store;
+    store
+        .update(|tx| {
+            let mut repos = tx.table_mut::<Repos>();
+            let mut repo = repos
+                .get(PUBLIC_REPO_ID)
+                .map(|r| Repo::clone(r))
+                .ok_or_else(hubdouble_model::ApiError::not_found)?;
+            repo.delete_branch_on_merge = true;
+            repos
+                .replace(repo)
+                .map_err(|e| hubdouble_model::ApiError::internal(format!("{e:?}")))?;
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("set delete_branch_on_merge: {e:?}"));
+}
+
+#[tokio::test]
+async fn a_merge_that_deletes_its_head_branch_retargets_the_pull_requests_based_on_it() {
+    // Given a repository that deletes head branches on merge, a pull request from one into main, and one from two into one
+    let server = server(&[]).await;
+    delete_branch_on_merge(&server);
+    let client = alice(&server);
+    for (branch, from) in [("one", "main"), ("two", "one")] {
+        let sha = tip(&server, from).to_string();
+        let created = client
+            .post(
+                "repos/acme/public/git/refs",
+                &json!({"ref": format!("refs/heads/{branch}"), "sha": sha}),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.json());
+        push(&server, branch, &format!("{branch}.txt"), "text\n");
+    }
+    for (head, base) in [("one", "main"), ("two", "one")] {
+        let opened = client
+            .post(
+                "repos/acme/public/pulls",
+                &json!({"title": head, "head": head, "base": base}),
+            )
+            .await;
+        assert_eq!(opened.status, StatusCode::CREATED, "{}", opened.json());
+    }
+    deliveries(&server).await;
+    // When the first pull request is merged
+    let merged = client
+        .call_json(Method::PUT, "repos/acme/public/pulls/1/merge", &json!({}))
+        .await;
+    assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
+    // Then one is deleted, and the second pull request is open on main
+    let gone = client.get("repos/acme/public/git/ref/heads/one").await;
+    assert_eq!(gone.status, StatusCode::NOT_FOUND);
+    let second = client.get("repos/acme/public/pulls/2").await.json();
+    assert_eq!(
+        (&second["state"], &second["base"]["ref"]),
+        (&json!("open"), &json!("main"))
+    );
+    // And the timelines record the deletion and the automatic base change as GitHub does
+    let stack_events = |number: i64| {
+        let client = client.clone();
+        async move {
+            client
+                .get(&format!("repos/acme/public/issues/{number}/events"))
+                .await
+                .json()
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        }
+    };
+    let first = stack_events(1).await;
+    assert!(names(&first).contains(&"head_ref_deleted"), "{first:?}");
+    let recorded = stack_events(2).await;
+    assert_eq!(
+        names(&recorded),
+        ["automatic_base_change_succeeded", "base_ref_changed"]
+    );
+    assert_eq!(
+        recorded[0]["node_id"].as_str().map(|id| &id[..6]),
+        Some("ABCSE_")
+    );
+    assert_eq!(keys(&recorded[1]), REF_EVENT_KEYS.map(String::from));
+    assert_eq!(recorded[1]["actor"]["login"], "alice");
+    // And the retarget sends an edited webhook with the old base, and the deletion a push
+    let all = deliveries(&server).await;
+    let edited: Vec<_> = pull_hooks(&all, 2)
+        .into_iter()
+        .filter(|(action, _)| action == "edited")
+        .map(|(_, payload)| payload["changes"]["base"]["ref"].clone())
+        .collect();
+    assert_eq!(edited, [json!({"from": "one"})]);
+    let deleted: Vec<_> = all
+        .iter()
+        .filter(|d| d.header("x-github-event") == "push")
+        .map(|d| (d.json()["ref"].clone(), d.json()["deleted"].clone()))
+        .filter(|(_, deleted)| *deleted == json!(true))
+        .collect();
+    assert_eq!(deleted, [(json!("refs/heads/one"), json!(true))]);
 }
