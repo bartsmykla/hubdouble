@@ -22,7 +22,7 @@ const WRITE: Requirement = repo_requirement(&[Grant::write("pull_requests")]);
 const CONTENTS_WRITE: Requirement = repo_requirement(&[Grant::write("contents")]);
 
 pub fn register(r: &mut Registrar<'_>) {
-    r.store.register_table::<state::PullHeads>();
+    r.store.register_table::<state::PullBases>();
     r.rest.handle("pulls/list", READ, read::list);
     r.rest.handle("pulls/create", WRITE, change::create);
     r.rest.handle("pulls/get", GET, read::get);

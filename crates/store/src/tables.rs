@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use hubdouble_model::{
     Account, App, CheckRun, CheckSuite, Delivery, Installation, Issue, IssueComment, Label,
-    Membership, Reaction, Release, ReleaseAsset, Repo, Review, ReviewComment, ReviewThread,
+    Membership, Pull, Reaction, Release, ReleaseAsset, Repo, Review, ReviewComment, ReviewThread,
     Ruleset, Status, Team, Token, WorkflowJob, WorkflowRun,
 };
 
@@ -240,6 +240,36 @@ impl Entity for Issue {
     }
     fn number(&self) -> Option<i64> {
         Some(self.number)
+    }
+    fn parent_id(&self) -> Option<i64> {
+        self.pull.as_ref()?.head.repo_id
+    }
+}
+
+impl Rows<Issue> {
+    /// Pull requests whose head is in the repository, including pull requests against a fork.
+    pub fn pulls_with_head_repo(&self, repo_id: i64) -> impl Iterator<Item = &Arc<Issue>> {
+        self.children(repo_id)
+    }
+
+    /// Pull requests with a head or base on the branch. Each pull request occurs once.
+    pub fn pulls_on_branch<'a>(
+        &'a self,
+        repo_id: i64,
+        branch: &'a str,
+    ) -> impl Iterator<Item = &'a Arc<Issue>> {
+        let head_matches =
+            move |p: &Pull| p.head.repo_id == Some(repo_id) && p.head.ref_name == branch;
+        let heads = self
+            .pulls_with_head_repo(repo_id)
+            .filter(move |issue| issue.pull.as_ref().is_some_and(head_matches));
+        let bases = self.in_repo(repo_id).filter(move |issue| {
+            issue
+                .pull
+                .as_ref()
+                .is_some_and(|p| p.base.ref_name == branch && !head_matches(p))
+        });
+        heads.chain(bases)
     }
 }
 

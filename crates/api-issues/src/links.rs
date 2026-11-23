@@ -102,22 +102,15 @@ pub(crate) fn ref_updated(
         return Ok(());
     };
     let default = repo.default_branch == name;
-    let related = [Some(repo.id), repo.fork_of];
     if default {
         close_from_commits(tx, git, change)?;
     }
     let issues = tx.table::<Issues>();
     let done = tx.table::<MergeCloses>();
-    let merged: Vec<Arc<Issue>> = related
-        .into_iter()
-        .flatten()
-        .flat_map(|id| issues.in_repo(id))
+    let merged: Vec<Arc<Issue>> = issues
+        .pulls_on_branch(change.repo_id, name)
         .filter(|pull| {
-            pull.pull.as_ref().is_some_and(|p| {
-                p.merged_at.is_some()
-                    && (pull.repo_id == change.repo_id && p.base.ref_name == name
-                        || p.head.repo_id == Some(change.repo_id) && p.head.ref_name == name)
-            }) && done.get(pull.id).is_none()
+            pull.pull.as_ref().is_some_and(|p| p.merged_at.is_some()) && done.get(pull.id).is_none()
         })
         .cloned()
         .collect();

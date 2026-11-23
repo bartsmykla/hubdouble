@@ -160,7 +160,11 @@ fn associated(cx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError
         .strip_prefix("refs/heads/")
         .unwrap_or(&reference.name);
     let mut pulls = Vec::new();
-    for i in state::with_head(cx.tx, reference.repo_id) {
+    for i in cx
+        .tx
+        .table::<Issues>()
+        .pulls_with_head_repo(reference.repo_id)
+    {
         let p = state::pull(i)?;
         if p.head.ref_name == name
             && states.as_ref().is_none_or(|states| {

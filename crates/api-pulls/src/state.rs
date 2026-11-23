@@ -6,39 +6,18 @@ use hubdouble_store::{Entity, Issues, Rows, Tx, TxMut};
 
 use crate::events;
 
-pub(crate) type PullHeads = Rows<PullHead>;
+pub(crate) type PullBases = Rows<PullBase>;
 
 #[derive(Clone)]
-pub(crate) struct PullHead {
+pub(crate) struct PullBase {
     issue_id: i64,
-    repo_id: Option<i64>,
-    comparison_base: Option<ObjectId>,
+    oid: ObjectId,
 }
 
-impl Entity for PullHead {
+impl Entity for PullBase {
     fn id(&self) -> i64 {
         self.issue_id
     }
-
-    fn repo_id(&self) -> Option<i64> {
-        self.repo_id
-    }
-}
-
-pub(crate) fn index(tx: &mut TxMut<'_>, issue_id: i64, pull: &Pull) -> Result<(), ApiError> {
-    tx.table_mut::<PullHeads>().insert(PullHead {
-        issue_id,
-        repo_id: pull.head.repo_id,
-        comparison_base: None,
-    })?;
-    Ok(())
-}
-
-pub(crate) fn with_head(tx: &Tx, repo_id: i64) -> impl Iterator<Item = &Arc<Issue>> {
-    let issues = tx.table::<Issues>();
-    tx.table::<PullHeads>()
-        .in_repo(repo_id)
-        .filter_map(|row| issues.get(row.issue_id))
 }
 
 pub(crate) fn pull(issue: &Issue) -> Result<&Pull, ApiError> {
@@ -57,12 +36,8 @@ pub(crate) fn branch(git: &Git, tx: &Tx, repo: i64, name: &str) -> Result<Object
 }
 
 pub(crate) fn comparison_base(tx: &Tx, issue: &Issue, p: &Pull) -> Result<ObjectId, GitError> {
-    match tx
-        .table::<PullHeads>()
-        .get(issue.id)
-        .and_then(|row| row.comparison_base)
-    {
-        Some(base) => Ok(base),
+    match tx.table::<PullBases>().get(issue.id) {
+        Some(base) => Ok(base.oid),
         None => p.base.sha.parse(),
     }
 }
@@ -101,25 +76,12 @@ pub(crate) fn ref_updated(
     let Some(name) = change.name.strip_prefix("refs/heads/") else {
         return Ok(());
     };
-    let mut affected: Vec<_> = with_head(tx, change.repo_id)
-        .filter(|issue| {
-            issue.state == IssueState::Open
-                && issue.pull.as_ref().is_some_and(|p| p.head.ref_name == name)
-        })
+    let affected: Vec<_> = tx
+        .table::<Issues>()
+        .pulls_on_branch(change.repo_id, name)
+        .filter(|issue| issue.state == IssueState::Open)
         .cloned()
         .collect();
-    affected.extend(
-        tx.table::<Issues>()
-            .in_repo(change.repo_id)
-            .filter(|issue| {
-                issue.state == IssueState::Open
-                    && issue.pull.as_ref().is_some_and(|p| {
-                        p.base.ref_name == name
-                            && (p.head.repo_id != Some(change.repo_id) || p.head.ref_name != name)
-                    })
-            })
-            .cloned(),
-    );
     for issue in affected {
         update_refs(tx, git, change, name, &issue)?;
     }
@@ -167,10 +129,9 @@ fn update_refs(
                     .and_then(|old_head| git.compare(tx, repo_id, base, old_head).ok()?.merge_base)
                     .unwrap_or(old_base)
             };
-            tx.table_mut::<PullHeads>().replace(PullHead {
+            tx.table_mut::<PullBases>().replace(PullBase {
                 issue_id: issue.id,
-                repo_id: p.head.repo_id,
-                comparison_base: Some(comparison_base),
+                oid: comparison_base,
             })?;
         } else {
             p.mergeable = Some(git.mergeable(tx, repo_id, base, head)?);

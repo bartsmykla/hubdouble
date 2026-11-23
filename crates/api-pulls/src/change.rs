@@ -216,7 +216,6 @@ fn open(
             requested_teams: Vec::new(),
         }),
     };
-    state::index(tx, issue.id, state::pull(&issue)?)?;
     let issue = tx.table_mut::<Issues>().insert(issue)?;
     events::emit(tx, git, &issue, sender, "opened", json!({}))?;
     Ok(issue)
