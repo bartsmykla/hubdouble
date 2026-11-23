@@ -68,7 +68,7 @@ pub fn seed() -> Vec<Value> {
                            "secret": WEBHOOK_SECRET},
                "permissions": {"contents": "write", "issues": "write", "pull_requests": "write",
                                "checks": "write", "metadata": "read"},
-               "events": ["push", "issues", "issue_comment", "pull_request", "check_run"]}),
+               "events": ["push", "create", "issues", "issue_comment", "pull_request", "check_run"]}),
         json!({"kind": "installation", "id": INSTALLATION_ID, "app": APP_SLUG, "account": ORG,
                "repositories": [PUBLIC_REPO],
                "permissions": {"contents": "read", "issues": "write", "metadata": "read",

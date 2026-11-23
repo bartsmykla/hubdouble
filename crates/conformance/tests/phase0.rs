@@ -19,6 +19,50 @@ use serde_json::{Value, json};
 
 const MAIN: &str = "refs/heads/main";
 
+#[tokio::test]
+async fn creating_a_branch_delivers_a_signed_create_webhook() {
+    // Given
+    let server = TestServer::builder()
+        .frame(hubdouble_api::register_all)
+        .fixture()
+        .start()
+        .await;
+    let client = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let refs = "repos/acme/public/git";
+    let main = client.get(&format!("{refs}/ref/heads/main")).await;
+    assert_eq!(main.status, StatusCode::OK);
+    let sha = main.json()["object"]["sha"].clone();
+
+    // When
+    let created = client
+        .post(
+            &format!("{refs}/refs"),
+            &json!({"ref": "refs/heads/new-branch", "sha": sha}),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let drained = server.admin(Method::POST, "hooks/drain", None).await;
+    assert_eq!(drained.status, StatusCode::NO_CONTENT);
+
+    // Then
+    let received = server.receiver.received().await;
+    let mut create = received
+        .iter()
+        .filter(|d| d.header("x-github-event") == "create");
+    let delivery = create
+        .next()
+        .unwrap_or_else(|| panic!("expected a create delivery"));
+    assert!(create.next().is_none());
+    assert!(delivery.signed_with(WEBHOOK_SECRET));
+    let payload = delivery.json();
+    assert_eq!(payload["ref"], "new-branch");
+    assert_eq!(payload["ref_type"], "branch");
+    assert_eq!(payload["master_branch"], "main");
+    assert_eq!(payload["installation"]["id"], INSTALLATION_ID);
+    assert_eq!(payload["repository"]["id"], PUBLIC_REPO_ID);
+    assert_eq!(payload["sender"]["id"], ALICE_ID);
+}
+
 #[derive(Clone, Default)]
 struct Moves(Vec<RefChange>);
 

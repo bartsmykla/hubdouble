@@ -5,12 +5,15 @@ use bytes::Bytes;
 use hmac::{Hmac, KeyInit, Mac};
 use http::{HeaderMap, Response, StatusCode};
 use http_body_util::{BodyExt, Collected, Full};
+use hubdouble_store::Store;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use serde_json::Value;
 use sha2::Sha256;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, mpsc};
+
+use crate::coverage::Recorder;
 
 /// One webhook request as the receiver got it.
 #[derive(Debug, Clone)]
@@ -66,6 +69,7 @@ impl Delivery {
 pub struct Receiver {
     url: String,
     deliveries: Mutex<mpsc::UnboundedReceiver<Delivery>>,
+    coverage: Option<(Recorder, Store)>,
 }
 
 impl Receiver {
@@ -115,7 +119,12 @@ impl Receiver {
         Receiver {
             url: format!("http://{addr}/webhook"),
             deliveries: Mutex::new(rx),
+            coverage: None,
         }
+    }
+
+    pub(crate) fn record_with(&mut self, recorder: Recorder, store: Store) {
+        self.coverage = Some((recorder, store));
     }
 
     /// The URL to set as an App's webhook.
@@ -138,7 +147,7 @@ impl Receiver {
             .recv()
             .await
             .unwrap_or_else(|| panic!("the webhook receiver stopped"));
-        checked(d)
+        self.checked(d)
     }
 
     /// Every delivery already received, without waiting.
@@ -150,22 +159,25 @@ impl Receiver {
         let mut rx = self.deliveries.lock().await;
         let mut out = Vec::new();
         while let Ok(d) = rx.try_recv() {
-            out.push(checked(d));
+            out.push(self.checked(d));
         }
         out
     }
-}
-
-fn checked(d: Delivery) -> Delivery {
-    if let Err(errors) = crate::validate::webhook_delivery(&d.headers, &d.body) {
-        panic!(
-            "the {} delivery differs from GitHub's docs:\n  {}\nbody: {}",
-            d.header("x-github-event"),
-            errors.join("\n  "),
-            String::from_utf8_lossy(&d.body)
-        );
+    fn checked(&self, d: Delivery) -> Delivery {
+        let payload = crate::validate::checked_webhook_delivery(&d.headers, &d.body)
+            .unwrap_or_else(|errors| {
+                panic!(
+                    "the {} delivery differs from GitHub's docs:\n  {}\nbody: {}",
+                    d.header("x-github-event"),
+                    errors.join("\n  "),
+                    String::from_utf8_lossy(&d.body)
+                )
+            });
+        if let Some((recorder, store)) = &self.coverage {
+            recorder.record_webhook(&d, &payload, store);
+        }
+        d
     }
-    d
 }
 
 impl Drop for Receiver {
@@ -174,7 +186,7 @@ impl Drop for Receiver {
             return;
         }
         while let Ok(d) = self.deliveries.get_mut().try_recv() {
-            checked(d);
+            self.checked(d);
         }
     }
 }

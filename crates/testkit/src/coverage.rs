@@ -3,14 +3,17 @@
 //! owns; every test process appends one line per checked answer to its own file there. Without
 //! the variable nothing is written.
 
+use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use hubdouble_store::{Apps, Store};
 use serde_json::Value;
 
 use crate::answer::{Checked, Exchange, header, is_json, media_type};
+use crate::receiver::Delivery;
 
-/// The directory the checked answers are written to.
+/// The directory for checked answers and signed webhook records.
 pub const DIR_ENV: &str = "HUBDOUBLE_TEST_COVERAGE_DIR";
 
 /// Which case of plan section 7's "Tests per operation" a checked answer proves, read from the
@@ -182,15 +185,55 @@ impl Recorder {
             line.push_str(fact);
         }
         line.push('\n');
-        let written = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(file)
-            .and_then(|mut f| f.write_all(line.as_bytes()));
-        if let Err(e) = written {
-            panic!("record a checked answer in {}: {e}", file.display());
+        append(file, &line);
+    }
+
+    pub(crate) fn record_webhook(&self, delivery: &Delivery, payload: &Value, store: &Store) {
+        let Some(file) = &self.file else { return };
+        let Ok(app_id) = delivery.header("x-github-hook-id").parse() else {
+            return;
+        };
+        let signed = store
+            .view(|tx| {
+                let secret = tx
+                    .table::<Apps>()
+                    .get(app_id)
+                    .and_then(|app| app.webhook.as_ref()?.secret.as_deref());
+                Ok(secret.map(|secret| delivery.signed_with(secret)))
+            })
+            .unwrap_or_else(|e| panic!("read the webhook secret: {e}"));
+        if let Some(signed) = signed {
+            assert!(signed, "invalid signature for App {app_id}");
+            let event = delivery.header("x-github-event");
+            let action = payload["action"].as_str().unwrap_or_default();
+            append(
+                &file.with_extension("webhooks"),
+                &format!("{event}\t{action}\n"),
+            );
         }
     }
+}
+
+fn append(file: &Path, line: &str) {
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+    if let Err(e) = written {
+        panic!("record a checked exchange in {}: {e}", file.display());
+    }
+}
+
+fn files<'a>(dir: &'a Path, extension: &'a str) -> impl Iterator<Item = PathBuf> + 'a {
+    std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+                .path()
+        })
+        .filter(move |path| path.extension().is_some_and(|ext| ext == extension))
 }
 
 /// Every checked answer recorded under `dir`.
@@ -201,12 +244,8 @@ impl Recorder {
 /// `<route>\t<status>\t<case>[\t<fact>]...`.
 #[must_use]
 pub fn read(dir: &Path) -> Vec<Record> {
-    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
     let mut out = Vec::new();
-    for entry in entries {
-        let path = entry
-            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
-            .path();
+    for path in files(dir, "tsv") {
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         for line in text.lines() {
@@ -223,6 +262,30 @@ pub fn read(dir: &Path) -> Vec<Record> {
                 case: Case::parse(case).unwrap_or_else(|| bad()),
                 facts: fields.map(str::to_owned).collect(),
             });
+        }
+    }
+    out
+}
+
+/// Each signed webhook that passed the delivery checks, as an event and an optional action.
+///
+/// # Panics
+///
+/// When `dir` or a webhook record cannot be read.
+#[must_use]
+pub fn read_webhooks(dir: &Path) -> BTreeSet<(String, Option<String>)> {
+    let mut out = BTreeSet::new();
+    for path in files(dir, "webhooks") {
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        for line in text.lines() {
+            let (event, action) = line
+                .split_once('\t')
+                .unwrap_or_else(|| panic!("a bad line in {}: {line}", path.display()));
+            out.insert((
+                event.to_owned(),
+                (!action.is_empty()).then(|| action.to_owned()),
+            ));
         }
     }
     out

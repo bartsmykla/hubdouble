@@ -433,6 +433,24 @@ async fn event(server: &TestServer, name: &str, action: &str) -> Value {
 #[tokio::test]
 async fn installation_admin_changes_emit_app_specific_events() {
     let server = setup().start().await;
+    let hook_url = format!("{}?ping=1", server.receiver.url());
+    patch(
+        &server,
+        "app/fixture-app",
+        &json!({"webhook": {
+            "url": hook_url, "secret": fixture::WEBHOOK_SECRET,
+        }}),
+    )
+    .await;
+    drain(&server).await;
+    let deliveries = server.receiver.received().await;
+    let [ping] = &deliveries[..] else {
+        panic!("expected one ping, got {deliveries:?}");
+    };
+    assert_eq!(ping.header("x-github-event"), "ping");
+    assert!(ping.signed_with(fixture::WEBHOOK_SECRET));
+    assert_eq!(ping.json()["hook_id"], fixture::APP_ID);
+
     patch(&server, "installation/5001", &json!({"suspended": true})).await;
     assert_eq!(
         event(&server, "installation", "suspend").await["installation"]["suspended_at"],

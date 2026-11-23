@@ -259,6 +259,13 @@ pub fn webhook_payload(
 ///
 /// Each way the delivery differs from GitHub's docs.
 pub fn webhook_delivery(headers: &http::HeaderMap, body: &[u8]) -> Result<(), Vec<String>> {
+    checked_webhook_delivery(headers, body).map(|_| ())
+}
+
+pub(crate) fn checked_webhook_delivery(
+    headers: &http::HeaderMap,
+    body: &[u8],
+) -> Result<Value, Vec<String>> {
     let header = |name: &str| {
         headers
             .get(name)
@@ -311,17 +318,21 @@ pub fn webhook_delivery(headers: &http::HeaderMap, body: &[u8]) -> Result<(), Ve
     if header("content-type").split(';').next().map(str::trim) != Some("application/json") {
         errors.push(format!("Content-Type {:?}", header("content-type")));
     }
-    match serde_json::from_slice::<Value>(body) {
+    let payload = match serde_json::from_slice::<Value>(body) {
         Ok(payload) => {
             let action = payload.get("action").and_then(Value::as_str);
             if let Err(e) = webhook_payload(event, action, &payload) {
                 errors.extend(e);
             }
+            payload
         }
-        Err(e) => errors.push(format!("the payload is not JSON: {e}")),
-    }
+        Err(e) => {
+            errors.push(format!("the payload is not JSON: {e}"));
+            Value::Null
+        }
+    };
     if errors.is_empty() {
-        Ok(())
+        Ok(payload)
     } else {
         Err(errors)
     }

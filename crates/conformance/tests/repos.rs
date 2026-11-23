@@ -7,7 +7,7 @@ use hubdouble_model::{Access, Clock, Issue, IssueState, Pull, PullRef, Token, To
 use hubdouble_store::{Issues, Releases, Tokens};
 use hubdouble_testkit::fixture::{
     ALICE_ID, ALICE_TOKEN, APP_ID, APP_PUBLIC_KEY, BOB_TOKEN, CAROL_TOKEN, INSTALLATION_ID,
-    PUBLIC_REPO_ID, WEBHOOK_URL_ENV,
+    PUBLIC_REPO_ID, WEBHOOK_SECRET, WEBHOOK_URL_ENV,
 };
 use hubdouble_testkit::{Answer, Delivery, GoGithub, Graphql, TestServer, validate};
 use serde_json::{Value, json};
@@ -71,7 +71,8 @@ fn watcher() -> [Value; 2] {
     [
         json!({"kind": "app", "id": 4002, "slug": "watcher", "owner": "acme",
                "public_key": APP_PUBLIC_KEY,
-               "webhook": {"url": format!("{{{{env \"{WEBHOOK_URL_ENV}\"}}}}")},
+               "webhook": {"url": format!("{{{{env \"{WEBHOOK_URL_ENV}\"}}}}"),
+                           "secret": WEBHOOK_SECRET},
                "permissions": {"contents": "read", "metadata": "read"},
                "events": ["release", "repository"]}),
         json!({"kind": "installation", "id": 5002, "app": "watcher", "account": "acme",
@@ -80,11 +81,11 @@ fn watcher() -> [Value; 2] {
 }
 
 async fn deliveries(server: &TestServer, count: usize) -> Vec<Delivery> {
-    let mut out = Vec::with_capacity(count);
-    for _ in 0..count {
-        out.push(server.receiver.next().await);
-    }
-    out
+    let drained = server.admin(Method::POST, "hooks/drain", None).await;
+    assert_eq!(drained.status, StatusCode::NO_CONTENT);
+    let received = server.receiver.received().await;
+    assert_eq!(received.len(), count);
+    received
 }
 
 fn delivered(deliveries: &[Delivery], event: &str, action: &str) -> Value {
@@ -805,7 +806,7 @@ async fn release_admin_writes_deliver_published_and_edited() {
             Some(&json!({"name": "Two, renamed"})),
         )
         .await;
-    let got = deliveries(&server, 3).await;
+    let got = deliveries(&server, 4).await;
     // Then
     assert_eq!(created.status, StatusCode::CREATED);
     assert_eq!(edited.status, StatusCode::OK);
@@ -813,6 +814,7 @@ async fn release_admin_writes_deliver_published_and_edited() {
         delivered_as(&got, "push", None)["ref"],
         json!("refs/tags/v2.0.0")
     );
+    assert_eq!(delivered_as(&got, "create", None)["ref_type"], "tag");
     let published = delivered(&got, "release", "published");
     assert_eq!(published["release"]["tag_name"], json!("v2.0.0"));
     assert_eq!(published["repository"]["full_name"], json!("acme/public"));
@@ -916,11 +918,19 @@ async fn repository_admin_writes_deliver_their_repository_actions() {
         )
         .await;
     let renamed = alice(&server).get("repos/acme/prompts").await;
+    let public = server
+        .admin(
+            Method::PATCH,
+            "repos/acme/prompts",
+            Some(&json!({"private": false, "sender": "alice"})),
+        )
+        .await;
+    assert_eq!(public.status, StatusCode::OK);
     let deleted = server
         .admin(Method::DELETE, "repos/acme/prompts", Some(&json!({})))
         .await;
     let gone = alice(&server).get("repos/acme/prompts").await;
-    let got = deliveries(&server, 6).await;
+    let got = deliveries(&server, 7).await;
     // Then
     assert!(create.status.is_success(), "{:?}", create.body);
     let created = delivered(&got, "repository", "created");
@@ -944,5 +954,9 @@ async fn repository_admin_writes_deliver_their_repository_actions() {
     assert_eq!(renamed["repository"]["name"], json!("prompts"));
     delivered(&got, "repository", "archived");
     delivered(&got, "repository", "privatized");
+    assert_eq!(
+        delivered(&got, "repository", "publicized")["repository"]["private"],
+        false
+    );
     delivered(&got, "repository", "deleted");
 }

@@ -13,7 +13,7 @@ use hubdouble_testkit::coverage::{self, Case, Record};
 use hubdouble_testkit::{Answer, GoGithub, TestServer, fixture};
 use serde_json::json;
 
-const GATE: &str = "every_inventory_route_gets_a_checked_answer_for_every_case_that_applies";
+const GATE: &str = "every_inventory_case_gets_a_checked_answer_or_signed_delivery";
 
 const NO_GITHUB_422: &str = "the pinned description lists 422, but no input sent to api.github.com gave one (gh api GET, 2026-11-22)";
 const APP_ONLY_422: &str =
@@ -266,8 +266,47 @@ async fn every_route_with_a_permission_answers_403_to_an_installation_without_it
     }
 }
 
+fn required_webhooks(plan: &str) -> BTreeSet<(String, Option<String>)> {
+    let (_, section) = plan
+        .split_once("### 4.3 Webhooks")
+        .unwrap_or_else(|| panic!("plan 4.3 is missing"));
+    let mut required = BTreeSet::new();
+    let rows = section.lines().take_while(|line| !line.starts_with("### "));
+    for row in rows.filter(|row| row.starts_with("| `")) {
+        let (events, cause) = row[2..]
+            .split_once(" | ")
+            .unwrap_or_else(|| panic!("invalid plan 4.3 row: {row}"));
+        if cause.contains("does not block done") {
+            continue;
+        }
+        let mut rest = events;
+        while let Some((_, quoted)) = rest.split_once('`') {
+            let (event, tail) = quoted
+                .split_once('`')
+                .unwrap_or_else(|| panic!("unclosed event name: {quoted}"));
+            if let Some(actions) = tail.strip_prefix(" (") {
+                let (actions, next) = actions
+                    .split_once(')')
+                    .unwrap_or_else(|| panic!("unclosed {event} action list: {actions}"));
+                if !actions.contains("does not block done") {
+                    let names = actions.split_once(';').map_or(actions, |(names, _)| names);
+                    for action in names.split(", ") {
+                        required.insert((event.to_owned(), Some(action.to_owned())));
+                    }
+                }
+                rest = next;
+            } else {
+                required.insert((event.to_owned(), None));
+                rest = tail;
+            }
+        }
+    }
+    assert!(!required.is_empty(), "plan 4.3 has no webhook cases");
+    required
+}
+
 #[test]
-fn every_inventory_route_gets_a_checked_answer_for_every_case_that_applies() {
+fn every_inventory_case_gets_a_checked_answer_or_signed_delivery() {
     // Given every other conformance test, run in its own nextest process, records its checked answers
     let dir = tempfile::TempDir::new().unwrap();
     let mut run = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
@@ -277,6 +316,8 @@ fn every_inventory_route_gets_a_checked_answer_for_every_case_that_applies() {
         "--workspace",
         "--locked",
         "--no-fail-fast",
+        "--status-level=fail",
+        "--final-status-level=fail",
         "-E",
         &format!("package(hubdouble-conformance) and not test(={GATE})"),
     ])
@@ -330,9 +371,17 @@ fn every_inventory_route_gets_a_checked_answer_for_every_case_that_applies() {
             ));
         }
     }
+    let webhooks = coverage::read_webhooks(dir.path());
+    let plan = include_str!("../../../docs/PLAN.md");
+    for (event, action) in required_webhooks(plan).difference(&webhooks) {
+        let name = action
+            .as_ref()
+            .map_or_else(|| event.clone(), |a| format!("{event}.{a}"));
+        missing.push(format!("{name}: no checked signed delivery (plan 4.3)"));
+    }
     assert!(
         missing.is_empty(),
-        "inventory cases without a matching checked answer:\n  {}",
+        "inventory cases without a checked answer or signed delivery:\n  {}",
         missing.join("\n  ")
     );
 }

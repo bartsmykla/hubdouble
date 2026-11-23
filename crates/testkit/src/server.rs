@@ -87,7 +87,7 @@ impl Builder {
             self.seed_file.is_none() || self.seed.is_empty(),
             "a test server takes a seed file or seed entries, not both"
         );
-        let receiver = Receiver::start().await;
+        let mut receiver = Receiver::start().await;
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap_or_else(|e| panic!("bind the test server: {e}"));
@@ -131,6 +131,8 @@ impl Builder {
             .collect();
         let server = Server::start(config, clock.clone(), &lookup, registries)
             .unwrap_or_else(|e| panic!("start the test server: {e}"));
+        let recorder = Recorder::from_process_env();
+        receiver.record_with(recorder.clone(), server.services().store.clone());
         let (stop, stopped) = oneshot::channel::<()>();
         let serving = server.clone();
         tokio::spawn(async move {
@@ -149,7 +151,7 @@ impl Builder {
             http: reqwest::Client::new(),
             stop: Some(stop),
             registered: Arc::new(registered),
-            recorder: Recorder::from_process_env(),
+            recorder,
         }
     }
 }

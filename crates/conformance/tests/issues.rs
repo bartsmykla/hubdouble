@@ -597,7 +597,7 @@ async fn editing_an_issue_sends_edited_closed_and_reopened_and_needs_triage_for_
 }
 
 #[tokio::test]
-async fn labeling_a_pull_request_sends_pull_request_labeled_and_lists_who_labeled_it() {
+async fn pull_request_label_changes_send_webhooks_and_list_who_labeled_it() {
     // Given
     let server = start().await;
     let pr = pull_request(&server, "change", "", IssueState::Open);
@@ -611,6 +611,14 @@ async fn labeling_a_pull_request_sends_pull_request_labeled_and_lists_who_labele
         )
         .await;
     let by_reader = client(&server, BOB_TOKEN).post(&path, &json!(["x"])).await;
+    let removed = as_alice(&server)
+        .call_json(
+            Method::PATCH,
+            &format!("{REPO}/issues/{pr}"),
+            &json!({"labels": ["second"]}),
+        )
+        .await;
+    assert_eq!(removed.status, StatusCode::OK);
     let events = as_alice(&server)
         .get(&format!("{REPO}/issues/{pr}/events?per_page=100"))
         .await;
@@ -645,6 +653,12 @@ async fn labeling_a_pull_request_sends_pull_request_labeled_and_lists_who_labele
     assert_eq!(p["number"], json!(pr));
     assert_eq!(p["label"]["name"], json!("agent:review"));
     assert_eq!(p["pull_request"]["labels"][0]["name"], json!("agent:review"));
+    let unlabeled = of(&all, "pull_request", "unlabeled");
+    assert_eq!(unlabeled.len(), 1);
+    let p = octokit(unlabeled[0]);
+    assert_eq!(p["number"], pr);
+    assert_eq!(p["label"]["name"], "agent:review");
+    assert_eq!(p["pull_request"]["labels"][0]["name"], "second");
     assert!(of(&all, "issues", "labeled").is_empty());
 }
 
