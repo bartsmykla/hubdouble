@@ -206,6 +206,71 @@ async fn workflow_run_filters_apply_together_before_pagination() {
     }
 }
 
+#[tokio::test]
+async fn a_filtered_run_list_ends_at_the_page_that_starts_at_result_1000() {
+    // Given 1 100 queued runs of one workflow
+    let server = server("none").await;
+    let client = client(&server);
+    let first = dispatch(&client, "main").await["workflow_run_id"]
+        .as_i64()
+        .unwrap();
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            let run = tx
+                .table::<WorkflowRuns>()
+                .get(first)
+                .unwrap()
+                .as_ref()
+                .clone();
+            for _ in 1..1100 {
+                let mut copy = run.clone();
+                copy.id = tx.next_id();
+                copy.node_id = node_id::entity(node_id::WORKFLOW_RUN, copy.id);
+                tx.table_mut::<WorkflowRuns>().insert(copy)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    for (base, op) in [
+        (format!("{ACTIONS}/runs"), "list-workflow-runs-for-repo"),
+        (
+            format!("{ACTIONS}/workflows/agent.yml/runs"),
+            "list-workflow-runs",
+        ),
+    ] {
+        let count = |list: &serde_json::Value| {
+            (
+                list["total_count"].clone(),
+                list["workflow_runs"].as_array().map(Vec::len),
+            )
+        };
+        // When a filtered list asks for the page before and the page at result 1000
+        let before = valid(
+            op,
+            &client
+                .get(&format!("{base}?status=queued&per_page=30&page=34"))
+                .await,
+        );
+        let past = valid(
+            op,
+            &client
+                .get(&format!("{base}?status=queued&per_page=100&page=11"))
+                .await,
+        );
+        let unfiltered = valid(
+            op,
+            &client.get(&format!("{base}?per_page=100&page=11")).await,
+        );
+        // Then the page that starts below 1000 is whole, and the one at 1000 is empty
+        assert_eq!(count(&before), (json!(1100), Some(30)));
+        assert_eq!(count(&past), (json!(0), Some(0)));
+        assert_eq!(count(&unfiltered), (json!(1100), Some(100)));
+    }
+}
+
 fn open_pull_request(server: &TestServer, head: &str) -> (i64, String) {
     let services = server.server.services();
     services

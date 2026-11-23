@@ -165,12 +165,30 @@ fn list_workflow(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     list_runs(ctx, Some(workflow.id))
 }
 
+const SEARCH_LIMIT: usize = 1000;
+const SEARCH_PARAMETERS: [&str; 7] = [
+    "actor",
+    "branch",
+    "check_suite_id",
+    "created",
+    "event",
+    "head_sha",
+    "status",
+];
+
 fn list_runs(ctx: &Ctx<'_>, workflow: Option<i64>) -> Result<Reply, ApiError> {
     let filters = Filters::new(ctx.tx(), ctx.query())?;
     let Some(created) = filters.created else {
         return crate::page::<hubdouble_render::WorkflowRun>(ctx, "workflow_runs", 0, &[]);
     };
     let (start, limit) = crate::window(ctx);
+    if start >= SEARCH_LIMIT
+        && SEARCH_PARAMETERS
+            .iter()
+            .any(|p| ctx.query().get(p).is_some())
+    {
+        return crate::page::<hubdouble_render::WorkflowRun>(ctx, "workflow_runs", 0, &[]);
+    }
     let repo = ctx.repo()?.id;
     let table = ctx.tx().table::<WorkflowRuns>();
     let runs: &mut dyn Iterator<Item = &Arc<WorkflowRun>> = match workflow {
