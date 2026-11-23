@@ -128,27 +128,25 @@ fn builtin(tx: &Tx, matches: impl Fn(&Account) -> bool) -> Option<Account> {
 fn reply(
     ctx: &Ctx<'_>,
     found: Option<&Arc<Account>>,
-    builtin: Option<Account>,
+    builtin: impl FnOnce() -> Option<Account>,
 ) -> Result<Reply, ApiError> {
     if let Some(account) = found {
         return Reply::json(&render(ctx.tx(), ctx.urls(), account, own(ctx, account)));
     }
-    let account = builtin.ok_or_else(ApiError::not_found)?;
+    let account = builtin().ok_or_else(ApiError::not_found)?;
     Reply::json(&render(ctx.tx(), ctx.urls(), &account, false))
 }
 
 fn by_username(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let login = ctx.param("username")?;
     let found = ctx.tx().table::<Accounts>().by_login(login);
-    reply(
-        ctx,
-        found,
-        builtin(ctx.tx(), |a| a.login.eq_ignore_ascii_case(login)),
-    )
+    reply(ctx, found, || {
+        builtin(ctx.tx(), |a| a.login.eq_ignore_ascii_case(login))
+    })
 }
 
 fn by_id(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let id = ctx.param_i64("account_id")?;
     let found = ctx.tx().table::<Accounts>().get(id);
-    reply(ctx, found, builtin(ctx.tx(), |a| a.id == id))
+    reply(ctx, found, || builtin(ctx.tx(), |a| a.id == id))
 }
