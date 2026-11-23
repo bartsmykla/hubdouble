@@ -105,6 +105,7 @@ fn checked(
 
 fn case(x: &Exchange<'_>, c: &Checked, services: Option<&Services>) -> Case {
     match x.status {
+        304 => Case::Other,
         200..=399 => Case::Success,
         403 if x.headers.contains_key("x-accepted-github-permissions") => Case::MissingPermission,
         422 => Case::Invalid,
@@ -387,5 +388,27 @@ mod tests {
         assert_eq!(ref_escape("heads/feat/a b"), "heads/feat/a%20b");
         assert_eq!(contents_path("docs/a b;c,d.md/"), "docs/a%20b;c,d.md");
         assert_eq!(contents_path("a?b"), "a%3Fb");
+    }
+
+    #[test]
+    fn only_a_full_answer_counts_as_a_success_case() {
+        let empty = HeaderMap::new();
+        let answered = |status| Exchange {
+            method: "GET",
+            path: "/repos/acme/public",
+            query: "",
+            request_headers: &empty,
+            request_body: &[],
+            status,
+            headers: &empty,
+            body: &[],
+        };
+        let checked = |status| Checked {
+            route: "repos/get".to_owned(),
+            status,
+        };
+        assert_eq!(case(&answered(200), &checked(200), None), Case::Success);
+        assert_eq!(case(&answered(302), &checked(302), None), Case::Success);
+        assert_eq!(case(&answered(304), &checked(304), None), Case::Other);
     }
 }
