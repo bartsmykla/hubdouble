@@ -42,11 +42,11 @@ description = "Generate crates/spec/src/ops_gen.rs from the pinned OpenAPI bundl
 run = "cargo run --locked -p xtask -- gen"
 
 [inventory]
-description = "Generate the client API inventory"
+description = "Generate the client's API inventory"
 run = "cargo run --locked -p xtask -- inventory"
 
 ["inventory:check"]
-description = "Check the client API inventory for changes"
+description = "Check the client's API inventory for changes"
 run = "cargo run --locked -p xtask -- inventory --check"
 
 ["smoke:kind"]

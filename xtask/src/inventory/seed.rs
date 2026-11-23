@@ -4,8 +4,8 @@ use std::path::Path;
 use serde_json::Value;
 use tree_sitter::Parser;
 
-use super::Result;
 use super::go::{Source, assignments};
+use super::{Result, rename};
 
 const CAPABILITY: &str = ".github/runtime-capabilities.json";
 const VERSIONS: &[(&str, &str, &str)] = &[
@@ -17,7 +17,12 @@ const VERSIONS: &[(&str, &str, &str)] = &[
     ("answers", "stagecandidate/candidate.go", "Version"),
 ];
 
-pub(super) fn check(root: &Path, source: &Path, parser: &mut Parser) -> Result<()> {
+pub(super) fn check(
+    root: &Path,
+    source: &Path,
+    parser: &mut Parser,
+    names: &[(String, String)],
+) -> Result<()> {
     let mut expected = BTreeMap::new();
     for &(field, path, name) in VERSIONS {
         let source = Source::read(parser, source.join("internal").join(path))?;
@@ -25,7 +30,7 @@ pub(super) fn check(root: &Path, source: &Path, parser: &mut Parser) -> Result<(
             .first()
             .and_then(|node| source.string(*node))
             .ok_or_else(|| format!("{path}: missing version constant {name}"))?;
-        expected.insert(field, value);
+        expected.insert(field, rename(&value, names));
     }
     let seed = std::fs::read_to_string(root.join("examples/client-v5.yaml"))?;
     let entries: Vec<Value> = serde_saphyr::from_str(&seed)?;

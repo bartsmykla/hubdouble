@@ -21,11 +21,15 @@ const SMOKE_REST_ROUTES: &[&str] = &[
 ];
 
 pub(super) fn run(root: &Path, args: &[String]) -> Result<()> {
-    let (checkout, check) = options(args)?;
+    let (checkout, names, check) = options(args)?;
+    let names = match names {
+        Some(path) => parse_names(&fs::read_to_string(path)?)?,
+        None => Vec::new(),
+    };
     let (module, version) = module_version(&fs::read_to_string(checkout.join("go.mod"))?)?;
     let module = cache_module(root, &module, &version)?;
     let mut parser = go::parser()?;
-    seed::check(root, &checkout, &mut parser)?;
+    seed::check(root, &checkout, &mut parser, &names)?;
     let catalog = rest::Catalog::read(&mut parser, go::files(&module.join("github"))?)?;
     let paths = rest::paths(root)?;
     let mut routes = BTreeSet::new();
@@ -61,26 +65,50 @@ pub(super) fn run(root: &Path, args: &[String]) -> Result<()> {
             document,
         )
     }));
+    for content in output.values_mut() {
+        *content = rename(content, &names);
+    }
     save(&inventory, &output, check)?;
     eprintln!("xtask: {} GraphQL documents", output.len() - 2);
     Ok(())
 }
 
-fn options(args: &[String]) -> Result<(PathBuf, bool)> {
+fn options(args: &[String]) -> Result<(PathBuf, Option<PathBuf>, bool)> {
     let mut check = false;
     let mut checkout = None;
+    let mut names = None;
     let mut args = args.iter().map(String::as_str);
     while let Some(arg) = args.next() {
         match arg {
             "--check" if !check => check = true,
             "--client" if checkout.is_none() => checkout = args.next().map(PathBuf::from),
+            "--names" if names.is_none() => {
+                names = Some(args.next().ok_or("--names requires <file>")?.into());
+            }
             _ => return Err(format!("unknown inventory argument: {arg}").into()),
         }
     }
     Ok((
         checkout.ok_or("inventory requires --client <path>")?,
+        names,
         check,
     ))
+}
+
+fn parse_names(text: &str) -> Result<Vec<(String, String)>> {
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| match line.split_once("==>") {
+            Some((from, to)) if !from.is_empty() => Ok((from.to_owned(), to.to_owned())),
+            _ => Err(format!("names: expected a from==>to line: {line:?}").into()),
+        })
+        .collect()
+}
+
+fn rename(text: &str, names: &[(String, String)]) -> String {
+    names
+        .iter()
+        .fold(text.to_owned(), |text, (from, to)| text.replace(from, to))
 }
 
 fn module_version(gomod: &str) -> Result<(String, String)> {
@@ -205,6 +233,17 @@ mod tests {
         let route = "GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions";
         let generated = route_list(BTreeSet::from(["GET /app".to_owned()]));
         assert!(generated.lines().any(|line| line == route));
+    }
+
+    #[test]
+    fn names_apply_in_file_order_and_reject_lines_without_a_source() {
+        let names = parse_names("refs/tags/old/==>refs/tags/mid/\n\nmid==>new\n").unwrap();
+        assert_eq!(
+            rename(r#"refs(refPrefix: "refs/tags/old/")"#, &names),
+            r#"refs(refPrefix: "refs/tags/new/")"#
+        );
+        assert!(parse_names("no separator\n").is_err());
+        assert!(parse_names("==>empty source\n").is_err());
     }
 
     #[test]

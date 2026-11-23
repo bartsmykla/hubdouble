@@ -25,7 +25,7 @@ fn main() -> ExitCode {
         [task, rest @ ..] if task == "inventory" => inventory::run(&root(), rest),
         [task] if task == "smoke-kind" => smoke_kind::run(&root()),
         _ => Err(
-            "usage: xtask gen | xtask inventory --client <path> [--check] | xtask smoke-kind"
+            "usage: xtask gen | xtask inventory --client <path> [--names <file>] [--check] | xtask smoke-kind"
                 .into(),
         ),
     };
