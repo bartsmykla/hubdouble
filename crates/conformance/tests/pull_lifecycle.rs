@@ -781,6 +781,75 @@ async fn a_merge_that_deletes_its_head_branch_retargets_the_pull_requests_based_
     assert_eq!(deleted, [(json!("refs/heads/one"), json!(true))]);
 }
 
+#[tokio::test]
+async fn a_merge_that_deletes_its_head_branch_records_a_failed_base_change_on_merged_pull_requests_based_on_it()
+ {
+    // Given a repository that deletes head branches on merge, a pull request from one into main, and a merged one from two into one
+    let server = server(&[]).await;
+    delete_branch_on_merge(&server);
+    let client = alice(&server);
+    for (branch, from) in [("one", "main"), ("two", "one")] {
+        create_branch(
+            &client,
+            Deletion::Rest,
+            branch,
+            &tip(&server, from).to_string(),
+        )
+        .await;
+        push(&server, branch, &format!("{branch}.txt"), "text\n");
+    }
+    for (head, base) in [("one", "main"), ("two", "one")] {
+        let opened = client
+            .post(
+                "repos/acme/public/pulls",
+                &json!({"title": head, "head": head, "base": base}),
+            )
+            .await;
+        assert_eq!(opened.status, StatusCode::CREATED, "{}", opened.json());
+    }
+    let merged = client
+        .call_json(Method::PUT, "repos/acme/public/pulls/2/merge", &json!({}))
+        .await;
+    assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
+    let before = client.get("repos/acme/public/pulls/2").await.json();
+    let earlier: Vec<_> = events(&client, 2)
+        .await
+        .iter()
+        .map(|e| e["id"].clone())
+        .collect();
+    deliveries(&server).await;
+    // When the first pull request is merged
+    let merged = client
+        .call_json(Method::PUT, "repos/acme/public/pulls/1/merge", &json!({}))
+        .await;
+    assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
+    // Then the merged pull request records automatic_base_change_failed by the merger and keeps its base and updated_at
+    let recorded: Vec<_> = events(&client, 2)
+        .await
+        .into_iter()
+        .filter(|e| !earlier.contains(&e["id"]))
+        .collect();
+    assert_eq!(names(&recorded), ["automatic_base_change_failed"]);
+    let failed = &recorded[0];
+    assert_eq!(keys(failed), REF_EVENT_KEYS.map(String::from));
+    assert_eq!(
+        failed["node_id"].as_str().map(|id| &id[..6]),
+        Some("ABCFE_")
+    );
+    assert_eq!(failed["actor"]["login"], "alice");
+    let after = client.get("repos/acme/public/pulls/2").await.json();
+    assert_eq!(
+        (&after["state"], &after["merged"], &after["base"]["ref"]),
+        (&json!("closed"), &json!(true), &json!("one"))
+    );
+    assert_eq!(after["updated_at"], before["updated_at"]);
+    // And it gets no pull_request webhook
+    assert_eq!(
+        pull_hooks(&deliveries(&server).await, 2),
+        Vec::<(String, Value)>::new()
+    );
+}
+
 async fn create_branch(client: &GoGithub, how: Deletion, branch: &str, sha: &str) {
     let name = format!("refs/heads/{branch}");
     match how {

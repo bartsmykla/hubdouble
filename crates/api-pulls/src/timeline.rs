@@ -10,6 +10,7 @@ pub enum StateKind {
     Renamed { from: String, to: String },
     BaseRefChanged,
     AutomaticBaseChangeSucceeded,
+    AutomaticBaseChangeFailed,
     HeadRefDeleted,
     HeadRefRestored,
     BaseRefDeleted,
@@ -25,6 +26,7 @@ impl StateKind {
             StateKind::Renamed { .. } => "renamed",
             StateKind::BaseRefChanged => "base_ref_changed",
             StateKind::AutomaticBaseChangeSucceeded => "automatic_base_change_succeeded",
+            StateKind::AutomaticBaseChangeFailed => "automatic_base_change_failed",
             StateKind::HeadRefDeleted => "head_ref_deleted",
             StateKind::HeadRefRestored => "head_ref_restored",
             StateKind::BaseRefDeleted => "base_ref_deleted",
@@ -38,6 +40,7 @@ impl StateKind {
             StateKind::Renamed { .. } => "RTE",
             StateKind::BaseRefChanged => "BRCE",
             StateKind::AutomaticBaseChangeSucceeded => "ABCSE",
+            StateKind::AutomaticBaseChangeFailed => "ABCFE",
             StateKind::HeadRefDeleted => "HRDE",
             StateKind::HeadRefRestored => "HRRE",
             StateKind::BaseRefDeleted => "BRDE",
@@ -47,7 +50,7 @@ impl StateKind {
 
 /// An issue event that T5 records for a pull request: a `reopened` one from any path, and the
 /// `closed`, `renamed`, `base_ref_changed`, `automatic_base_change_succeeded`,
-/// `head_ref_deleted`, `head_ref_restored` and `base_ref_deleted` ones of T5's own writes and
+/// `automatic_base_change_failed`, `head_ref_deleted`, `head_ref_restored` and `base_ref_deleted` ones of T5's own writes and
 /// of branch deletions and restores. T7 records the other closes itself, and its
 /// `GET .../issues/{n}/events` lists these rows with its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,8 +92,18 @@ pub(crate) fn via_app(actor: &Actor) -> Option<i64> {
 pub(crate) fn record(
     tx: &mut TxMut<'_>,
     issue: &Issue,
+    who: (i64, Option<i64>),
+    kind: StateKind,
+) -> Result<(), ApiError> {
+    record_at(tx, issue, who, kind, issue.updated_at)
+}
+
+pub(crate) fn record_at(
+    tx: &mut TxMut<'_>,
+    issue: &Issue,
     (actor_id, via_app): (i64, Option<i64>),
     kind: StateKind,
+    created_at: Timestamp,
 ) -> Result<(), ApiError> {
     let id = tx.next_id();
     tx.table_mut::<StateEvents>().insert(StateEvent {
@@ -101,7 +114,7 @@ pub(crate) fn record(
         actor_id,
         via_app,
         kind,
-        created_at: issue.updated_at,
+        created_at,
     })?;
     Ok(())
 }

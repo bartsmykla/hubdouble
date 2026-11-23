@@ -608,7 +608,7 @@ fn delete_head(
         .in_repo(head_repo)
         .filter(|issue| {
             head_repo == merged.repo_id
-                && issue.state == IssueState::Open
+                && issue.id != merged.id
                 && issue.pull.as_ref().is_some_and(|d| {
                     d.base.ref_name == p.head.ref_name && d.head.repo_id == Some(head_repo)
                 })
@@ -624,6 +624,9 @@ fn delete_head(
             state::sync_refs(tx, git, &dependent)?;
             timeline::record(tx, &dependent, who, StateKind::AutomaticBaseChangeSucceeded)?;
             retargeted.push((dependent, from));
+        } else {
+            let kind = StateKind::AutomaticBaseChangeFailed;
+            timeline::record_at(tx, &dependent, who, kind, git.now())?;
         }
     }
     git.update_ref(tx, head_repo, who.0, &name, Some(tip), None, true)?;
