@@ -529,6 +529,55 @@ async fn a_push_asks_each_checks_app_for_a_suite() {
 }
 
 #[tokio::test]
+async fn a_suite_whose_runs_are_all_skipped_concludes_skipped() {
+    // Given
+    let server = start(vec![]).await;
+    let client = app_client(&server);
+    drain(&server).await;
+    // When every run on feature is skipped, and main has a skipped and a passing run
+    let cases = [
+        ("feature", ["skipped", "skipped"], "skipped"),
+        ("main", ["skipped", "success"], "success"),
+    ];
+    let mut suites = Vec::new();
+    for (branch, conclusions, _) in cases {
+        let head = sha(&server, branch);
+        let mut suite = Value::Null;
+        for (n, conclusion) in conclusions.into_iter().enumerate() {
+            let body = json!({"name": format!("job {n}"), "head_sha": head,
+                "status": "completed", "conclusion": conclusion});
+            let run = checked(&client.post(RUNS, &body).await, 201, "checks/create");
+            suite = run["check_suite"]["id"].clone();
+        }
+        suites.push((head, suite));
+    }
+    let all = drain(&server).await;
+    // Then the suite concludes skipped only when every run is skipped, as live GitHub answers
+    for ((head, suite), (_, _, want)) in suites.iter().zip(cases) {
+        let listed = checked(
+            &client
+                .get(&format!(
+                    "repos/acme/public/commits/{head}/check-suites?app_id={}",
+                    fixture::APP_ID
+                ))
+                .await,
+            200,
+            "checks/list-suites-for-ref",
+        );
+        let read = &listed["check_suites"][0];
+        assert_eq!(
+            (&read["id"], &read["status"], &read["conclusion"]),
+            (suite, &json!("completed"), &json!(want))
+        );
+        let completed: Vec<Value> = deliveries(&all, "check_suite", Some("completed"))
+            .filter(|p| p["check_suite"]["id"] == *suite)
+            .map(|p| p["check_suite"]["conclusion"].clone())
+            .collect();
+        assert_eq!(completed.last(), Some(&json!(want)), "{want}");
+    }
+}
+
+#[tokio::test]
 async fn check_run_events_reach_the_app_with_the_fields_the_client_reads() {
     // Given
     let server = start(vec![]).await;

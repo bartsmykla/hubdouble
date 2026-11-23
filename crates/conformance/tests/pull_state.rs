@@ -225,7 +225,7 @@ async fn without_rules_a_failing_or_running_check_makes_the_merge_state_unstable
     for (conclusion, want) in [
         (Some("failure"), "unstable"),
         (None, "unstable"),
-        (Some("neutral"), "clean"),
+        (Some("skipped"), "clean"),
     ] {
         // Given a pull request into a main without rules
         let server = server(&[pull_request(false)]).await;

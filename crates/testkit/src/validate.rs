@@ -1,7 +1,7 @@
 //! Response and payload validators: REST bodies against the pinned `OpenAPI` description
 //! (`OpenAPI` 3.0 schemas converted to JSON Schema draft 4), webhook payloads against the pinned
-//! `@octokit/webhooks-schemas` 7.6.1, with the newer fields and the `workflow_job` conclusions
-//! that GitHub's own description holds.
+//! `@octokit/webhooks-schemas` 7.6.1, with the newer fields and the `workflow_job` and
+//! `check_suite` conclusions that GitHub's own description holds.
 
 use std::sync::LazyLock;
 
@@ -79,32 +79,64 @@ fn allow_newer_fields(mut schema: Value) -> Value {
     schema
 }
 
-fn allow_github_job_conclusions(mut schema: Value) -> Value {
+fn allow_github_conclusions(mut schema: Value) -> Value {
     let job = "/components/schemas/webhook-workflow-job-completed/properties/workflow_job/allOf";
+    let suite = |action: &str| {
+        (
+            format!(
+                "/components/schemas/webhook-check-suite-{action}/properties/check_suite/properties/conclusion"
+            ),
+            format!(
+                "/definitions/check_suite${action}/properties/check_suite/properties/conclusion"
+            ),
+        )
+    };
+    let run_suite = |action: &str| {
+        (
+            "/components/schemas/simple-check-suite/properties/conclusion".to_owned(),
+            format!(
+                "/definitions/check_run${action}/properties/check_run/properties/check_suite/properties/conclusion"
+            ),
+        )
+    };
     for (github, octokit) in [
         (
-            "0/properties/conclusion/enum",
-            "/definitions/workflow-job/properties/conclusion/enum",
+            format!("{job}/0/properties/conclusion"),
+            "/definitions/workflow-job/properties/conclusion".to_owned(),
         ),
         (
-            "1/properties/conclusion/enum",
-            "/definitions/workflow_job$completed/properties/workflow_job/allOf/1/properties/conclusion/enum",
+            format!("{job}/1/properties/conclusion"),
+            "/definitions/workflow_job$completed/properties/workflow_job/allOf/1/properties/conclusion".to_owned(),
         ),
+        suite("completed"),
+        suite("requested"),
+        suite("rerequested"),
+        run_suite("completed"),
+        run_suite("created"),
+        run_suite("requested_action"),
+        run_suite("rerequested"),
     ] {
-        let values = OPENAPI
+        let property = OPENAPI
             .doc
-            .pointer(&format!("{job}/{github}"))
+            .pointer(&github)
+            .unwrap_or_else(|| panic!("the OpenAPI bundle has no {github}"));
+        let mut values = property
+            .get("enum")
+            .and_then(Value::as_array)
             .cloned()
-            .unwrap_or_else(|| panic!("the OpenAPI bundle has no {github} job conclusions"));
+            .unwrap_or_else(|| panic!("{github} has no enum"));
+        if property.get("nullable") == Some(&Value::Bool(true)) && !values.contains(&Value::Null) {
+            values.push(Value::Null);
+        }
         *schema
-            .pointer_mut(octokit)
-            .unwrap_or_else(|| panic!("octokit has no {octokit}")) = values;
+            .pointer_mut(&format!("{octokit}/enum"))
+            .unwrap_or_else(|| panic!("octokit has no {octokit}/enum")) = Value::Array(values);
     }
     schema
 }
 
 static OCTOKIT_REGISTRY: LazyLock<(Value, Registry<'static>)> = LazyLock::new(|| {
-    let schema: Value = allow_github_job_conclusions(allow_newer_fields(
+    let schema: Value = allow_github_conclusions(allow_newer_fields(
         serde_json::from_str(OCTOKIT).unwrap_or_else(|e| panic!("parse the octokit schema: {e}")),
     ));
     let registry = Registry::new()
