@@ -177,6 +177,7 @@ fn list_workflow(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 }
 
 const SEARCH_LIMIT: usize = 1000;
+const SEARCH_TOTAL_LIMIT: usize = 2500;
 const SEARCH_PARAMETERS: [&str; 7] = [
     "actor",
     "branch",
@@ -201,11 +202,10 @@ fn list_runs(ctx: &Ctx<'_>, workflow: Option<i64>) -> Result<Reply, ApiError> {
         return crate::page::<hubdouble_render::WorkflowRun>(ctx, "workflow_runs", 0, &[]);
     };
     let (start, limit) = crate::window(ctx);
-    if start >= SEARCH_LIMIT
-        && SEARCH_PARAMETERS
-            .iter()
-            .any(|p| ctx.query().get(p).is_some())
-    {
+    let filtered = SEARCH_PARAMETERS
+        .iter()
+        .any(|p| ctx.query().get(p).is_some());
+    if filtered && start >= SEARCH_LIMIT {
         return crate::page::<hubdouble_render::WorkflowRun>(ctx, "workflow_runs", 0, &[]);
     }
     let repo = ctx.repo()?.id;
@@ -221,6 +221,9 @@ fn list_runs(ctx: &Ctx<'_>, workflow: Option<i64>) -> Result<Reply, ApiError> {
             page.push(render(ctx, run)?);
         }
         count += 1;
+        if filtered && count == SEARCH_TOTAL_LIMIT {
+            break;
+        }
     }
     crate::page(ctx, "workflow_runs", count, &page)
 }

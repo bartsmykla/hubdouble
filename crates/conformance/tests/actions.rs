@@ -271,6 +271,59 @@ async fn a_filtered_run_list_ends_at_the_page_that_starts_at_result_1000() {
     }
 }
 
+#[tokio::test]
+async fn a_filtered_run_list_counts_at_most_2500_runs() {
+    // Given 2 600 queued runs of one workflow, 300 of them from a push
+    let server = server("none").await;
+    let client = client(&server);
+    let first = dispatch(&client, "main").await["workflow_run_id"]
+        .as_i64()
+        .unwrap();
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            let run = tx
+                .table::<WorkflowRuns>()
+                .get(first)
+                .unwrap()
+                .as_ref()
+                .clone();
+            for n in 1..2600 {
+                let mut copy = run.clone();
+                copy.id = tx.next_id();
+                copy.node_id = node_id::entity(node_id::WORKFLOW_RUN, copy.id);
+                if n <= 300 {
+                    "push".clone_into(&mut copy.event);
+                }
+                tx.table_mut::<WorkflowRuns>().insert(copy)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    for (base, op) in [
+        (format!("{ACTIONS}/runs"), "list-workflow-runs-for-repo"),
+        (
+            format!("{ACTIONS}/workflows/agent.yml/runs"),
+            "list-workflow-runs",
+        ),
+    ] {
+        // When the lists are read with and without a filter, as live hashicorp/terraform was
+        let unfiltered = client.get(&format!("{base}?per_page=100")).await;
+        let capped = client.get(&format!("{base}?status=queued&page=34")).await;
+        let under = client.get(&format!("{base}?event=push&per_page=1")).await;
+        // Then only a filtered total stops at 2 500, and its last page follows the capped total
+        assert_eq!(valid(op, &unfiltered)["total_count"], 2600);
+        assert!(unfiltered.header("link").contains("page=26>; rel=\"last\""));
+        let page = valid(op, &capped);
+        assert_eq!(page["total_count"], 2500);
+        assert_eq!(page["workflow_runs"].as_array().map(Vec::len), Some(30));
+        assert!(capped.header("link").contains("page=84>; rel=\"last\""));
+        assert_eq!(valid(op, &under)["total_count"], 300);
+    }
+}
+
 fn open_pull_request(server: &TestServer, head: &str) -> (i64, String) {
     let services = server.server.services();
     services
