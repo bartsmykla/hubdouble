@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use hubdouble_auth::{Actor, ruleset_bypass};
-use hubdouble_git::{Commit, Git, ObjectData, ObjectId, SignatureState};
+use hubdouble_git::{Commit, Git, GitError, ObjectData, ObjectId, SignatureState};
 use hubdouble_model::{ApiError, Conclusion, Repo, Rule, Ruleset, RunStatus, StatusState, glob};
 use hubdouble_store::{Apps, CheckRuns, CheckSuites, Repos, Rulesets, Statuses, Tx};
 use serde_json::Value;
@@ -410,6 +410,9 @@ pub fn tag_violations(
         false,
     );
     let mut out = Vec::new();
+    if rules.is_empty() {
+        return Ok(out);
+    }
     let Some(new) = new else {
         if rules.iter().any(|r| r.rule_type == "deletion") {
             out.push(TAG_DELETION.to_owned());
@@ -417,32 +420,40 @@ pub fn tag_violations(
         return Ok(out);
     };
     let own = format!("refs/tags/{tag}");
-    let new_commit = git.peel_to_commit(tx, repo.id, new)?;
-    let old_commit = old
-        .map(|o| git.peel_to_commit(tx, repo.id, o))
-        .transpose()?;
+    let new_commit = commit_of(tx, git, repo, new)?;
+    let old_commit = old.map(|o| commit_of(tx, git, repo, o)).transpose()?;
     let mut added: Option<Added> = None;
     for rule in &rules {
         let violation = match rule.rule_type.as_str() {
             "creation" if old.is_none() => Some(CREATION.to_owned()),
             "update" if old.is_some() => Some(UPDATE.to_owned()),
-            "non_fast_forward" => match old_commit {
-                Some(o) if !git.is_ancestor(tx, repo.id, o, new_commit)? => {
-                    Some(TAG_FORCE_PUSH.to_owned())
-                }
-                _ => None,
+            "non_fast_forward" => match (old_commit, new_commit) {
+                (None, _) => None,
+                (Some(Some(o)), Some(n)) if git.is_ancestor(tx, repo.id, o, n)? => None,
+                _ => Some(TAG_FORCE_PUSH.to_owned()),
             },
-            "required_linear_history" | "required_signatures" => {
-                let commits = cached(&mut added, || {
-                    introduced(tx, git, repo, &own, old_commit, new_commit)
-                })?;
-                history_violation(git, rule, commits)
-            }
+            "required_linear_history" | "required_signatures" => match new_commit {
+                Some(n) => {
+                    let commits = cached(&mut added, || {
+                        introduced(tx, git, repo, &own, old_commit.flatten(), n)
+                    })?;
+                    history_violation(git, rule, commits)
+                }
+                None => None,
+            },
             _ => None,
         };
         push_unique(&mut out, violation);
     }
     Ok(out)
+}
+
+fn commit_of(tx: &Tx, git: &Git, repo: &Repo, id: ObjectId) -> Result<Option<ObjectId>, ApiError> {
+    match git.peel_to_commit(tx, repo.id, id) {
+        Ok(commit) => Ok(Some(commit)),
+        Err(GitError::WrongKind) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn fork_root<'t>(tx: &'t Tx, repo: &'t Repo) -> &'t Repo {

@@ -57,7 +57,9 @@ impl Git {
     /// parents, as `git rev-list <tip> --not <others>`. The walk goes back by generation (one
     /// more than the highest parent's, kept with each commit) and stops once every commit left
     /// to read has a lower generation than every commit only `tip` reaches, so it reads the
-    /// history only down to where `tip` meets `others`, whatever the commit times say.
+    /// history only down to where `tip` meets `others`, whatever the commit times say. Tags
+    /// are peeled, and a ref that does not peel to a commit, such as a tag of a tree, reaches
+    /// no commit.
     ///
     /// # Errors
     ///
@@ -77,10 +79,13 @@ impl Git {
             only_tip: BTreeSet::new(),
         };
         for &other in others {
-            let (other, _) = odb.peel_commit(other)?;
-            painter.paint(other, FROM_OTHERS)?;
+            if let Some(other) = commit_of(&odb, other)? {
+                painter.paint(other, FROM_OTHERS)?;
+            }
         }
-        let (tip, _) = odb.peel_commit(tip)?;
+        let Some(tip) = commit_of(&odb, tip)? else {
+            return Ok(Vec::new());
+        };
         painter.paint(tip, FROM_TIP)?;
         while !painter.done() {
             let Some((_, id)) = painter.queue.pop() else {
@@ -197,6 +202,14 @@ impl Git {
         let mut commits = topo(&odb, tip, &known)?;
         commits.extend(suffix.into_iter().rev());
         Ok(commits)
+    }
+}
+
+fn commit_of(odb: &Odb, id: ObjectId) -> Result<Option<ObjectId>, GitError> {
+    match odb.peel_commit(id) {
+        Ok((commit, _)) => Ok(Some(commit)),
+        Err(GitError::WrongKind) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 

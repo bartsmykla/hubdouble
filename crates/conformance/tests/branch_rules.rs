@@ -931,6 +931,52 @@ async fn tag_rulesets_refuse_each_broken_rule_on_ref_writes() {
     }
 }
 
+#[tokio::test]
+async fn refs_to_a_tree_pass_the_tag_and_push_rules_that_need_commits() {
+    // Given tag rules on v* that read history, a push ruleset, and a tag of main's tree
+    let push = json!({"kind": "ruleset", "repository": "acme/public", "name": "push",
+                      "target": "push", "enforcement": "active", "bypass_actors": [],
+                      "rules": [{"type": "file_path_restriction",
+                                 "parameters": {"restricted_file_paths": ["secrets/**"]}}]});
+    let tags = tag_ruleset(&json!([{"type": "non_fast_forward"},
+                                   {"type": "required_linear_history"}]));
+    let server = server(&[tags, push]).await;
+    let alice = client(&server, ALICE_TOKEN);
+    let main = tip(&alice, "main").await;
+    let tree = alice
+        .get(&format!("{REPO}/git/commits/{main}"))
+        .await
+        .json()["tree"]["sha"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    ref_at(
+        &server,
+        "refs/tags/snapshot",
+        tree.parse().unwrap_or_else(|e| panic!("{e:?}")),
+    );
+    let fine = file_commit(&alice, &main, "ok.md", "ok\n").await;
+    // When the repository admin creates a v* tag of the tree and moves develop
+    let tagged = alice
+        .post(
+            &format!("{REPO}/git/refs"),
+            &json!({"ref": "refs/tags/v-tree", "sha": tree}),
+        )
+        .await;
+    let moved = alice
+        .call_json(
+            Method::PATCH,
+            &format!("{REPO}/git/refs/heads/develop"),
+            &json!({"sha": fine}),
+        )
+        .await;
+    // Then both writes go through
+    assert_eq!(tagged.status, StatusCode::CREATED, "{}", tagged.json());
+    assert_eq!(tagged.json()["object"]["sha"], json!(tree));
+    assert_eq!(moved.status, StatusCode::OK, "{}", moved.json());
+    assert_eq!(tip(&alice, "develop").await, fine);
+}
+
 async fn file_commit(client: &GoGithub, parent: &str, path: &str, content: &str) -> String {
     let base = client
         .get(&format!("{REPO}/git/commits/{parent}"))
