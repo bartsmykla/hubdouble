@@ -8,6 +8,7 @@ mod events;
 mod graphql;
 mod merge_state;
 mod mergeability;
+mod merging;
 mod read;
 mod render;
 mod reopen;

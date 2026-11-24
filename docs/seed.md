@@ -70,6 +70,8 @@ Use `{{sha "owner/repo" "ref"}}` in a repository's `files` or `commits[].files` 
 | `default_branch` | String | No | The parent's default branch for a fork, `main` otherwise |
 | `archived`, `is_template`, `has_discussions`, `allow_auto_merge`, `delete_branch_on_merge` | Boolean | No | `false` |
 | `has_issues`, `has_projects`, `has_wiki`, `allow_merge_commit`, `allow_squash_merge`, `allow_rebase_merge` | Boolean | No | `true` |
+| `squash_merge_commit_title` | `PR_TITLE` or `COMMIT_OR_PR_TITLE` | No | `COMMIT_OR_PR_TITLE` |
+| `squash_merge_commit_message` | `PR_BODY`, `COMMIT_MESSAGES` or `BLANK` | No | `COMMIT_MESSAGES` |
 | `collaborators` | List of collaborator objects | No | `[]` |
 | `collaborators[].login` | String | Yes | None |
 | `collaborators[].permission` | `read`, `triage`, `write`, `maintain`, or `admin` | No | `write` |

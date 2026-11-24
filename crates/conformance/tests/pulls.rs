@@ -411,7 +411,7 @@ async fn rest_merge_validates_options_and_preserves_history() {
     let before = client.get(NUM).await.json();
     // When
     let unsupported = client
-        .call_json(Method::PUT, &path, &json!({"merge_method": "squash"}))
+        .call_json(Method::PUT, &path, &json!({"merge_method": "fast-forward"}))
         .await;
     let stale = client
         .call_json(Method::PUT, &path, &json!({"sha": before["base"]["sha"]}))

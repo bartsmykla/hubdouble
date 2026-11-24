@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use hubdouble_api_gitdata::branch_rules::{self, Via, diff_state, flag, parameter};
+use hubdouble_api_gitdata::branch_rules::{self, MergeMethod, Via, diff_state, flag, parameter};
 use hubdouble_auth::Actor;
 use hubdouble_git::{Git, ObjectId, RefChange};
 use hubdouble_model::{
@@ -344,10 +344,11 @@ fn review_blocks(tx: &Tx, issue: &Issue, p: &Pull, rules: &[&Rule]) -> Vec<Strin
     out
 }
 
-pub(crate) fn tested(p: &Pull) -> Result<Via, ApiError> {
+pub(crate) fn tested(p: &Pull, method: MergeMethod) -> Result<Via, ApiError> {
     Ok(Via::Pull {
         head: p.head.sha.parse()?,
         test_merge: p.merge_commit_sha.as_deref().map(str::parse).transpose()?,
+        method,
     })
 }
 
@@ -357,6 +358,7 @@ pub(crate) fn merge_violations(
     actor: &Actor,
     issue: &Issue,
     (old, new): (ObjectId, ObjectId),
+    method: MergeMethod,
 ) -> Result<Vec<String>, ApiError> {
     let p = crate::state::pull(issue)?;
     let Some(repo) = base_repo(tx, p) else {
@@ -373,7 +375,7 @@ pub(crate) fn merge_violations(
         repo,
         branch,
         moves,
-        tested(p)?,
+        tested(p, method)?,
     )?);
     out.extend(review_blocks(tx, issue, p, &rules));
     let name = format!("refs/heads/{branch}");

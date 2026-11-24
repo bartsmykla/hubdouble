@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use hubdouble_api_gitdata::branch_rules::MergeMethod;
 use hubdouble_auth::{Target as AuthTarget, authorize};
 use hubdouble_git::{CommitNode, GitError, RefNode};
 use hubdouble_gql::{
@@ -71,10 +72,12 @@ pub(crate) fn register(r: &mut Registry) {
         "url" => |cx, issue, _p| format!("{}/{}/pull/{}", cx.urls.web, render::full_name(cx.tx, issue.repo_id)?, issue.number),
     );
     r.object::<DraftPayload>("ReopenPullRequestPayload");
+    r.object::<DraftPayload>("MergePullRequestPayload");
     for kind in [
         "MarkPullRequestReadyForReviewPayload",
         "ConvertPullRequestToDraftPayload",
         "ReopenPullRequestPayload",
+        "MergePullRequestPayload",
     ] {
         r.field(kind, "pullRequest", |_, obj, _| {
             Ok(pull_object(&obj.get::<DraftPayload>()?.issue))
@@ -87,6 +90,7 @@ pub(crate) fn register(r: &mut Registry) {
         draft(cx, args, true)
     });
     r.mutation("reopenPullRequest", reopen);
+    r.mutation("mergePullRequest", merge);
 }
 
 fn scalar(value: impl Serialize) -> Resolved {
@@ -366,6 +370,65 @@ fn reopen(cx: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, GqlError> {
     }
     Ok(Resolved::Object {
         type_name: "ReopenPullRequestPayload",
+        value: Arc::new(DraftPayload {
+            issue,
+            client_mutation_id: input.client_mutation_id,
+        }),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeInput {
+    pull_request_id: String,
+    commit_headline: Option<String>,
+    commit_body: Option<String>,
+    expected_head_oid: Option<String>,
+    merge_method: Option<String>,
+    client_mutation_id: Option<String>,
+}
+
+fn merge(cx: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, GqlError> {
+    let input: MergeInput = required(args, "input")?;
+    let issue = load_pull(cx, &input.pull_request_id)?;
+    let repo = cx
+        .tx
+        .table::<Repos>()
+        .get(issue.repo_id)
+        .ok_or_else(ApiError::not_found)?
+        .clone();
+    cx.authorize(&CONTENTS_WRITE, &repo)?;
+    let method = match input.merge_method.as_deref() {
+        None | Some("MERGE") => MergeMethod::Merge,
+        Some("SQUASH") => MergeMethod::Squash,
+        Some("REBASE") => MergeMethod::Rebase,
+        Some(other) => {
+            return Err(GqlError::new(
+                ErrorType::Unprocessable,
+                format!("Invalid merge method {other}"),
+            ));
+        }
+    };
+    change::merge_pull(
+        &mut cx.tx,
+        cx.git,
+        cx.actor,
+        (&repo, &issue),
+        change::MergeOptions {
+            method,
+            title: input.commit_headline,
+            message: input.commit_body,
+            sha: input.expected_head_oid,
+        },
+    )?;
+    let issue = cx
+        .tx
+        .table::<Issues>()
+        .get(issue.id)
+        .ok_or_else(ApiError::not_found)?
+        .clone();
+    Ok(Resolved::Object {
+        type_name: "MergePullRequestPayload",
         value: Arc::new(DraftPayload {
             issue,
             client_mutation_id: input.client_mutation_id,

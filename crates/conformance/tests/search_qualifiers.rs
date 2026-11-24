@@ -148,6 +148,8 @@ fn repo(id: i64, owner_id: i64) -> Repo {
         allow_merge_commit: true,
         allow_squash_merge: true,
         allow_rebase_merge: true,
+        squash_merge_commit_title: hubdouble_model::SquashMergeCommitTitle::CommitOrPrTitle,
+        squash_merge_commit_message: hubdouble_model::SquashMergeCommitMessage::CommitMessages,
         allow_auto_merge: false,
         delete_branch_on_merge: false,
         collaborators: Vec::new(),

@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use http::StatusCode;
 use hubdouble_admin::SeedCtx;
-use hubdouble_api_gitdata::branch_rules::{self, refusal};
+use hubdouble_api_gitdata::branch_rules::{self, MergeMethod, refusal};
 use hubdouble_api_gitdata::{denied_workflow, workflow_refusal};
 use hubdouble_auth::{Actor, Target as AuthTarget, authorize, repo_role};
-use hubdouble_git::{Git, GitError};
+use hubdouble_git::{Git, GitError, ObjectId};
 use hubdouble_model::{
     ApiError, FieldError, Issue, IssueState, Pull, PullRef, Repo, RepoRole, Timestamp, node_id,
 };
@@ -15,7 +15,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::timeline::{self, StateKind};
-use crate::{CONTENTS_WRITE, events, mergeability, read, render, reopen, reviewing, state};
+use crate::{
+    CONTENTS_WRITE, events, mergeability, merging, read, render, reopen, reviewing, state,
+};
 
 const MERGE_DOCS: &str = "https://docs.github.com/rest/pulls/pulls#merge-a-pull-request";
 
@@ -541,76 +543,124 @@ struct Merge {
 
 pub(crate) fn merge(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let input: Merge = ctx.body()?;
-    let repo = ctx.repo()?;
+    let method = match input.method.as_deref() {
+        None => MergeMethod::Merge,
+        Some(text) => MergeMethod::from_rest(text).ok_or_else(|| {
+            ApiError::unprocessable("Invalid request.").with_error(FieldError {
+                resource: "PullRequest".into(),
+                field: "merge_method".into(),
+                code: "invalid".into(),
+                message: None,
+                value: None,
+            })
+        })?,
+    };
+    let repo = ctx.repo()?.clone();
     let issue = read::issue(ctx)?.clone();
-    let p = state::pull(&issue)?;
-    if input
-        .method
-        .as_deref()
-        .is_some_and(|method| method != "merge")
-    {
-        return Err(ApiError::unprocessable(
-            "Only the merge method is supported",
-        ));
+    let merger = ctx.actor().clone();
+    let (tx, git) = ctx.tx_mut_and_git()?;
+    let sha = merge_pull(
+        tx,
+        git,
+        &merger,
+        (&repo, &issue),
+        MergeOptions {
+            method,
+            title: input.commit_title,
+            message: input.commit_message,
+            sha: input.sha,
+        },
+    )?;
+    Reply::json(&json!({"sha": sha, "merged": true, "message": "Pull Request successfully merged"}))
+}
+
+pub(crate) struct MergeOptions {
+    pub(crate) method: MergeMethod,
+    pub(crate) title: Option<String>,
+    pub(crate) message: Option<String>,
+    pub(crate) sha: Option<String>,
+}
+
+pub(crate) fn merge_pull(
+    tx: &mut TxMut<'_>,
+    git: &Git,
+    merger: &Actor,
+    (repo, issue): (&Arc<Repo>, &Issue),
+    options: MergeOptions,
+) -> Result<ObjectId, ApiError> {
+    let p = state::pull(issue)?;
+    let refused = match options.method {
+        MergeMethod::Merge if !repo.allow_merge_commit => {
+            Some("Merge commits are not allowed on this repository.")
+        }
+        MergeMethod::Squash if !repo.allow_squash_merge => {
+            Some("Squash merges are not allowed on this repository.")
+        }
+        MergeMethod::Rebase if !repo.allow_rebase_merge => {
+            Some("Rebase merges are not allowed on this repository.")
+        }
+        _ => None,
+    };
+    if let Some(message) = refused {
+        return Err(ApiError::new(405, message));
     }
-    if !repo.allow_merge_commit
-        || p.draft
-        || issue.state == IssueState::Closed
-        || p.head.repo_id.is_none()
-    {
-        return Err(ApiError::new(405, "Pull request cannot be merged"));
+    if p.draft || issue.state == IssueState::Closed || p.head.repo_id.is_none() {
+        return Err(merging::cannot_merge());
     }
-    let repo_id = repo.id;
     let head_repo = p.head.repo_id.ok_or_else(ApiError::not_found)?;
-    let live_head = state::branch(ctx.git(), ctx.tx(), head_repo, &p.head.ref_name)?;
-    let sha = live_head.to_string();
-    if input
+    let head = state::branch(git, tx, head_repo, &p.head.ref_name)?;
+    let sha = head.to_string();
+    if options
         .sha
         .as_deref()
         .is_some_and(|wanted| !wanted.eq_ignore_ascii_case(&sha))
     {
         return Err(ApiError::conflict("The head SHA does not match"));
     }
-    let actor = sender(ctx.actor())?;
-    let title = input
-        .commit_title
-        .unwrap_or_else(|| format!("Merge pull request #{}", issue.number));
-    let detail = input.commit_message.as_deref().unwrap_or(&issue.title);
-    let message = format!("{title}\n\n{detail}");
-    let deletes = ctx
-        .tx()
+    let sender = sender(merger)?;
+    let deletes = tx
         .table::<Repos>()
         .get(head_repo)
-        .is_some_and(|h| deletes_head(ctx.tx(), ctx.actor(), &issue, h));
-    let who = (actor, timeline::via_app(ctx.actor()));
-    let base_tip = state::branch(ctx.git(), ctx.tx(), repo_id, &p.base.ref_name)?;
-    let merger = ctx.actor().clone();
-    let base_repo = ctx.repo()?.clone();
-    let (tx, git) = ctx.tx_mut_and_git()?;
-    let result = git
-        .merge(tx, repo_id, actor, &p.base.ref_name, &sha, &message)
-        .map_err(|e| match e {
-            GitError::Conflict { .. } | GitError::NothingToMerge => {
-                ApiError::new(405, "Pull request cannot be merged")
-            }
-            other => other.into(),
-        })?;
-    if let Some(path) =
-        denied_workflow(tx, git, &merger, &base_repo, Some(base_tip), result.commit)?
-    {
-        return Err(ApiError::new(403, workflow_refusal(&merger, &path)).with_docs(MERGE_DOCS));
+        .is_some_and(|h| deletes_head(tx, merger, issue, h));
+    let who = (sender, timeline::via_app(merger));
+    let base = state::branch(git, tx, repo.id, &p.base.ref_name)?;
+    let (title, message) = (options.title, options.message);
+    let commit = match options.method {
+        MergeMethod::Merge => {
+            let title = title.unwrap_or_else(|| format!("Merge pull request #{}", issue.number));
+            let detail = message.as_deref().unwrap_or(&issue.title);
+            let message = format!("{title}\n\n{detail}");
+            git.merge(tx, repo.id, sender, &p.base.ref_name, &sha, &message)
+                .map_err(|e| match e {
+                    GitError::Conflict { .. } | GitError::NothingToMerge => merging::cannot_merge(),
+                    other => other.into(),
+                })?
+                .commit
+        }
+        method => {
+            let commit = if method == MergeMethod::Squash {
+                merging::squash(tx, git, (repo, issue), (base, head), (title, message))?
+            } else {
+                merging::rebase(tx, git, (repo.id, sender), (base, head))?
+            };
+            let name = format!("refs/heads/{}", p.base.ref_name);
+            git.update_ref(tx, repo.id, sender, &name, Some(base), Some(commit), false)?;
+            state::merged_as(tx, git, issue.id, commit, sender)?;
+            commit
+        }
+    };
+    if let Some(path) = denied_workflow(tx, git, merger, repo, Some(base), commit)? {
+        return Err(ApiError::new(403, workflow_refusal(merger, &path)).with_docs(MERGE_DOCS));
     }
     let violations =
-        reviewing::merge_violations(tx, git, &merger, &issue, (base_tip, result.commit))?;
+        reviewing::merge_violations(tx, git, merger, issue, (base, commit), options.method)?;
     if !violations.is_empty() {
         return Err(refusal(405, &violations, MERGE_DOCS));
     }
     if deletes {
-        delete_head(tx, git, &issue, who)?;
+        delete_head(tx, git, issue, who)?;
     }
-    Reply::json(
-        &json!({"sha": result.commit, "merged": true, "message": "Pull Request successfully merged"}),
-    )
+    Ok(commit)
 }
 
 fn deletes_head(tx: &Tx, actor: &Actor, merged: &Issue, head: &Arc<Repo>) -> bool {

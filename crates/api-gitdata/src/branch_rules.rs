@@ -14,7 +14,6 @@ const TAG_DELETION: &str = "Cannot delete this tag";
 const FORCE_PUSH: &str = "Cannot force-push to this branch";
 const TAG_FORCE_PUSH: &str = "Cannot force-push to this tag";
 const PULL_REQUEST: &str = "Changes must be made through a pull request.";
-const MERGE_METHOD: &str = "Merge is not an allowed merge method in this repository.";
 const LINEAR: &str = "This branch must not contain merge commits.";
 const SIGNATURES: &str = "Commits must have verified signatures.";
 const FILE_PATH: &str = "File path is restricted";
@@ -27,6 +26,45 @@ const MEGABYTE: u64 = 1024 * 1024;
 /// or bypass changes.
 pub const DEFAULT_BRANCH: &str = "Cannot delete the default branch";
 
+/// How a pull request joins its base: the REST `merge_method` and the ruleset
+/// `allowed_merge_methods` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    #[must_use]
+    pub fn from_rest(text: &str) -> Option<MergeMethod> {
+        match text {
+            "merge" => Some(MergeMethod::Merge),
+            "squash" => Some(MergeMethod::Squash),
+            "rebase" => Some(MergeMethod::Rebase),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        }
+    }
+
+    fn refusal(self) -> String {
+        let name = match self {
+            MergeMethod::Merge => "Merge",
+            MergeMethod::Squash => "Squash",
+            MergeMethod::Rebase => "Rebase",
+        };
+        format!("{name} is not an allowed merge method in this repository.")
+    }
+}
+
 /// The write that moves a branch. It decides which rules apply and which commit a required
 /// status check reads.
 #[derive(Debug, Clone, Copy)]
@@ -36,11 +74,12 @@ pub enum Via {
     Push,
     /// `POST /repos/{owner}/{repo}/merges`. Required checks read the merged `head`.
     Merge { head: ObjectId },
-    /// The merge of a pull request. A required check reads the test merge commit when that
-    /// commit has a result for the check, and the head commit otherwise.
+    /// The merge of a pull request with `method`. A required check reads the test merge
+    /// commit when that commit has a result for the check, and the head commit otherwise.
     Pull {
         head: ObjectId,
         test_merge: Option<ObjectId>,
+        method: MergeMethod,
     },
 }
 
@@ -52,7 +91,9 @@ impl Via {
         match self {
             Via::Push => vec![new],
             Via::Merge { head } => vec![head],
-            Via::Pull { head, test_merge } => test_merge.into_iter().chain([head]).collect(),
+            Via::Pull {
+                head, test_merge, ..
+            } => test_merge.into_iter().chain([head]).collect(),
         }
     }
 
@@ -334,7 +375,10 @@ pub fn violations(
                 _ => None,
             },
             "pull_request" if !pull_request && old.is_some() => Some(PULL_REQUEST.to_owned()),
-            "pull_request" if pull_request && !allows_merge(rule) => Some(MERGE_METHOD.to_owned()),
+            "pull_request" => match via {
+                Via::Pull { method, .. } if !allows(rule, method) => Some(method.refusal()),
+                _ => None,
+            },
             "required_linear_history" | "required_signatures" => {
                 let own = format!("refs/heads/{branch}");
                 let commits = cached(&mut added, || introduced(tx, git, repo, &own, old, new))?;
@@ -579,10 +623,10 @@ pub fn push_violations(
     Ok(out)
 }
 
-fn allows_merge(rule: &Rule) -> bool {
+fn allows(rule: &Rule, method: MergeMethod) -> bool {
     parameter(rule, "allowed_merge_methods")
         .and_then(Value::as_array)
-        .is_none_or(|methods| methods.iter().any(|m| m.as_str() == Some("merge")))
+        .is_none_or(|methods| methods.iter().any(|m| m.as_str() == Some(method.as_str())))
 }
 
 type Added = Vec<(ObjectId, Arc<Commit>)>;

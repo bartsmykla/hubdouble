@@ -351,6 +351,39 @@ fn update_refs(
     Ok(())
 }
 
+pub(crate) fn merged_as(
+    tx: &mut TxMut<'_>,
+    git: &Git,
+    issue_id: i64,
+    commit: ObjectId,
+    sender: i64,
+) -> Result<(), ApiError> {
+    let mut issue = Issue::clone(
+        tx.table::<Issues>()
+            .get(issue_id)
+            .ok_or_else(ApiError::not_found)?,
+    );
+    let now = git.now();
+    let oid = comparison_base(tx, &issue, pull(&issue)?)?;
+    let p = pull_mut(&mut issue)?;
+    p.merged_at = Some(now);
+    p.merge_commit_sha = Some(commit.to_string());
+    p.merged_by = Some(sender);
+    p.mergeable = None;
+    issue.state = IssueState::Closed;
+    issue.closed_at = Some(now);
+    issue.closed_by = Some(sender);
+    issue.updated_at = now;
+    tx.table_mut::<PullBases>().replace(PullBase {
+        issue_id: issue.id,
+        oid,
+    })?;
+    crate::association::add(tx, issue.repo_id, [issue.user_id])?;
+    tx.table_mut::<Issues>().replace(issue.clone())?;
+    sync_refs(tx, git, &issue)?;
+    events::emit(tx, git, &issue, sender, "closed", serde_json::json!({}))
+}
+
 pub(crate) fn live_tip(git: &Git, tx: &Tx, r: &PullRef) -> Result<Option<ObjectId>, GitError> {
     let Some(repo) = r.repo_id else {
         return Ok(None);

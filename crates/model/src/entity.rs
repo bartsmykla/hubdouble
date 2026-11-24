@@ -50,6 +50,8 @@ rest_enum!(
     RepoRole { Read => "read", Triage => "triage", Write => "write", Maintain => "maintain", Admin => "admin" }
 );
 rest_enum!(Visibility { Public => "public", Private => "private", Internal => "internal" });
+rest_enum!(SquashMergeCommitTitle { PrTitle => "PR_TITLE", CommitOrPrTitle => "COMMIT_OR_PR_TITLE" });
+rest_enum!(SquashMergeCommitMessage { PrBody => "PR_BODY", CommitMessages => "COMMIT_MESSAGES", Blank => "BLANK" });
 rest_enum!(RepositorySelection { All => "all", Selected => "selected" });
 rest_enum!(TokenKind { Installation => "installation", User => "user", Refresh => "refresh", Personal => "personal" });
 rest_enum!(IssueState { Open => "open", Closed => "closed" });
@@ -211,6 +213,8 @@ pub struct Repo {
     pub allow_merge_commit: bool,
     pub allow_squash_merge: bool,
     pub allow_rebase_merge: bool,
+    pub squash_merge_commit_title: SquashMergeCommitTitle,
+    pub squash_merge_commit_message: SquashMergeCommitMessage,
     pub allow_auto_merge: bool,
     pub delete_branch_on_merge: bool,
     pub collaborators: Vec<Collaborator>,

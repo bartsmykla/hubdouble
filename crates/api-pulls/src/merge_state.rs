@@ -1,4 +1,4 @@
-use hubdouble_api_gitdata::branch_rules::{self, CheckResults, RequiredChecks};
+use hubdouble_api_gitdata::branch_rules::{self, CheckResults, MergeMethod, RequiredChecks};
 use hubdouble_api_gitdata::codeowners;
 use hubdouble_git::{Git, GitError, ObjectId};
 use hubdouble_model::{ApiError, Issue, IssueState, Pull};
@@ -185,7 +185,7 @@ fn open_state(tx: &Tx, issue: &Issue, p: &Pull, behind: bool) -> &'static str {
     if required.strict && behind {
         return "behind";
     }
-    let Ok(via) = reviewing::tested(p) else {
+    let Ok(via) = reviewing::tested(p, MergeMethod::Merge) else {
         return "unknown";
     };
     let Ok(head) = p.head.sha.parse() else {

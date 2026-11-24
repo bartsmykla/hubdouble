@@ -6,7 +6,8 @@ use hubdouble_model::node_id;
 use hubdouble_model::{
     ACTIONS_APP_ID, ACTIONS_APP_SLUG, Access, Account, AccountKind, ApiError, App, Collaborator,
     Event, Installation, Membership, MembershipState, OrgRole, Repo, RepoRole, RepositorySelection,
-    Timestamp, Token, TokenKind, Visibility, Webhook,
+    SquashMergeCommitMessage, SquashMergeCommitTitle, Timestamp, Token, TokenKind, Visibility,
+    Webhook,
 };
 use hubdouble_store::{
     Accounts, Apps, Counters, Installations, Memberships, Repos, Tokens, Tx, TxMut,
@@ -135,6 +136,14 @@ struct UserSeed {
 
 fn yes() -> bool {
     true
+}
+
+fn commit_or_pr_title() -> SquashMergeCommitTitle {
+    SquashMergeCommitTitle::CommitOrPrTitle
+}
+
+fn commit_messages() -> SquashMergeCommitMessage {
+    SquashMergeCommitMessage::CommitMessages
 }
 
 pub(crate) fn user_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<(), ApiError> {
@@ -354,6 +363,10 @@ struct RepoSeed {
     allow_squash_merge: bool,
     #[serde(default = "yes")]
     allow_rebase_merge: bool,
+    #[serde(default = "commit_or_pr_title")]
+    squash_merge_commit_title: SquashMergeCommitTitle,
+    #[serde(default = "commit_messages")]
+    squash_merge_commit_message: SquashMergeCommitMessage,
     #[serde(default)]
     allow_auto_merge: bool,
     #[serde(default)]
@@ -478,6 +491,8 @@ fn write_repository(
         allow_merge_commit: s.allow_merge_commit,
         allow_squash_merge: s.allow_squash_merge,
         allow_rebase_merge: s.allow_rebase_merge,
+        squash_merge_commit_title: s.squash_merge_commit_title,
+        squash_merge_commit_message: s.squash_merge_commit_message,
         allow_auto_merge: s.allow_auto_merge,
         delete_branch_on_merge: s.delete_branch_on_merge,
         collaborators,

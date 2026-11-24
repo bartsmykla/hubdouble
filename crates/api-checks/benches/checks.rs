@@ -60,6 +60,8 @@ fn repo() -> Repo {
         allow_merge_commit: true,
         allow_squash_merge: false,
         allow_rebase_merge: false,
+        squash_merge_commit_title: hubdouble_model::SquashMergeCommitTitle::CommitOrPrTitle,
+        squash_merge_commit_message: hubdouble_model::SquashMergeCommitMessage::CommitMessages,
         allow_auto_merge: false,
         delete_branch_on_merge: false,
         collaborators: Vec::new(),
