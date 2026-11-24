@@ -20,6 +20,68 @@ pub(crate) enum Goal {
 }
 
 pub(crate) const CALIBRATION: &str = "Runner calibration: JSON round trip of 13 KB";
+
+pub(crate) struct Section9 {
+    pub(crate) target: &'static str,
+    pub(crate) prefix: &'static str,
+    pub(crate) suffix: &'static str,
+}
+
+impl Section9 {
+    pub(crate) fn names(&self, measure: &str) -> bool {
+        measure.len() >= self.prefix.len() + self.suffix.len()
+            && measure.starts_with(self.prefix)
+            && measure.ends_with(self.suffix)
+    }
+}
+
+const fn exact(target: &'static str, measure: &'static str) -> Section9 {
+    Section9 {
+        target,
+        prefix: measure,
+        suffix: "",
+    }
+}
+
+pub(crate) const SECTION_9: [Section9; 11] = [
+    exact("Image size", "Image size"),
+    exact(
+        "Start to ready, fixture seed",
+        "Start to ready, fixture seed",
+    ),
+    exact("Idle memory", "Idle RSS, client seed"),
+    Section9 {
+        target: "REST GET p50",
+        prefix: "REST GET p50, ",
+        suffix: " routes",
+    },
+    Section9 {
+        target: "REST GET p99",
+        prefix: "REST GET p99, ",
+        suffix: " routes",
+    },
+    Section9 {
+        target: "Inventory GraphQL document",
+        prefix: "GraphQL ",
+        suffix: " p99",
+    },
+    Section9 {
+        target: "Push to a base branch with 100 open pull requests",
+        prefix: "GraphQL updateRefs p99, main with ",
+        suffix: " open pull requests",
+    },
+    Section9 {
+        target: "REST read of a pull request, the first after each such push",
+        prefix: "REST pull request read p99, first after a push to main with ",
+        suffix: " open pull requests",
+    },
+    exact(
+        "Mixed inventory load, reads and writes",
+        "Mixed inventory load, reads and writes",
+    ),
+    exact("Webhook enqueue", "Webhook enqueue per event"),
+    exact("Runner calibration", CALIBRATION),
+];
 pub(crate) const REFERENCE_CALIBRATION_US: f64 = 54.8;
 pub(crate) const REFERENCE_CPU: &str = "Intel(R) Xeon(R) 6975P-C";
 

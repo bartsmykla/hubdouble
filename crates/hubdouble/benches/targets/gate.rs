@@ -7,7 +7,9 @@ use std::process::ExitCode;
 
 use serde_json::Value;
 
-use crate::row::{CALIBRATION, Goal, REFERENCE_CALIBRATION_US, REFERENCE_CPU, Row, number};
+use crate::row::{
+    CALIBRATION, Goal, REFERENCE_CALIBRATION_US, REFERENCE_CPU, Row, SECTION_9, number,
+};
 
 const BUDGET: f64 = 0.20;
 const ROUNDS: usize = 5;
@@ -97,11 +99,57 @@ fn regression(goal: Goal, base: f64, current: f64) -> Option<f64> {
     }
 }
 
+fn measures(rounds: &[Round], side: fn(&Round) -> &[Row]) -> Vec<&Row> {
+    let mut seen = BTreeSet::new();
+    rounds
+        .iter()
+        .flat_map(|r| side(r).iter())
+        .filter(|row| seen.insert(row.measure.as_str()))
+        .collect()
+}
+
+fn section_9(rounds: &[Round], out: &mut String) -> usize {
+    let mut failed = 0;
+    for measure in &SECTION_9 {
+        let held = |rows: &[Row]| rows.iter().any(|r| measure.names(&r.measure));
+        let calibration = measure.prefix == CALIBRATION;
+        for (side, rows) in [
+            ("now", side_head as fn(&Round) -> &[Row]),
+            ("main", side_base),
+        ] {
+            let missing: Vec<String> = rounds
+                .iter()
+                .filter(|r| !held(rows(r)))
+                .map(|r| r.number.to_string())
+                .collect();
+            let required = side == "now" || calibration;
+            if missing.is_empty() || (!required && missing.len() == rounds.len()) {
+                continue;
+            }
+            failed += 1;
+            let _ = writeln!(
+                out,
+                "MISSING  section 9 {}: no row {side} in rounds {}",
+                measure.target,
+                missing.join(", ")
+            );
+        }
+    }
+    failed
+}
+
+fn side_head(round: &Round) -> &[Row] {
+    &round.head
+}
+
+fn side_base(round: &Round) -> &[Row] {
+    &round.base
+}
+
 fn relative(rounds: &[Round], out: &mut String) -> usize {
     let mut failed = 0;
-    let first = &rounds[0];
-    for row in &first.base {
-        if find(&first.head, &row.measure).is_none() {
+    for row in measures(rounds, side_base) {
+        if rounds.iter().all(|r| find(&r.head, &row.measure).is_none()) {
             failed += 1;
             let _ = writeln!(
                 out,
@@ -110,7 +158,7 @@ fn relative(rounds: &[Round], out: &mut String) -> usize {
             );
         }
     }
-    for row in &first.head {
+    for row in measures(rounds, side_head) {
         let measure = row.measure.as_str();
         if rounds.iter().all(|r| find(&r.base, measure).is_none()) {
             if row.value.is_none() {
@@ -241,7 +289,7 @@ fn absolute(rounds: &[Round], cpu: Option<&str>, out: &mut String) -> usize {
         number(REFERENCE_CALIBRATION_US),
         runs.join(", ")
     );
-    for row in &rounds[0].head {
+    for row in measures(rounds, side_head) {
         if matches!(row.goal, Goal::Report) {
             continue;
         }
@@ -443,6 +491,7 @@ pub(crate) fn compare(target: &Path, dir: Option<&Path>, cpu: Option<&str>) -> (
                     rounds.len()
                 );
             }
+            failed += section_9(&rounds, &mut out);
             failed += relative(&rounds, &mut out);
             let _ = writeln!(out, "plan section 9 targets, median of the head rounds:");
             failed += absolute(&rounds, cpu, &mut out);

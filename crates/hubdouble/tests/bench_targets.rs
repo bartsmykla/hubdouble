@@ -7,7 +7,7 @@ mod row;
 
 use std::path::Path;
 
-use row::{CALIBRATION, Goal, REFERENCE_CALIBRATION_US, REFERENCE_CPU, Row};
+use row::{CALIBRATION, Goal, REFERENCE_CALIBRATION_US, REFERENCE_CPU, Row, SECTION_9};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -38,7 +38,23 @@ fn write(path: &Path, value: &Value) {
     std::fs::write(path, value.to_string()).unwrap_or_else(|e| panic!("{e}"));
 }
 
-fn report(rows: &[(&Measure, Option<f64>)], calibration: Option<f64>) -> Value {
+fn section_9_rows(without: Option<&str>) -> Vec<Value> {
+    SECTION_9
+        .iter()
+        .filter(|m| m.prefix != CALIBRATION && Some(m.target) != without)
+        .map(|m| {
+            let middle = if m.suffix.is_empty() { "" } else { "100" };
+            let name = format!("{}{middle}{}", m.prefix, m.suffix);
+            json!({"measure": name, "goal": "report", "unit": "", "value": 1.0})
+        })
+        .collect()
+}
+
+fn report_without(
+    rows: &[(&Measure, Option<f64>)],
+    calibration: Option<f64>,
+    without: Option<&str>,
+) -> Value {
     let mut rows: Vec<Value> = rows
         .iter()
         .map(|(m, value)| {
@@ -46,10 +62,15 @@ fn report(rows: &[(&Measure, Option<f64>)], calibration: Option<f64>) -> Value {
                    "value": value, "scaled": m.scaled})
         })
         .collect();
+    rows.extend(section_9_rows(without));
     if let Some(c) = calibration {
         rows.push(json!({"measure": CALIBRATION, "goal": "report", "unit": "µs", "value": c}));
     }
     json!({"rows": rows})
+}
+
+fn report(rows: &[(&Measure, Option<f64>)], calibration: Option<f64>) -> Value {
+    report_without(rows, calibration, None)
 }
 
 fn round(dir: &Path, side: &str, n: u32, rows: &[(&Measure, Option<f64>)]) {
@@ -238,10 +259,65 @@ fn a_scaled_target_is_judged_on_the_reference_runner_and_a_raw_one_as_measured()
     let faster = judge(Some(0.5 * REFERENCE_CALIBRATION_US));
     let uncalibrated = judge(None);
 
-    // Then the slower runner meets the scaled rows, the faster one misses them, and so does no calibration
+    // Then the slower runner meets the scaled rows, the faster one misses them, and so does no calibration, which both sides also miss as a section 9 row
     assert_eq!(slower, 1);
     assert_eq!(faster, 3);
-    assert_eq!(uncalibrated, 3);
+    assert_eq!(uncalibrated, 5);
+}
+
+#[test]
+fn the_targets_gate_needs_every_section_9_measure_in_every_report_of_each_side() {
+    // Given five paired reports with every section 9 measure on both sides
+    let judge = |head: &dyn Fn(u32) -> Value, base: &dyn Fn(u32) -> Value| {
+        let dir = TempDir::new().unwrap();
+        for n in 1..=5 {
+            write(&dir.path().join(format!("rounds/base-{n}.json")), &base(n));
+            write(&dir.path().join(format!("rounds/head-{n}.json")), &head(n));
+        }
+        compare(dir.path())
+    };
+    let full = |_| report(&[(&LATENCY, Some(10.0))], Some(REFERENCE_CALIBRATION_US));
+    let without = |n: u32, round: Option<u32>| {
+        let gone = (round.is_none() || round == Some(n)).then_some("REST GET p99");
+        report_without(
+            &[(&LATENCY, Some(10.0))],
+            Some(REFERENCE_CALIBRATION_US),
+            gone,
+        )
+    };
+    let empty = |_| json!({"rows": []});
+    let only_later = |n: u32| {
+        let mut r = full(n);
+        if n > 1
+            && let Some(rows) = r["rows"].as_array_mut()
+        {
+            rows.push(json!({"measure": "later", "goal": "below", "target": 1.0,
+                             "unit": "µs", "value": 2.0}));
+        }
+        r
+    };
+
+    // When the gate judges them, with one measure removed from all five head reports, from one base report, with empty reports, and with a row only the later head rounds hold
+    let complete = judge(&full, &full);
+    let head_without = judge(&|n| without(n, None), &full);
+    let base_once_without = judge(&full, &|n| without(n, Some(3)));
+    let both_without = judge(&|n| without(n, None), &|n| without(n, None));
+    let all_empty = judge(&empty, &empty);
+    let base_empty = judge(&full, &empty);
+    let later = judge(&only_later, &full);
+
+    // Then only complete reports pass, and a measure new on the head passes only when every head round holds it
+    assert_eq!(complete, 0);
+    let failed = [
+        head_without,
+        base_once_without,
+        both_without,
+        all_empty,
+        base_empty,
+        later,
+    ]
+    .map(|n| n > 0);
+    assert_eq!(failed, [true; 6]);
 }
 
 #[test]
