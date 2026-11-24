@@ -142,7 +142,7 @@ pub(crate) fn run_event(
         run.repo_id,
         actor,
         "workflow_run",
-        action,
+        Some(action),
         Map::from_iter([
             ("workflow_run".to_owned(), Value::Object(payload)),
             ("workflow".to_owned(), workflow),
@@ -164,7 +164,14 @@ pub(crate) fn job_event(
     let (full_name, _) = workflows::repo_name(tx, repo)?;
     let view = Job::new(&Urls::new(tx.config(), ""), job, &full_name);
     let payload = Map::from_iter([("workflow_job".to_owned(), Value::Object(object(&view)?))]);
-    emit(tx, job.repo_id, actor, "workflow_job", action, payload);
+    emit(
+        tx,
+        job.repo_id,
+        actor,
+        "workflow_job",
+        Some(action),
+        payload,
+    );
     Ok(())
 }
 
@@ -194,12 +201,43 @@ fn lite(repo: &Repository) -> Result<Value, ApiError> {
     Ok(Value::Object(fields))
 }
 
+pub(crate) fn dispatch_event(tx: &mut TxMut<'_>, run: &WorkflowRun, git_ref: &str) {
+    let inputs = (!run.inputs.is_empty()).then(|| {
+        run.inputs
+            .iter()
+            .map(|(key, value)| {
+                let text = match value {
+                    Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                };
+                (key.clone(), Value::String(text))
+            })
+            .collect::<Map<_, _>>()
+    });
+    let payload = Map::from_iter([
+        (
+            "inputs".to_owned(),
+            inputs.map_or(Value::Null, Value::Object),
+        ),
+        ("ref".to_owned(), Value::from(git_ref)),
+        ("workflow".to_owned(), Value::from(run.path.as_str())),
+    ]);
+    emit(
+        tx,
+        run.repo_id,
+        run.actor_id,
+        "workflow_dispatch",
+        None,
+        payload,
+    );
+}
+
 fn emit(
     tx: &mut TxMut<'_>,
     repo_id: i64,
     sender_id: i64,
     name: &'static str,
-    action: &'static str,
+    action: Option<&'static str>,
     payload: Map<String, Value>,
 ) {
     let org_id = tx
@@ -212,7 +250,7 @@ fn emit(
         tx,
         Event {
             name,
-            action: Some(action),
+            action,
             repo_id: Some(repo_id),
             org_id,
             sender_id,

@@ -229,9 +229,32 @@ pub(crate) fn create(tx: &Tx, change: &RefChange) -> Option<Event> {
     })
 }
 
+pub(crate) fn delete(tx: &Tx, change: &RefChange) -> Option<Event> {
+    if change.old.is_none() || change.new.is_some() {
+        return None;
+    }
+    let (short_name, ref_type) = pushed(&change.name)?;
+    let scope = scope(tx, change)?;
+    Some(Event {
+        name: "delete",
+        action: None,
+        repo_id: Some(scope.repo.id),
+        org_id: scope.org_id,
+        sender_id: change.sender,
+        app_id: None,
+        installation_id: None,
+        payload: object(json!({
+            "ref": short_name,
+            "ref_type": ref_type,
+            "pusher_type": "user",
+        })),
+    })
+}
+
 pub(crate) fn for_change(tx: &Tx, odb: &Odb, change: &RefChange) -> Result<Vec<Event>, GitError> {
     Ok(push(tx, odb, change)?
         .into_iter()
         .chain(create(tx, change))
+        .chain(delete(tx, change))
         .collect())
 }

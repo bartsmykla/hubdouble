@@ -1264,7 +1264,12 @@ fn a_forced_push_a_delete_and_a_tag_carry_their_flags() {
     assert_eq!(forced["head_commit"]["id"], c1.to_string());
 
     let deleted = events(&fx, &deleted);
-    assert_eq!(deleted.len(), 1);
+    let names: Vec<_> = deleted.iter().map(|e| e.0).collect();
+    assert_eq!(names, ["push", "delete"]);
+    assert_eq!(
+        (&deleted[1].3["ref"], &deleted[1].3["ref_type"]),
+        (&json!("main"), &json!("branch"))
+    );
     let deleted = &deleted[0].3;
     assert_eq!(deleted["deleted"], true);
     assert_eq!(deleted["after"], ObjectId::NULL.to_string());

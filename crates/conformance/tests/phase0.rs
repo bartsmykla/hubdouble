@@ -12,7 +12,8 @@ use hubdouble_model::{
 };
 use hubdouble_store::{Deliveries, Table, TxMut};
 use hubdouble_testkit::fixture::{
-    ALICE_ID, ALICE_TOKEN, APP_ID, BOB_TOKEN, INSTALLATION_ID, PUBLIC_REPO_ID, WEBHOOK_SECRET,
+    ALICE_ID, ALICE_TOKEN, APP_ID, APP_PUBLIC_KEY, BOB_TOKEN, INSTALLATION_ID, PUBLIC_REPO_ID,
+    WEBHOOK_SECRET, WEBHOOK_URL_ENV,
 };
 use hubdouble_testkit::{GoGithub, Graphql, TestServer, standins};
 use serde_json::{Value, json};
@@ -61,6 +62,74 @@ async fn creating_a_branch_delivers_a_signed_create_webhook() {
     assert_eq!(payload["installation"]["id"], INSTALLATION_ID);
     assert_eq!(payload["repository"]["id"], PUBLIC_REPO_ID);
     assert_eq!(payload["sender"]["id"], ALICE_ID);
+}
+
+#[tokio::test]
+async fn deleting_a_branch_or_a_tag_delivers_a_signed_delete_webhook() {
+    // Given
+    let server = TestServer::builder()
+        .frame(hubdouble_api::register_all)
+        .fixture()
+        .entry(
+            json!({"kind": "app", "id": 4100, "slug": "deletions", "owner": "acme",
+               "public_key": APP_PUBLIC_KEY,
+               "webhook": {"url": format!("{{{{env \"{WEBHOOK_URL_ENV}\"}}}}"),
+                           "secret": WEBHOOK_SECRET},
+               "permissions": {"contents": "read", "metadata": "read"},
+               "events": ["delete"]}),
+        )
+        .entry(
+            json!({"kind": "installation", "id": 5100, "app": "deletions",
+               "account": "acme", "repository_selection": "all"}),
+        )
+        .start()
+        .await;
+    let client = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let refs = "repos/acme/public/git";
+    let sha = client.get(&format!("{refs}/ref/heads/main")).await.json()["object"]["sha"].clone();
+    for name in ["refs/heads/gone", "refs/tags/v9"] {
+        let created = client
+            .post(&format!("{refs}/refs"), &json!({"ref": name, "sha": sha}))
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+    }
+
+    // When
+    for name in ["heads/gone", "tags/v9"] {
+        let deleted = client
+            .call(Method::DELETE, &format!("{refs}/refs/{name}"))
+            .await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    }
+    let drained = server.admin(Method::POST, "hooks/drain", None).await;
+    assert_eq!(drained.status, StatusCode::NO_CONTENT);
+
+    // Then
+    let received = server.receiver.received().await;
+    let deletes: Vec<_> = received
+        .iter()
+        .filter(|d| d.header("x-github-event") == "delete")
+        .collect();
+    let got: Vec<_> = deletes
+        .iter()
+        .map(|d| {
+            assert!(d.signed_with(WEBHOOK_SECRET));
+            let payload = d.json();
+            assert_eq!(payload["pusher_type"], "user");
+            assert_eq!(payload["installation"]["id"], 5100);
+            assert_eq!(payload["repository"]["id"], PUBLIC_REPO_ID);
+            assert_eq!(payload["organization"]["login"], "acme");
+            assert_eq!(payload["sender"]["id"], ALICE_ID);
+            (payload["ref"].clone(), payload["ref_type"].clone())
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (json!("gone"), json!("branch")),
+            (json!("v9"), json!("tag"))
+        ]
+    );
 }
 
 #[derive(Clone, Default)]

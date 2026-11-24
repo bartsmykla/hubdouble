@@ -13,9 +13,9 @@ use std::collections::BTreeSet;
 use http::header::{self, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
 use hubdouble_model::{Issue, IssueState, Pull, PullRef, Timestamp, node_id};
-use hubdouble_store::{Counters, Issues, WorkflowRuns};
+use hubdouble_store::{Apps, Counters, Issues, WorkflowRuns};
 use hubdouble_testkit::fixture::{
-    ALICE_ID, ALICE_TOKEN, BOB_TOKEN, PUBLIC_REPO_ID, WEBHOOK_SECRET,
+    ALICE_ID, ALICE_TOKEN, APP_PUBLIC_KEY, BOB_TOKEN, PUBLIC_REPO_ID, WEBHOOK_SECRET,
 };
 use hubdouble_testkit::validate::webhook_payload;
 use hubdouble_testkit::{GoGithub, TestServer};
@@ -114,6 +114,73 @@ async fn dispatch_retry_and_validation_are_atomic_and_use_stable_workflow_ids() 
     assert!(next["workflow_run_id"].as_i64().unwrap() > id + 1);
     let workflow = valid("get-workflow", &client.get(&path).await);
     assert_eq!(workflow["id"], workflow_id);
+}
+
+async fn subscribe_to_dispatches(server: &TestServer, permission: &str) -> String {
+    let slug = format!("dispatches-{permission}");
+    let permissions = json!({permission: "read", "metadata": "read"});
+    let app = json!({"slug": slug, "owner": "acme", "public_key": APP_PUBLIC_KEY,
+        "webhook": {"url": server.receiver.url(), "secret": WEBHOOK_SECRET},
+        "permissions": permissions});
+    let installation = json!({"app": slug, "account": "acme",
+        "repository_selection": "all", "permissions": permissions});
+    for (kind, body) in [("app", app), ("installation", installation)] {
+        let made = server.admin(Method::POST, kind, Some(&body)).await;
+        assert_eq!(made.status, StatusCode::CREATED);
+    }
+    let id = server
+        .server
+        .services()
+        .store
+        .update_quiet(|tx| {
+            let mut app = (**tx.table::<Apps>().by_slug(&slug).unwrap()).clone();
+            app.events = vec!["workflow_dispatch".to_owned()];
+            let id = app.id;
+            tx.table_mut::<Apps>().replace(app)?;
+            Ok::<_, hubdouble_model::ApiError>(id)
+        })
+        .unwrap();
+    id.to_string()
+}
+
+#[tokio::test]
+async fn a_dispatch_delivers_a_signed_workflow_dispatch_webhook_to_apps_that_read_contents() {
+    // Given
+    let server = server("none").await;
+    let reader = subscribe_to_dispatches(&server, "contents").await;
+    subscribe_to_dispatches(&server, "actions").await;
+    let client = client(&server);
+
+    // When
+    let answer = client
+        .post(
+            &format!("{ACTIONS}/workflows/input.yml/dispatches"),
+            &json!({"ref": "main", "inputs": {"ref-name": "v1"}}),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::NO_CONTENT);
+    drain(&server).await;
+
+    // Then
+    let received = server.receiver.received().await;
+    let dispatches: Vec<_> = received
+        .iter()
+        .filter(|d| d.header("x-github-event") == "workflow_dispatch")
+        .collect();
+    assert_eq!(dispatches.len(), 1);
+    assert!(dispatches[0].signed_with(WEBHOOK_SECRET));
+    assert_eq!(
+        dispatches[0].header("x-github-hook-installation-target-id"),
+        reader
+    );
+    let payload = dispatches[0].json();
+    assert_eq!(payload["inputs"], json!({"ref-name": "v1"}));
+    assert_eq!(payload["ref"], "refs/heads/main");
+    assert_eq!(payload["workflow"], ".github/workflows/input.yml");
+    assert!(payload["installation"]["id"].is_i64());
+    assert_eq!(payload["repository"]["id"], PUBLIC_REPO_ID);
+    assert_eq!(payload["organization"]["login"], "acme");
+    assert_eq!(payload["sender"]["id"], ALICE_ID);
 }
 
 #[tokio::test]

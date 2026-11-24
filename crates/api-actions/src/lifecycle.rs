@@ -96,6 +96,7 @@ pub(crate) fn create(
             created_at: now,
         },
     )?;
+    views::dispatch_event(tx, &run, &info.git_ref);
     tx.table_mut::<RunContexts>().insert(RunContext {
         run: id,
         git_ref: info.git_ref,
