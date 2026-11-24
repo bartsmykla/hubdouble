@@ -96,7 +96,9 @@ impl Exec<'_> {
                     .and_then(|o| (o.serialize)(&*obj.value))
                     .unwrap_or(Value::Null)
             });
-            if let Some(v) = form.get(name) {
+            if let Some(v) = form.get(name)
+                && crate::leaf::fits(self.schema(), &def.ty, v)
+            {
                 return Ok(Out::R(Resolved::Leaf(v.clone())));
             }
         }

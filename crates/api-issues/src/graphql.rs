@@ -55,6 +55,25 @@ fn leaf(v: &impl Serialize) -> Result<Resolved, GqlError> {
     }
 }
 
+fn lock_reason(_: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {
+    let Some(reason) = obj.get::<Issue>()?.active_lock_reason.as_deref() else {
+        return Ok(Resolved::Null);
+    };
+    let value = match reason {
+        "off-topic" => "OFF_TOPIC",
+        "resolved" => "RESOLVED",
+        "spam" => "SPAM",
+        "too heated" => "TOO_HEATED",
+        _ => {
+            return Err(GqlError::new(
+                ErrorType::NotImplemented,
+                format!("hubdouble does not implement the lock reason {reason}"),
+            ));
+        }
+    };
+    leaf(&value)
+}
+
 fn read_repo<'a>(
     ctx: &'a Ctx<'_>,
     repo_id: i64,
@@ -209,6 +228,8 @@ pub(crate) fn register(gql: &mut Registry) {
         cx.load(Target::RepoId(o.get::<Issue>()?.repo_id))
     });
     gql.field("Issue", "closedByPullRequestsReferences", closed_by);
+    gql.field("Issue", "activeLockReason", lock_reason);
+    gql.field("PullRequest", "activeLockReason", lock_reason);
     gql.field("Issue", "authorAssociation", |cx, o, _| {
         let issue = o.get::<Issue>()?;
         association(cx, issue.repo_id, issue.user_id)

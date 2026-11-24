@@ -4,7 +4,7 @@ use hubdouble_auth::{self as auth, Target as AuthTarget};
 use hubdouble_gql::{
     Args, Conn, Ctx, ErrorType, GqlError, Obj, Registry, Resolved, Target, connection,
 };
-use hubdouble_model::{Account, AccountKind, Repo, RepoRole, Team, node_id};
+use hubdouble_model::{Account, AccountKind, Repo, RepoRole, Team, TeamPrivacy, node_id};
 use hubdouble_store::{Accounts, Repos, Teams};
 use serde_json::{Value, json};
 
@@ -27,6 +27,12 @@ pub fn register(gql: &mut Registry) {
     gql.field("Team", "id", team_id);
     gql.field("Team", "databaseId", team_database_id);
     gql.field("Team", "ancestors", team_ancestors);
+    gql.field("Team", "privacy", |_, obj, _| {
+        Ok(Resolved::Leaf(json!(match obj.get::<Team>()?.privacy {
+            TeamPrivacy::Secret => "SECRET",
+            TeamPrivacy::Closed => "VISIBLE",
+        })))
+    });
     gql.object_resolved::<Conn>(COLLABORATORS);
     gql.object_resolved::<Collaborator>(COLLABORATOR_EDGE);
     gql.field("Repository", "collaborators", collaborators);

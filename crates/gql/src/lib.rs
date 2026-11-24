@@ -4,6 +4,7 @@ mod contract;
 mod exec;
 #[cfg(test)]
 mod inventory;
+mod leaf;
 mod limits;
 mod load;
 mod request_errors;

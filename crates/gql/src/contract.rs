@@ -248,6 +248,7 @@ pub(crate) struct ObjectType {
     pub(crate) type_id: TypeId,
     pub(crate) rust_name: &'static str,
     pub(crate) serialize: fn(&(dyn Any + Send + Sync)) -> Option<serde_json::Value>,
+    pub(crate) form: bool,
 }
 
 pub(crate) struct NodeType {
@@ -308,13 +309,49 @@ impl Registry {
         &self.schema
     }
 
+    /// The `Type.field` names of every leaf field that a declared object answers from its
+    /// `serde` form, with no resolver, whose type the executor cannot check. The executor
+    /// answers `HUBDOUBLE_NOT_IMPLEMENTED` for a form value that does not fit the field's type,
+    /// so an empty list means no fallback leaf can reach a client unchecked.
+    #[must_use]
+    pub fn unchecked_leaves(&self) -> Vec<String> {
+        let schema = &self.schema.inner;
+        let mut names: Vec<String> = self
+            .objects
+            .iter()
+            .filter(|(_, o)| o.form)
+            .filter_map(|(name, _)| match schema.types.get(*name) {
+                Some(apollo_compiler::schema::ExtendedType::Object(o)) => Some((*name, o)),
+                _ => None,
+            })
+            .flat_map(|(type_name, o)| {
+                o.fields.iter().filter_map(move |(field, def)| {
+                    let leaf = def.ty.inner_named_type().as_str();
+                    let is_leaf = matches!(
+                        schema.types.get(leaf),
+                        Some(
+                            apollo_compiler::schema::ExtendedType::Scalar(_)
+                                | apollo_compiler::schema::ExtendedType::Enum(_)
+                        )
+                    );
+                    (is_leaf
+                        && self.resolver(type_name, field.as_str()).is_none()
+                        && !crate::leaf::checkable(schema, leaf))
+                    .then(|| format!("{type_name}.{field}"))
+                })
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Declares the Rust value behind `type_name`; only the type's owner calls it.
     ///
     /// # Panics
     ///
     /// Panics when `type_name` is not an object type of the schema or is already declared.
     pub fn object<T: Serialize + Send + Sync + 'static>(&mut self, type_name: &'static str) {
-        self.declare::<T>(type_name, serialize_as::<T>);
+        self.declare::<T>(type_name, Some(serialize_as::<T>));
     }
 
     /// As [`Registry::object`], for a value without a `serde` form: every field the documents
@@ -324,13 +361,13 @@ impl Registry {
     ///
     /// As [`Registry::object`].
     pub fn object_resolved<T: Send + Sync + 'static>(&mut self, type_name: &'static str) {
-        self.declare::<T>(type_name, |_| None);
+        self.declare::<T>(type_name, None);
     }
 
     fn declare<T: 'static>(
         &mut self,
         type_name: &'static str,
-        serialize: fn(&(dyn Any + Send + Sync)) -> Option<serde_json::Value>,
+        serialize: Option<fn(&(dyn Any + Send + Sync)) -> Option<serde_json::Value>>,
     ) {
         assert!(
             self.schema.is_object(type_name),
@@ -341,7 +378,8 @@ impl Registry {
             ObjectType {
                 type_id: TypeId::of::<T>(),
                 rust_name: std::any::type_name::<T>(),
-                serialize,
+                serialize: serialize.unwrap_or(|_| None),
+                form: serialize.is_some(),
             },
         );
         assert!(previous.is_none(), "{type_name} is declared twice");

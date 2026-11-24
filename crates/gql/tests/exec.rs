@@ -142,6 +142,27 @@ fn an_unimplemented_field_errors_on_its_path_only() {
 }
 
 #[test]
+fn a_serde_form_value_outside_the_field_type_is_not_implemented() {
+    // Given pull request 1, whose serde form holds reviewDecision as the REST spelling approved
+    let w = world();
+    // When it is selected beside a form value that fits its enum
+    let r = w.run(
+        "{ repository(owner: \"o\", name: \"one\") { pullRequest(number: 1) { state reviewDecision } } }",
+        &Value::Null,
+    );
+    // Then the value that is no PullRequestReviewDecision never reaches the client
+    assert_eq!(
+        r["data"],
+        json!({"repository": {"pullRequest": {"state": "OPEN", "reviewDecision": null}}})
+    );
+    assert_eq!(types(&r), vec!["HUBDOUBLE_NOT_IMPLEMENTED"]);
+    assert_eq!(
+        r["errors"][0]["path"],
+        json!(["repository", "pullRequest", "reviewDecision"])
+    );
+}
+
+#[test]
 fn a_type_without_a_serde_form_answers_only_its_resolved_fields() {
     // Given Ref declared with object_resolved and only its name resolver
     let w = world();

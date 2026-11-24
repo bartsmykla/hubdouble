@@ -222,3 +222,93 @@ async fn a_classic_token_without_scopes_reads_public_repositories_only() {
         );
     }
 }
+
+#[test]
+fn every_fallback_leaf_of_every_registered_type_is_checked_against_its_type() {
+    // Given the registry of the whole server
+    let mut store = hubdouble_store::StoreBuilder::new();
+    let mut git = hubdouble_git::GitBuilder::new(&mut store);
+    let mut gql = hubdouble_gql::Registry::new();
+    hubdouble_api::register_all(&mut hubdouble_admin::Registrar {
+        store: &mut store,
+        rest: &mut hubdouble_rest::Registry::new(),
+        gql: &mut gql,
+        git: &mut git,
+        admin: &mut hubdouble_admin::Admin::new(),
+    });
+
+    // When every leaf field that a type answers from its serde form is walked
+    let unchecked = gql.unchecked_leaves();
+
+    // Then the executor checks each against its scalar or enum type
+    assert_eq!(unchecked, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn graphql_leaves_answer_values_of_their_schema_types() {
+    // Given a secret and a visible team, and a pull with a line and a file review comment
+    let teams = [("Visible", "closed"), ("Hidden", "secret")].map(|(name, privacy)| {
+        json!({"kind": "team", "org": "acme", "name": name, "privacy": privacy,
+            "members": [{"login": "alice"}]})
+    });
+    let pull = json!({"kind": "pull_request", "repository": "acme/public", "user": "alice",
+        "title": "feature", "head": "feature", "base": "main"});
+    let server = whole_server(&[vec![pull], teams.to_vec()].concat()).await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let review = alice
+        .post(
+            &format!("{REPO}/pulls/1/reviews"),
+            &json!({"event": "COMMENT", "body": "review", "comments": [
+                {"path": "src/feature.txt", "line": 1, "body": "line"},
+                {"path": "src/feature.txt", "subject_type": "file", "body": "file"}]}),
+        )
+        .await;
+    assert_eq!(review.status, StatusCode::OK, "{}", review.json());
+
+    // When the client reads the team privacy, the review ID, the lock reason and the positions
+    let answer = Graphql::new(alice)
+        .query(
+            "{ organization(login: \"acme\") { teams(first: 10) { nodes { name privacy } } }
+               repository(owner: \"acme\", name: \"public\") { pullRequest(number: 1) {
+                 activeLockReason
+                 reviews(first: 1) { nodes { id } }
+                 reviewThreads(first: 5) { nodes { comments(first: 1) {
+                   nodes { body originalPosition } } } } } } }",
+            &json!({}),
+        )
+        .await;
+
+    // Then each value is one of its GraphQL type, and a file comment has GitHub's position 1
+    let data = &answer.json()["data"];
+    let privacy: Vec<_> = data["organization"]["teams"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|team| (team["name"].as_str().unwrap(), team["privacy"].clone()))
+        .collect();
+    assert!(
+        privacy.contains(&("Visible", json!("VISIBLE"))),
+        "{privacy:?}"
+    );
+    assert!(
+        privacy.contains(&("Hidden", json!("SECRET"))),
+        "{privacy:?}"
+    );
+    let pull = &data["repository"]["pullRequest"];
+    assert_eq!(pull["activeLockReason"], Value::Null);
+    assert_eq!(pull["reviews"]["nodes"][0]["id"], review.json()["node_id"]);
+    assert!(
+        review.json()["node_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("PRR_")
+    );
+    let positions: Vec<_> = pull["reviewThreads"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|thread| thread["comments"]["nodes"][0]["originalPosition"].clone())
+        .collect();
+    assert_eq!(positions, [json!(1), json!(1)]);
+    assert_eq!(answer.json().get("errors"), None, "{}", answer.json());
+}

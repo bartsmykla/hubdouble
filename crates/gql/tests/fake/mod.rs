@@ -56,6 +56,7 @@ pub struct Pull {
     pub base_ref_name: &'static str,
     pub base_ref_oid: &'static str,
     pub head_ref_oid: &'static str,
+    pub review_decision: &'static str,
 }
 
 #[derive(Serialize)]
@@ -139,6 +140,7 @@ fn pull(number: i64) -> Resolved {
             base_ref_name: "main",
             base_ref_oid: "0123456789abcdef0123456789abcdef01234567",
             head_ref_oid: "89abcdef0123456789abcdef0123456789abcdef",
+            review_decision: "approved",
         },
     )
 }

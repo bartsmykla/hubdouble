@@ -52,6 +52,7 @@ fn review_fields(r: &mut Registry) {
     r.field(REVIEW, "author", |ctx, p, _| {
         Ok(account(ctx, p.get::<Review>()?.user_id))
     });
+    r.field(REVIEW, "id", |_, p, _| leaf(&p.get::<Review>()?.node_id));
     r.field(REVIEW, "databaseId", |_, p, _| leaf(p.get::<Review>()?.id));
     r.field(REVIEW, "body", |_, p, _| leaf(&p.get::<Review>()?.body));
     r.field(REVIEW, "lastEditedAt", |_, p, _| {
@@ -99,6 +100,9 @@ fn comment_fields(r: &mut Registry) {
         leaf(p.get::<ReviewComment>()?.last_edited_at)
     });
     r.field(COMMENT, "originalCommit", original_commit);
+    r.field(COMMENT, "originalPosition", |_, p, _| {
+        leaf(p.get::<ReviewComment>()?.original_position.unwrap_or(1))
+    });
     r.field(COMMENT, "pullRequest", |ctx, p, _| {
         pull(ctx, p.get::<ReviewComment>()?.issue_id)
     });
