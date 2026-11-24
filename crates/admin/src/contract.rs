@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 
 use crate::faults::Faults;
 use crate::log::Log;
-use crate::{kinds, reads, seed};
+use crate::{events, kinds, reads, seed};
 
 /// What a seed kind applies with: the transaction, git, the clock and the environment lookup.
 pub struct SeedCtx<'a> {
@@ -184,6 +184,7 @@ pub fn register(r: &mut Registrar<'_>) {
         .route(Method::GET, "/user/{login}", reads::user_route());
     r.admin
         .route(Method::GET, "/app/{slug}", reads::app_route());
+    r.admin.route(Method::POST, "/events", events::route());
 }
 
 /// Handed to each track crate's `pub fn register(r: &mut Registrar)`.

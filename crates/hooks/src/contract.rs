@@ -15,12 +15,19 @@ pub enum HooksError {
     Stopped,
     #[error("delivery {0} does not exist")]
     UnknownDelivery(i64),
+    #[error("App {0} does not exist or has no active webhook")]
+    NoWebhook(i64),
+    #[error("installation {0} does not belong to the App")]
+    UnknownInstallation(i64),
 }
 
 impl From<HooksError> for ApiError {
     fn from(e: HooksError) -> ApiError {
         match e {
             HooksError::UnknownDelivery(_) => ApiError::not_found(),
+            HooksError::NoWebhook(_) | HooksError::UnknownInstallation(_) => {
+                ApiError::unprocessable(e.to_string())
+            }
             HooksError::NoRuntime | HooksError::Stopped => ApiError::internal(e.to_string()),
         }
     }
@@ -38,6 +45,29 @@ impl From<HooksError> for ApiError {
 /// payload has them.
 pub fn emit(tx: &mut TxMut<'_>, e: Event) {
     crate::emit::emit(tx, e);
+}
+
+/// An event that names itself in full, for one App, whatever the App subscribes to.
+pub struct Injection {
+    pub app_id: i64,
+    pub installation_id: Option<i64>,
+    pub repo_id: Option<i64>,
+    pub sender_id: Option<i64>,
+    pub event: String,
+    pub action: Option<String>,
+    pub payload: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Queues one delivery of `injection` to its App, signed and logged as every other event.
+/// `action`, `installation`, `repository`, `organization` and `sender` are added unless the
+/// payload has them.
+///
+/// # Errors
+///
+/// [`HooksError::NoWebhook`] when the App does not exist or has no active webhook, and
+/// [`HooksError::UnknownInstallation`] when the installation is not one of the App's.
+pub fn inject(tx: &mut TxMut<'_>, injection: Injection) -> Result<(), HooksError> {
+    crate::emit::inject(tx, injection)
 }
 
 /// Queues the `ping` GitHub sends when an App's webhook is set.

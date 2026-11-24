@@ -130,7 +130,7 @@ Events the client consumes (its `internal/metrics/metrics.go` `knownEvents`, plu
 | `installation` (created, deleted, suspend, unsuspend, new_permissions_accepted), `installation_repositories` (added, removed), `installation_target` (renamed), `github_app_authorization` (revoked) | admin API | T1 |
 | `organization` (member_added, member_removed, member_invited; `membership.user.id`), `membership` (added, removed; `member.id`), `member` (added, removed, edited; `member.id`), `team` (created, deleted, edited, added_to_repository, removed_from_repository) | admin API calls for org members, invitations, team membership and team repositories (the client's `internal/webhook/handler.go:2419-2440`) | T3 |
 
-`POST /_hubdouble/events` injects an arbitrary event for one App, for what a test cannot cause through the API (for example `check_run.requested_action`).
+`POST /_hubdouble/events` injects an arbitrary event for one App, for what a test cannot cause through the API (for example `check_run.requested_action`): an event name, an action, a payload, the target App or its hook, and optionally an installation, a repository and a sender, which hooks renders as for any event. The App gets it whatever it subscribes to, signed and logged as every other delivery (`docs/admin-api.md`).
 
 ### 4.4 OAuth and SSO
 
@@ -431,6 +431,7 @@ pub struct Event {                                 // in hubdouble-model
 pub fn emit(tx: &mut TxMut<'_>, e: Event);         // in hubdouble-hooks; every track and P0-C emit through it; URLs from Urls::new(tx.config(), "")
 pub fn ping(tx: &mut TxMut<'_>, app_id: i64);
 pub fn redeliver(tx: &mut TxMut<'_>, app_id: i64, delivery_id: i64) -> Result<(), HooksError>; // same GUID, new delivery ID
+pub fn inject(tx: &mut TxMut<'_>, i: Injection) -> Result<(), HooksError>; // POST /_hubdouble/events: an owned event name and action for one App, whatever it subscribes to
 impl Handle { pub async fn drain(&self); pub async fn reset(&self, s: &Snapshot); } // admin reset calls Handle::reset, never Store::restore directly
 ```
 

@@ -657,7 +657,7 @@ pub(crate) fn app_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<()
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum AppRef {
+pub(crate) enum AppRef {
     Id(i64),
     Slug(String),
 }

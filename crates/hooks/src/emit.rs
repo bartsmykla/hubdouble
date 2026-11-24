@@ -8,7 +8,7 @@ use serde::ser::SerializeMap as _;
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
-use crate::HooksError;
+use crate::{HooksError, Injection};
 
 const ALWAYS_DELIVERED: [&str; 4] = [
     "installation",
@@ -174,10 +174,16 @@ impl Serialize for Body<'_> {
     }
 }
 
-fn rendered(tx: &Tx, e: &Event, p: &Map<String, Value>) -> Vec<(&'static str, Rendered)> {
+struct Subjects {
+    repo: Option<i64>,
+    org: Option<i64>,
+    sender: Option<i64>,
+}
+
+fn rendered(tx: &Tx, e: &Subjects, p: &Map<String, Value>) -> Vec<(&'static str, Rendered)> {
     let urls = payload_urls(tx);
     let accounts = tx.table::<Accounts>();
-    let repo = e.repo_id.and_then(|id| tx.table::<Repos>().get(id));
+    let repo = e.repo.and_then(|id| tx.table::<Repos>().get(id));
     let absent = |key: &str| !p.contains_key(key);
     let mut out = Vec::with_capacity(3);
     if absent("repository")
@@ -191,7 +197,7 @@ fn rendered(tx: &Tx, e: &Event, p: &Map<String, Value>) -> Vec<(&'static str, Re
     }
     if absent("organization")
         && let Some(org) = e
-            .org_id
+            .org
             .or(repo.map(|r| r.owner_id))
             .and_then(|id| accounts.get(id))
         && org.kind == AccountKind::Organization
@@ -202,7 +208,7 @@ fn rendered(tx: &Tx, e: &Event, p: &Map<String, Value>) -> Vec<(&'static str, Re
         ));
     }
     if absent("sender")
-        && let Some(sender) = accounts.get(e.sender_id)
+        && let Some(sender) = e.sender.and_then(|id| accounts.get(id))
     {
         out.push(("sender", Rendered::Sender(SimpleUser::new(&urls, sender))));
     }
@@ -267,7 +273,12 @@ pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
     if let Some(action) = e.action.filter(|_| !payload.contains_key("action")) {
         payload.insert("action".to_owned(), Value::from(action));
     }
-    let rendered = rendered(tx, &e, &payload);
+    let subjects = Subjects {
+        repo: e.repo_id,
+        org: e.org_id,
+        sender: Some(e.sender_id),
+    };
+    let rendered = rendered(tx, &subjects, &payload);
     let mut buffer = Vec::with_capacity(BODY_CAPACITY);
     for (app_id, installation) in recipients {
         let body = payload_body(&mut buffer, &payload, &rendered, installation.as_deref());
@@ -281,6 +292,51 @@ pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
             redelivery_of: None,
         });
     }
+}
+
+pub(crate) fn inject(tx: &mut TxMut<'_>, i: Injection) -> Result<(), HooksError> {
+    tx.table::<Apps>()
+        .get(i.app_id)
+        .filter(|app| hook_active(app))
+        .ok_or(HooksError::NoWebhook(i.app_id))?;
+    let installation = i
+        .installation_id
+        .map(|id| {
+            tx.table::<Installations>()
+                .get(id)
+                .filter(|installation| installation.app_id == i.app_id)
+                .cloned()
+                .ok_or(HooksError::UnknownInstallation(id))
+        })
+        .transpose()?;
+    let mut payload = i.payload;
+    if let Some(action) = &i.action {
+        payload
+            .entry("action")
+            .or_insert_with(|| Value::from(action.as_str()));
+    }
+    let subjects = Subjects {
+        repo: i.repo_id,
+        org: None,
+        sender: i.sender_id,
+    };
+    let rendered = rendered(tx, &subjects, &payload);
+    let body = payload_body(
+        &mut Vec::new(),
+        &payload,
+        &rendered,
+        installation.as_deref(),
+    );
+    tx.push_outbox(OutboxEntry {
+        app_id: i.app_id,
+        installation_id: i.installation_id,
+        repo_id: i.repo_id,
+        event: i.event.into(),
+        action: i.action.map(Into::into),
+        payload: body,
+        redelivery_of: None,
+    });
+    Ok(())
 }
 
 pub(crate) fn ping(tx: &mut TxMut<'_>, app_id: i64) {

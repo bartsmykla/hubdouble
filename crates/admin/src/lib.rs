@@ -1,4 +1,5 @@
 mod contract;
+mod events;
 mod faults;
 mod history;
 mod http;

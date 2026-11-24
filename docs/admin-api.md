@@ -27,6 +27,7 @@ An explicit ID must exceed the current ID sequence. Replace startup environment 
 | --- | --- | --- |
 | `POST /_hubdouble/reset` | No body | `204`. Restores the startup snapshot and clears the request log. |
 | `POST /_hubdouble/hooks/drain` | No body | `204` after the webhook queue drains. |
+| `POST /_hubdouble/events` | Required `event` and one of `app` (slug or ID) and `hook` (the App's hook ID, which is its App ID). Optional `action`, `installation` (ID of an installation of that App), `repository` (`owner/name`), `sender` (login), and `payload` object. `event` and `action` are lowercase names with `_`. | `204`. Queues one signed delivery of the event to that App, whatever events it subscribes to, and logs it like every other delivery. The body is `payload` plus `action`, `installation`, `repository`, `organization`, and `sender` where the payload does not have them. Returns `422` if the App has no active webhook or the installation is not the App's. |
 | `GET /_hubdouble/log` | Optional unsigned integer `after` in the query | `200` with `{"entries":[...],"cursor":number}`. Return entries with a cursor greater than `after`. |
 | `GET /_hubdouble/log/wait` | Optional `after` and repeated `match` query parameters | `200` with the first matching entry. Hold the request open if no entry matches. |
 | `POST /_hubdouble/faults` | A fault object, described below | `201` with `{"id":number}`. |

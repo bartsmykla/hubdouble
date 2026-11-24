@@ -12,8 +12,8 @@ use hubdouble_model::{
 };
 use hubdouble_store::{Deliveries, Table, TxMut};
 use hubdouble_testkit::fixture::{
-    ALICE_ID, ALICE_TOKEN, APP_ID, APP_PUBLIC_KEY, BOB_TOKEN, INSTALLATION_ID, PUBLIC_REPO_ID,
-    WEBHOOK_SECRET, WEBHOOK_URL_ENV,
+    ALICE_ID, ALICE_TOKEN, APP_ID, APP_PUBLIC_KEY, APP_SLUG, BOB_TOKEN, INSTALLATION_ID,
+    PUBLIC_REPO_ID, WEBHOOK_SECRET, WEBHOOK_URL_ENV,
 };
 use hubdouble_testkit::{GoGithub, Graphql, TestServer, standins};
 use serde_json::{Value, json};
@@ -128,6 +128,92 @@ async fn deleting_a_branch_or_a_tag_delivers_a_signed_delete_webhook() {
         [
             (json!("gone"), json!("branch")),
             (json!("v9"), json!("tag"))
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_injected_event_is_signed_and_logged_for_the_app_it_names() {
+    // Given
+    let server = TestServer::builder()
+        .frame(hubdouble_api::register_all)
+        .fixture()
+        .start()
+        .await;
+    let delete = json!({"event": "delete", "app": APP_SLUG, "installation": INSTALLATION_ID,
+        "repository": "acme/public", "sender": "alice",
+        "payload": {"ref": "gone", "ref_type": "branch", "pusher_type": "user"}});
+    let revoked = json!({"event": "github_app_authorization", "action": "revoked",
+        "hook": APP_ID, "sender": "alice"});
+    let stray = json!({"event": "delete", "app": APP_SLUG, "installation": APP_ID,
+        "payload": {"ref": "gone", "ref_type": "branch", "pusher_type": "user"}});
+
+    // When
+    let mut statuses = Vec::new();
+    for body in [&delete, &revoked, &stray] {
+        statuses.push(
+            server
+                .admin(Method::POST, "events", Some(body))
+                .await
+                .status,
+        );
+    }
+    let drained = server.admin(Method::POST, "hooks/drain", None).await;
+    assert_eq!(drained.status, StatusCode::NO_CONTENT);
+
+    // Then
+    assert_eq!(
+        statuses,
+        [
+            StatusCode::NO_CONTENT,
+            StatusCode::NO_CONTENT,
+            StatusCode::UNPROCESSABLE_ENTITY
+        ]
+    );
+    let received = server.receiver.received().await;
+    let [deleted, revoked] = &received[..] else {
+        panic!("expected two deliveries, got {}", received.len());
+    };
+    assert!(deleted.signed_with(WEBHOOK_SECRET) && revoked.signed_with(WEBHOOK_SECRET));
+    assert_eq!(deleted.header("x-github-event"), "delete");
+    let payload = deleted.json();
+    assert_eq!(payload["ref"], "gone");
+    assert_eq!(payload["installation"]["id"], INSTALLATION_ID);
+    assert_eq!(payload["repository"]["id"], PUBLIC_REPO_ID);
+    assert_eq!(payload["organization"]["login"], "acme");
+    assert_eq!(payload["sender"]["id"], ALICE_ID);
+    assert_eq!(revoked.header("x-github-event"), "github_app_authorization");
+    assert_eq!(revoked.json()["action"], "revoked");
+    assert_eq!(revoked.json()["sender"]["id"], ALICE_ID);
+    let logged: Vec<_> = deliveries(&server)
+        .iter()
+        .map(|d| {
+            (
+                d.event.clone(),
+                d.action.clone(),
+                d.installation_id,
+                d.repo_id,
+                d.guid.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        [
+            (
+                "delete".to_owned(),
+                None,
+                Some(INSTALLATION_ID),
+                Some(PUBLIC_REPO_ID),
+                deleted.header("x-github-delivery").to_owned()
+            ),
+            (
+                "github_app_authorization".to_owned(),
+                Some("revoked".to_owned()),
+                None,
+                None,
+                revoked.header("x-github-delivery").to_owned()
+            ),
         ]
     );
 }
