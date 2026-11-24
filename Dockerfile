@@ -5,7 +5,8 @@ WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p hubdouble \
+    find . -path ./target -prune -o -type f -exec touch {} + \
+    && cargo build --release --locked -p hubdouble \
     && cp target/release/hubdouble /hubdouble \
     && MIMALLOC_VERBOSE=1 /hubdouble help 2>&1 >/dev/null \
     | grep -q "^option 'arena_eager_commit': 0 "
