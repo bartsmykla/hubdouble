@@ -197,16 +197,21 @@ impl Patterns {
 static PATTERNS: LazyLock<Option<Patterns>> = LazyLock::new(Patterns::compile);
 
 #[derive(Default)]
-struct Parts {
-    year: Option<i64>,
-    yday: Option<i64>,
-    mon: Option<i64>,
-    mday: Option<i64>,
-    hour: Option<i64>,
-    min: Option<i64>,
-    sec: Option<i64>,
-    fraction: bool,
-    zone: Option<String>,
+pub(crate) struct Parts {
+    pub(crate) year: Option<i64>,
+    pub(crate) yday: Option<i64>,
+    pub(crate) mon: Option<i64>,
+    pub(crate) mday: Option<i64>,
+    pub(crate) hour: Option<i64>,
+    pub(crate) min: Option<i64>,
+    pub(crate) sec: Option<i64>,
+    pub(crate) wday: Option<i64>,
+    pub(crate) cwyear: Option<i64>,
+    pub(crate) cweek: Option<i64>,
+    pub(crate) cwday: Option<i64>,
+    fraction: Option<String>,
+    pub(crate) zone: Option<String>,
+    pub(crate) offset_text: Option<String>,
     bc: bool,
     no_comp: bool,
 }
@@ -382,8 +387,8 @@ fn time(text: &mut String, p: &Patterns, parts: &mut Parts) {
     if let Some(sec) = value(3) {
         parts.sec = Some(sec);
     }
-    if c.get(4).is_some() {
-        parts.fraction = true;
+    if let Some(fraction) = c.get(4) {
+        parts.fraction = Some(fraction.as_str().to_owned());
     }
 }
 
@@ -411,7 +416,14 @@ fn ymd(text: &mut String, pattern: &Regex, parts: &mut Parts) -> bool {
 }
 
 fn iso2(text: &mut String, p: &Patterns, parts: &mut Parts) -> bool {
-    if subx(text, &p.iso21).is_some() || subx(text, &p.iso22).is_some() {
+    if let Some(g) = subx(text, &p.iso21) {
+        parts.cwyear = group(&g, 1).map(num);
+        parts.cweek = group(&g, 2).map(num);
+        parts.cwday = group(&g, 3).map(num);
+        return true;
+    }
+    if let Some(g) = subx(text, &p.iso22) {
+        parts.cwday = group(&g, 1).map(num);
         return true;
     }
     if let Some(g) = subx(text, &p.iso23) {
@@ -508,13 +520,18 @@ fn ddd(text: &mut String, p: &Patterns, parts: &mut Parts) -> bool {
             }
         }
     }
-    if s4.is_some() {
-        parts.fraction = true;
+    if let Some(fraction) = s4 {
+        parts.fraction = Some(fraction.to_owned());
     }
     if let Some(zone) = group(&g, 5) {
         parts.zone = Some(match zone.strip_prefix('[') {
             Some(inner) => {
                 let inner = inner.strip_suffix(']').unwrap_or(inner);
+                parts.offset_text = Some(match inner.split_once(':') {
+                    Some((offset, _)) => format!("{offset}:"),
+                    None if inner.starts_with(|c: char| c.is_ascii_digit()) => format!("+{inner}"),
+                    None => inner.to_owned(),
+                });
                 inner
                     .split_once(':')
                     .map_or(inner, |(_, name)| name)
@@ -656,8 +673,15 @@ fn date(text: &mut String, p: &Patterns, parts: &mut Parts) -> bool {
 fn date_parse(text: &str, p: &Patterns) -> Option<Parts> {
     let mut text = p.space.try_replacen(text, 0, " ").ok()?.into_owned();
     let mut parts = Parts::default();
-    if has(&text, ALPHA) {
-        subx(&mut text, &p.day);
+    if has(&text, ALPHA)
+        && let Some(g) = subx(&mut text, &p.day)
+    {
+        parts.wday = group(&g, 1).and_then(|d| {
+            ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
+                .iter()
+                .zip(0..)
+                .find_map(|(name, n)| name.eq_ignore_ascii_case(d).then_some(n))
+        });
     }
     if has(&text, DIGIT) {
         time(&mut text, p, &mut parts);
@@ -677,12 +701,17 @@ fn date_parse(text: &str, p: &Patterns) -> Option<Parts> {
         }
     }
     if parts.bc {
+        parts.cwyear = parts.cwyear.map(|y| 1 - y);
         parts.year = parts.year.map(|y| 1 - y);
     }
-    if !parts.no_comp
-        && let Some(y @ 0..=99) = parts.year
-    {
-        parts.year = Some(if y >= 69 { y + 1900 } else { y + 2000 });
+    if !parts.no_comp {
+        let complete = |y: i64| if y >= 69 { y + 1900 } else { y + 2000 };
+        if let Some(y @ 0..=99) = parts.cwyear {
+            parts.cwyear = Some(complete(y));
+        }
+        if let Some(y @ 0..=99) = parts.year {
+            parts.year = Some(complete(y));
+        }
     }
     Some(parts)
 }
@@ -949,14 +978,18 @@ fn now_fields(seconds: i64) -> [i64; 6] {
     [year, mon, day, clock / 3600, clock / 60 % 60, clock % 60]
 }
 
-/// Ruby's `Time.parse(text, now)` in the `America/Los_Angeles` zone, as Unix seconds.
-/// `None` is the `ArgumentError` that Ruby raises.
-pub(crate) fn time_parse(text: &str, now: i64) -> Option<i64> {
+/// Ruby's `Date._parse(text)`; `None` for a text past Ruby's 128 character limit.
+pub(crate) fn parts(text: &str) -> Option<Parts> {
     if text.chars().count() > MAX_CHARS {
         return None;
     }
-    let p = PATTERNS.as_ref()?;
-    let parts = date_parse(text, p)?;
+    date_parse(text, PATTERNS.as_ref()?)
+}
+
+/// Ruby's `Time.parse(text, now)` in the `America/Los_Angeles` zone, as Unix seconds and the
+/// microseconds of the fraction. `None` is the `ArgumentError` that Ruby raises.
+pub(crate) fn time_parse(text: &str, now: i64) -> Option<(i64, u32)> {
+    let parts = parts(text)?;
     let wanted = Wanted {
         year: parts.year,
         yday: parts.yday,
@@ -975,14 +1008,21 @@ pub(crate) fn time_parse(text: &str, now: i64) -> Option<i64> {
         wanted.min,
         wanted.sec,
     ];
-    if given.iter().all(Option::is_none) && !parts.fraction {
+    if given.iter().all(Option::is_none) && parts.fraction.is_none() {
         return None;
     }
     let offset = parts.zone.as_deref().and_then(zone_offset);
     if offset.is_some_and(|o| o.abs() >= 86_400) {
         return None;
     }
-    make_time(wanted, offset, now)
+    let micros = parts.fraction.as_deref().map_or(0, |digits| {
+        digits
+            .bytes()
+            .chain(std::iter::repeat(b'0'))
+            .take(6)
+            .fold(0, |n, d| n * 10 + u32::from(d - b'0'))
+    });
+    make_time(wanted, offset, now).map(|seconds| (seconds, micros))
 }
 
 #[derive(Clone, Copy)]

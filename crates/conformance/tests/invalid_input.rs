@@ -487,6 +487,76 @@ async fn every_since_reads_free_text_as_ruby_time_parse_in_pacific_time() {
 }
 
 #[tokio::test]
+async fn a_comment_list_keeps_the_since_fraction_and_the_issue_list_drops_it() {
+    // Given an issue, its comment, a pull request and its review comment at 2026-11-18T17:16:26Z
+    let (server, client) = start().await;
+    server
+        .clock
+        .set(Timestamp::parse("2026-11-18T17:16:26Z").unwrap());
+    let issue =
+        created(&client, &format!("{REPO}/issues"), &json!({"title": "Bug"})).await["number"]
+            .clone();
+    created(
+        &client,
+        &format!("{REPO}/issues/{issue}/comments"),
+        &json!({"body": "Issue"}),
+    )
+    .await;
+    let pull = created(
+        &client,
+        &format!("{REPO}/pulls"),
+        &json!({"title": "Feature", "head": "feature", "base": "main"}),
+    )
+    .await;
+    let number = &pull["number"];
+    created(
+        &client,
+        &format!("{REPO}/pulls/{number}/comments"),
+        &json!({"body": "Line", "path": "src/feature.txt", "line": 1, "commit_id": pull["head"]["sha"]}),
+    )
+    .await;
+    let lists = [
+        format!("{REPO}/issues/{issue}/comments"),
+        format!("{REPO}/issues/comments"),
+        format!("{REPO}/pulls/comments"),
+        format!("{REPO}/pulls/{number}/comments"),
+    ];
+
+    // When each comment list reads a since at, or just past, that second, as live cli/cli read,
+    // 2026-11-24
+    for list in &lists {
+        for (since, listed) in [
+            ("2026-11-18T17:16:26Z", true),
+            ("2026-11-18T17:16:26.0000001Z", true),
+            ("2026-11-18T17:16:26.000001Z", false),
+            ("2026-11-18T17:16:26.1Z", false),
+            ("2026-11-18T17:16:26,5Z", false),
+        ] {
+            let answer = client
+                .get(&format!("{list}?since={}", query_escape(since)))
+                .await;
+
+            // Then GitHub keeps the microseconds and lists a comment at or after the time
+            assert_eq!(answer.status, StatusCode::OK, "{list} {since}");
+            assert_eq!(
+                answer.json().as_array().map(Vec::len),
+                Some(usize::from(listed)),
+                "{list} {since}"
+            );
+        }
+    }
+
+    // When the issue list reads a since late in that second, and at the next second
+    let (late, in_second) = titles_since(&client, "2026-11-18T17:16:26.999Z").await;
+    let (next, after) = titles_since(&client, "2026-11-18T17:16:27Z").await;
+
+    // Then GitHub drops the fraction and lists the issue only for the first
+    assert_eq!((late, next), (StatusCode::OK, StatusCode::OK));
+    assert!(in_second.iter().any(|t| t == "Bug"), "{in_second:?}");
+    assert!(!after.iter().any(|t| t == "Bug"), "{after:?}");
+}
+
+#[tokio::test]
 async fn every_since_maps_local_time_through_the_pacific_zone_history() {
     // Given an issue at 2025-11-02T09:00:00Z, in the hour that repeats at the end of
     // daylight saving time

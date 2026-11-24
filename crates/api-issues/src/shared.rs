@@ -4,7 +4,7 @@ use http::StatusCode;
 use hubdouble_auth::{Actor, repo_role};
 use hubdouble_model::{
     Account, ApiError, Event, FieldError, Grant, Issue, IssueComment, Label, ReactionSubjectKind,
-    Repo, RepoRole, Requirement, Scope, Timestamp,
+    Repo, RepoRole, Requirement, Scope,
 };
 use hubdouble_render::{self as r, ReactionRollup, Urls};
 use hubdouble_rest::{Ctx, Reply};
@@ -64,24 +64,6 @@ pub(crate) fn created(body: &impl Serialize, location: &str) -> Result<Reply, Ap
 
 pub(crate) fn to_value(v: &impl Serialize) -> Result<Value, ApiError> {
     serde_json::to_value(v).map_err(|e| ApiError::internal(e.to_string()))
-}
-
-pub(crate) fn since(ctx: &Ctx<'_>, docs: &str) -> Result<Option<Timestamp>, ApiError> {
-    ctx.query()
-        .get("since")
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            Timestamp::parse_query(s, ctx.now())
-                .ok()
-                .filter(|t| t.is_datetime())
-                .ok_or_else(|| {
-                    ApiError::unprocessable(
-                        "The since parameter needs to be in ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ",
-                    )
-                    .with_docs(docs)
-                })
-        })
-        .transpose()
 }
 
 pub(crate) fn full_name(tx: &Tx, repo: &Repo) -> String {

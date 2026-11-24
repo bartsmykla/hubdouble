@@ -233,7 +233,7 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .get("since")
         .filter(|s| !s.is_empty())
         .map(|s| match Timestamp::parse_query(s, ctx.now()) {
-            Ok(t) if t.is_datetime() => Ok(t),
+            Ok(t) if t.at.is_datetime() => Ok(t),
             Ok(_) => Err(ApiError::unprocessable(
                 "Time values must be in the range 1000-01-01T00:00:00Z to 9999-12-31T23:59:59Z",
             )
@@ -246,7 +246,9 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .transpose()?;
     let mut comments: Vec<_> = comments
         .into_iter()
-        .filter(|c| since.is_none_or(|since| c.updated_at > since) && visible(ctx.tx(), viewer, c))
+        .filter(|c| {
+            since.is_none_or(|since| since.admits(c.updated_at)) && visible(ctx.tx(), viewer, c)
+        })
         .filter_map(|c| Some((c, ctx.tx().table::<Issues>().get(c.issue_id)?.number)))
         .collect();
     if ctx.query().get("sort") == Some("updated") {

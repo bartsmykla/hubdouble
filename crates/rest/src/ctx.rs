@@ -6,7 +6,7 @@ use http::HeaderMap;
 use http::header::LINK;
 use hubdouble_auth::Actor;
 use hubdouble_git::{Git, ReadJobs};
-use hubdouble_model::{ApiError, Clock, Repo, Timestamp};
+use hubdouble_model::{ApiError, Clock, QueryTime, Repo, Timestamp};
 use hubdouble_render::{Urls, query_escape};
 use hubdouble_store::{Tx, TxMut};
 use serde::Serialize;
@@ -219,6 +219,30 @@ impl<'a> Ctx<'a> {
     #[must_use]
     pub fn urls(&self) -> &Urls {
         self.p.urls
+    }
+
+    /// The `since` of a list request, read by [`Timestamp::parse_query`]; an empty value is none.
+    ///
+    /// # Errors
+    ///
+    /// `422` with `docs` when Ruby cannot read the time or SQL `DATETIME` cannot hold it.
+    pub fn since(&self, docs: &str) -> Result<Option<QueryTime>, ApiError> {
+        self.p
+            .query
+            .get("since")
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                Timestamp::parse_query(s, self.now())
+                    .ok()
+                    .filter(|t| t.at.is_datetime())
+                    .ok_or_else(|| {
+                        ApiError::unprocessable(
+                            "The since parameter needs to be in ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ",
+                        )
+                        .with_docs(docs)
+                    })
+            })
+            .transpose()
     }
 
     /// The `per_page` of a list request, without the checks of [`Ctx::page_params`], for a list

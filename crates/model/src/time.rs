@@ -92,8 +92,25 @@ impl Timestamp {
     ///
     /// Returns [`TimestampError`] where Ruby raises: no date or time, a field out of
     /// range, or more than 128 characters.
-    pub fn parse_query(text: &str, now: Timestamp) -> Result<Timestamp, TimestampError> {
+    pub fn parse_query(text: &str, now: Timestamp) -> Result<QueryTime, TimestampError> {
         crate::ruby_time::time_parse(text, now.0)
+            .map(|(seconds, micros)| QueryTime {
+                at: Timestamp(seconds),
+                micros,
+            })
+            .ok_or(TimestampError)
+    }
+
+    /// Reads a time as Ruby's `DateTime.parse` does in a UTC process: the first date and
+    /// time that `Date._parse` finds, a missing field completed from `now` as Ruby completes
+    /// it, a zone that Ruby does not name read as UTC, and the fraction dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimestampError`] where Ruby raises `Date::Error`: no date, an invalid
+    /// date or time, or more than 128 characters.
+    pub fn parse_date_time(text: &str, now: Timestamp) -> Result<Timestamp, TimestampError> {
+        crate::ruby_datetime::date_time_parse(text, now.0)
             .map(Timestamp)
             .ok_or(TimestampError)
     }
@@ -102,6 +119,21 @@ impl Timestamp {
     #[must_use]
     pub fn is_datetime(self) -> bool {
         (-30_610_224_000..=253_402_300_799).contains(&self.0)
+    }
+}
+
+/// A query time that keeps the microseconds that a second-precision [`Timestamp`] drops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryTime {
+    pub at: Timestamp,
+    pub micros: u32,
+}
+
+impl QueryTime {
+    /// Whether a second-precision time is at or after this one, as a `since` filter keeps it.
+    #[must_use]
+    pub fn admits(self, t: Timestamp) -> bool {
+        t > self.at || (t == self.at && self.micros == 0)
     }
 }
 
@@ -289,7 +321,7 @@ mod tests {
         ];
         for (text, expected) in accepted {
             // When / Then
-            let read = Timestamp::parse_query(text, now).map(|t| t.to_string());
+            let read = Timestamp::parse_query(text, now).map(|t| t.at.to_string());
             assert_eq!(read.as_deref(), Ok(expected), "{text}");
         }
         let too_long = format!("2025-11-20 {}", "x".repeat(118));
@@ -326,8 +358,51 @@ mod tests {
             ("1000-01-01T00:00:00+01:00", false),
             ("9999-12-31T23:00:00-02:00", false),
         ] {
-            let read = Timestamp::parse_query(text, now).map(Timestamp::is_datetime);
+            let read = Timestamp::parse_query(text, now).map(|t| t.at.is_datetime());
             assert_eq!(read, Ok(held), "{text}");
+        }
+    }
+
+    #[test]
+    fn date_times_read_free_text_as_the_live_commit_list_does() {
+        // Given the since and until values that live GET /repos/cli/cli/commits read, 2026-11-24,
+        // and a clock at Tuesday 2026-11-24T12:00:00Z
+        let now = Timestamp(1_795_521_600);
+        for (text, expected) in [
+            ("2026-11-18T17:16:33Z", "2026-11-18T17:16:33Z"),
+            ("2026-11-18T17:16:33.5Z", "2026-11-18T17:16:33Z"),
+            ("2026-11-18 17:16:33", "2026-11-18T17:16:33Z"),
+            ("18 Nov 2026 17:16:33 PST", "2026-11-19T01:16:33Z"),
+            ("2026-11-18 17:16:33 +0530", "2026-11-18T11:46:33Z"),
+            ("2026-11-18 23:59:60", "2026-11-18T23:59:59Z"),
+            ("2026-11-18 24:00", "2026-11-19T00:00:00Z"),
+            ("2026-W47-3", "2026-11-18T00:00:00Z"),
+            ("2026-322", "2026-11-18T00:00:00Z"),
+            ("Wed", "2026-11-25T00:00:00Z"),
+            ("10:00", "2026-11-24T10:00:00Z"),
+            ("Nov", "2026-11-01T00:00:00Z"),
+            ("2028-02-29", "2028-02-29T00:00:00Z"),
+        ] {
+            // When / Then
+            let read = Timestamp::parse_date_time(text, now).map(|t| t.to_string());
+            assert_eq!(read.as_deref(), Ok(expected), "{text}");
+        }
+        for text in [
+            "",
+            "garbage",
+            "1763486193",
+            "2026",
+            "2026-11-31",
+            "2026-02-29",
+            "25:00",
+            "2026-11-18 24:00:01",
+            "2026-13-01",
+        ] {
+            assert_eq!(
+                Timestamp::parse_date_time(text, now),
+                Err(TimestampError),
+                "{text}"
+            );
         }
     }
 

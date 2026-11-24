@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 
 use crate::shared::{
     Who, changed_from, comment_view, created, emit, full_name, invalid, issue_view, payload_urls,
-    since, to_value, who,
+    to_value, who,
 };
 
 pub(crate) fn comment_and_issue(
@@ -70,10 +70,7 @@ fn may_change(who: &Who, comment: &IssueComment) -> Result<(), ApiError> {
 pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?.clone();
     let number = ctx.param_i64("issue_number")?;
-    let since = since(
-        ctx,
-        "https://docs.github.com/rest/issues/comments#list-issue-comments",
-    )?;
+    let since = ctx.since("https://docs.github.com/rest/issues/comments#list-issue-comments")?;
     let tx = ctx.tx();
     let issue = tx
         .table::<Issues>()
@@ -83,7 +80,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let comments: Vec<&Arc<IssueComment>> = tx
         .table::<IssueComments>()
         .children(issue.id)
-        .filter(|c| since.is_none_or(|s| c.updated_at >= s))
+        .filter(|c| since.is_none_or(|s| s.admits(c.updated_at)))
         .collect();
     let urls = ctx.urls();
     let full = full_name(tx, &repo);
@@ -94,8 +91,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 
 pub(crate) fn list_for_repo(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?.clone();
-    let since = since(
-        ctx,
+    let since = ctx.since(
         "https://docs.github.com/rest/issues/comments#list-issue-comments-for-a-repository",
     )?;
     let q = ctx.query();
@@ -103,7 +99,7 @@ pub(crate) fn list_for_repo(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let mut comments: Vec<&Arc<IssueComment>> = tx
         .table::<IssueComments>()
         .in_repo(repo.id)
-        .filter(|c| since.is_none_or(|s| c.updated_at >= s))
+        .filter(|c| since.is_none_or(|s| s.admits(c.updated_at)))
         .collect();
     if q.get("sort") == Some("updated") {
         comments.sort_by_key(|c| (c.updated_at, c.id));

@@ -13,7 +13,7 @@ use crate::cursor::{self, Keyed};
 use crate::events::{self, What};
 use crate::shared::{
     Who, changed_from, created, emit_issue, full_name, invalid, invalid_value, issue_view,
-    label_view, payload_urls, since, to_value, user, who,
+    label_view, payload_urls, to_value, user, who,
 };
 
 const LIST_DOCS: &str = "https://docs.github.com/v3/issues/#list-issues";
@@ -225,7 +225,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         Some("") => {
             return Err(ApiError::unprocessable("Invalid datetime for since").with_docs(LIST_DOCS));
         }
-        _ => since(ctx, REPOSITORY_ISSUES_DOCS)?,
+        _ => ctx.since(REPOSITORY_ISSUES_DOCS)?.map(|s| s.at),
     };
     let mut wanted_labels = Vec::new();
     let mut unknown = false;
