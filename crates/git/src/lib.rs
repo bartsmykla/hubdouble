@@ -2,6 +2,7 @@ mod contract;
 mod diff;
 mod encode;
 mod events;
+mod format;
 mod history;
 mod merge;
 mod odb;

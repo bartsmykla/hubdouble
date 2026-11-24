@@ -16,4 +16,6 @@ pub use entity::*;
 pub use error::{ApiError, DOCS, FieldError};
 pub use event::Event;
 pub use ruleset::{glob, ref_matches};
-pub use time::{Clock, ManualClock, QueryTime, SystemClock, Timestamp, TimestampError};
+pub use time::{
+    Clock, ManualClock, QueryTime, SystemClock, Timestamp, TimestampError, civil_from_days,
+};

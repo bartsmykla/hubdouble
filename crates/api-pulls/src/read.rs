@@ -16,9 +16,23 @@ pub(crate) fn issue<'a>(ctx: &'a Ctx<'_>) -> Result<&'a Arc<Issue>, ApiError> {
 
 pub(crate) fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let issue = issue(ctx)?;
+    if let Some(reply) = text(ctx, issue) {
+        return reply;
+    }
     let reply = Reply::json(&render::detail(ctx.git(), ctx.tx(), ctx.urls(), issue)?)?;
     mergeability::read(ctx.read_jobs(), ctx.tx(), issue);
     Ok(reply)
+}
+
+fn text(ctx: &Ctx<'_>, issue: &Issue) -> Option<Result<Reply, ApiError>> {
+    hubdouble_api_gitdata::text_reply(ctx, issue.repo_id, || {
+        let pull = state::pull(issue)?;
+        let side = |sha: &str| sha.parse::<ObjectId>().map_err(|_| ApiError::not_found());
+        let (base, head) = (side(&pull.base.sha)?, side(&pull.head.sha)?);
+        let cmp = ctx.git().compare(ctx.tx(), issue.repo_id, base, head)?;
+        let ids = cmp.commits.iter().map(|(id, _)| *id).collect();
+        Ok((cmp.merge_base, head, ids))
+    })
 }
 
 pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {

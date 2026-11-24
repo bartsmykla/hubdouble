@@ -1,0 +1,751 @@
+use std::collections::HashSet;
+use std::fmt::Write as _;
+use std::sync::Arc;
+
+use hubdouble_model::civil_from_days;
+
+use crate::contract::{Commit, EntryMode, GitError, ObjectId, Signature};
+use crate::diff::{Change, Leaf, renames, text, text_patch};
+use crate::odb::Odb;
+
+const STAT_WIDTH: usize = 72;
+const MAIL_WIDTH: usize = 78;
+const ENCODED_WIDTH: usize = 76;
+const MIN_ABBREV: usize = 7;
+const BINARY_LINE: usize = 52;
+const STORED_BLOCK: usize = 65_535;
+const BASE85: &[u8; 85] =
+    b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
+const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+struct Side {
+    path: String,
+    mode: EntryMode,
+    id: ObjectId,
+    data: Arc<[u8]>,
+}
+
+pub(crate) struct File {
+    old: Option<Side>,
+    new: Option<Side>,
+    binary: bool,
+    hunks: Option<String>,
+    added: u64,
+    deleted: u64,
+}
+
+pub(crate) fn abbrev(objects: usize) -> usize {
+    usize::try_from(objects.bit_width().max(1).div_ceil(2))
+        .unwrap_or(MIN_ABBREV)
+        .max(MIN_ABBREV)
+}
+
+fn data(odb: &Odb, (mode, id): Leaf) -> Result<Arc<[u8]>, GitError> {
+    if mode == EntryMode::Submodule {
+        return Ok(Arc::from(format!("Subproject commit {id}\n").into_bytes()));
+    }
+    odb.blob(id)
+}
+
+pub(crate) fn files(odb: &Odb, changes: &[Change]) -> Result<Vec<File>, GitError> {
+    let renamed = renames(changes);
+    let consumed: HashSet<usize> = renamed.values().copied().collect();
+    let side = |c: &Change, leaf: Option<Leaf>| -> Result<Option<Side>, GitError> {
+        leaf.map(|leaf| {
+            Ok(Side {
+                path: c.path.clone(),
+                mode: leaf.0,
+                id: leaf.1,
+                data: data(odb, leaf)?,
+            })
+        })
+        .transpose()
+    };
+    let mut out = Vec::with_capacity(changes.len());
+    for (i, c) in changes.iter().enumerate() {
+        if consumed.contains(&i) {
+            continue;
+        }
+        let old = match renamed.get(&i) {
+            Some(&from) => side(&changes[from], changes[from].old)?,
+            None => side(c, c.old)?,
+        };
+        out.push(File::new(old, side(c, c.new)?));
+    }
+    out.sort_by(|a, b| a.path().cmp(b.path()));
+    Ok(out)
+}
+
+impl File {
+    fn new(old: Option<Side>, new: Option<Side>) -> File {
+        let empty: &[u8] = &[];
+        let a = old.as_ref().map_or(empty, |s| &s.data);
+        let b = new.as_ref().map_or(empty, |s| &s.data);
+        let mut file = File {
+            binary: false,
+            hunks: None,
+            added: 0,
+            deleted: 0,
+            old: None,
+            new: None,
+        };
+        if let (Some(x), Some(y)) = (text(a), text(b)) {
+            (file.hunks, file.added, file.deleted) = text_patch(x, y);
+        } else {
+            file.binary = true;
+            if a != b {
+                file.added = len(b);
+                file.deleted = len(a);
+            }
+        }
+        file.old = old;
+        file.new = new;
+        file
+    }
+
+    fn path(&self) -> &str {
+        self.new
+            .as_ref()
+            .or(self.old.as_ref())
+            .map_or("", |s| &s.path)
+    }
+
+    fn old_path(&self) -> &str {
+        self.old
+            .as_ref()
+            .or(self.new.as_ref())
+            .map_or("", |s| &s.path)
+    }
+
+    fn renamed(&self) -> bool {
+        self.old.is_some() && self.new.is_some() && self.old_path() != self.path()
+    }
+
+    fn modes(&self) -> Option<(EntryMode, EntryMode)> {
+        let (old, new) = (self.old.as_ref()?, self.new.as_ref()?);
+        (old.mode != new.mode).then_some((old.mode, new.mode))
+    }
+
+    fn write(&self, out: &mut String, abbrev: usize, binary_patch: bool) {
+        let _ = writeln!(
+            out,
+            "diff --git {} {}",
+            quote("a/", self.old_path()),
+            quote("b/", self.path())
+        );
+        match (&self.old, &self.new, self.modes()) {
+            (None, Some(new), _) => {
+                let _ = writeln!(out, "new file mode {}", new.mode.as_str());
+            }
+            (Some(old), None, _) => {
+                let _ = writeln!(out, "deleted file mode {}", old.mode.as_str());
+            }
+            (_, _, Some((a, b))) => {
+                let _ = writeln!(out, "old mode {}\nnew mode {}", a.as_str(), b.as_str());
+            }
+            _ => {}
+        }
+        if self.renamed() {
+            let _ = writeln!(
+                out,
+                "similarity index 100%\nrename from {}\nrename to {}",
+                quote("", self.old_path()),
+                quote("", self.path())
+            );
+        }
+        let old_id = self.old.as_ref().map_or(ObjectId::NULL, |s| s.id);
+        let new_id = self.new.as_ref().map_or(ObjectId::NULL, |s| s.id);
+        if old_id == new_id {
+            return;
+        }
+        let width = if binary_patch && self.binary {
+            40
+        } else {
+            abbrev
+        };
+        let (a, b) = (old_id.to_string(), new_id.to_string());
+        let _ = write!(out, "index {}..{}", &a[..width], &b[..width]);
+        if let (Some(old), Some(new)) = (&self.old, &self.new)
+            && old.mode == new.mode
+        {
+            let _ = write!(out, " {}", new.mode.as_str());
+        }
+        out.push('\n');
+        let label = |side: &Option<Side>, prefix: &str| {
+            side.as_ref()
+                .map_or_else(|| "/dev/null".to_owned(), |s| quote(prefix, &s.path))
+        };
+        if self.binary && binary_patch {
+            out.push_str("GIT binary patch\n");
+            let empty: &[u8] = &[];
+            literal(out, self.new.as_ref().map_or(empty, |s| &s.data));
+            literal(out, self.old.as_ref().map_or(empty, |s| &s.data));
+        } else if self.binary {
+            let _ = writeln!(
+                out,
+                "Binary files {} and {} differ",
+                label(&self.old, "a/"),
+                label(&self.new, "b/")
+            );
+        } else if let Some(hunks) = &self.hunks {
+            let _ = writeln!(
+                out,
+                "--- {}\n+++ {}\n{hunks}",
+                label(&self.old, "a/"),
+                label(&self.new, "b/")
+            );
+        }
+    }
+
+    fn stat_name(&self) -> String {
+        if self.renamed() {
+            rename_name(self.old_path(), self.path())
+        } else {
+            quote("", self.path())
+        }
+    }
+}
+
+fn len(bytes: &[u8]) -> u64 {
+    u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+}
+
+fn needs_quote(path: &str) -> bool {
+    path.bytes()
+        .any(|b| !(0x20..0x7f).contains(&b) || b == b'"' || b == b'\\')
+}
+
+fn quote(prefix: &str, path: &str) -> String {
+    if !needs_quote(path) {
+        return format!("{prefix}{path}");
+    }
+    let mut out = format!("\"{prefix}");
+    for b in path.bytes() {
+        match b {
+            0x07 => out.push_str("\\a"),
+            0x08 => out.push_str("\\b"),
+            b'\t' => out.push_str("\\t"),
+            b'\n' => out.push_str("\\n"),
+            0x0b => out.push_str("\\v"),
+            0x0c => out.push_str("\\f"),
+            b'\r' => out.push_str("\\r"),
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(char::from(b)),
+            _ => {
+                let _ = write!(out, "\\{b:03o}");
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn rename_name(a: &str, b: &str) -> String {
+    if needs_quote(a) || needs_quote(b) {
+        return format!("{} => {}", quote("", a), quote("", b));
+    }
+    let (ab, bb) = (a.as_bytes(), b.as_bytes());
+    let mut prefix = 0;
+    for (i, (x, y)) in ab.iter().zip(bb).enumerate() {
+        if x != y {
+            break;
+        }
+        if *x == b'/' {
+            prefix = i + 1;
+        }
+    }
+    let floor = prefix.saturating_sub(usize::from(prefix > 0));
+    let mut suffix = 0;
+    let (mut i, mut j) = (ab.len(), bb.len());
+    while i > floor && j > floor && ab[i - 1] == bb[j - 1] {
+        if ab[i - 1] == b'/' {
+            suffix = ab.len() - (i - 1);
+        }
+        i -= 1;
+        j -= 1;
+    }
+    let a_mid = ab.len().saturating_sub(prefix + suffix);
+    let b_mid = bb.len().saturating_sub(prefix + suffix);
+    let mut out = String::new();
+    let wrap = prefix + suffix > 0;
+    if wrap {
+        out.push_str(&a[..prefix]);
+        out.push('{');
+    }
+    out.push_str(&a[prefix..prefix + a_mid]);
+    out.push_str(" => ");
+    out.push_str(&b[prefix..prefix + b_mid]);
+    if wrap {
+        out.push('}');
+        out.push_str(&a[a.len() - suffix..]);
+    }
+    out
+}
+
+fn digits(n: u64) -> usize {
+    n.checked_ilog10()
+        .map_or(1, |d| usize::try_from(d).unwrap_or(0) + 1)
+}
+
+fn scale(it: u64, width: u64, max: u64) -> u64 {
+    if it == 0 {
+        0
+    } else {
+        1 + it * (width - 1) / max
+    }
+}
+
+struct Layout {
+    number_width: usize,
+    name_width: usize,
+    graph: u64,
+    max_change: u64,
+}
+
+fn layout(files: &[File], names: &[String]) -> Layout {
+    let max_len = names.iter().map(|n| n.chars().count()).max().unwrap_or(0);
+    let (mut number_width, mut bin_width, mut max_change) = (0, 0, 0);
+    for f in files {
+        if f.binary {
+            bin_width = bin_width.max(14 + digits(f.added) + digits(f.deleted));
+            number_width = 3;
+        } else {
+            max_change = max_change.max(f.added + f.deleted);
+        }
+    }
+    let number_width = number_width.max(digits(max_change));
+    let width = STAT_WIDTH.max(22 + number_width);
+    let max_width = usize::try_from(max_change).unwrap_or(usize::MAX);
+    let mut graph_width = if max_width + 4 > bin_width {
+        max_width
+    } else {
+        bin_width - 4
+    };
+    let mut name_width = max_len;
+    if name_width + number_width + 6 + graph_width > width {
+        let cap = (width * 3 / 8).saturating_sub(number_width + 6).max(6);
+        graph_width = graph_width.min(cap);
+        let room = width - number_width - 6 - graph_width;
+        if name_width > room {
+            name_width = room;
+        } else {
+            graph_width = width - number_width - 6 - name_width;
+        }
+    }
+    Layout {
+        number_width,
+        name_width,
+        graph: u64::try_from(graph_width).unwrap_or(u64::MAX),
+        max_change,
+    }
+}
+
+pub(crate) fn stat(files: &[File]) -> String {
+    let names: Vec<String> = files.iter().map(File::stat_name).collect();
+    let Layout {
+        number_width,
+        name_width,
+        graph,
+        max_change,
+    } = layout(files, &names);
+    let mut out = String::new();
+    let (mut insertions, mut deletions) = (0, 0);
+    for (f, name) in files.iter().zip(&names) {
+        let mut shown = name.as_str();
+        let mut prefix = "";
+        let mut room = name_width;
+        let count = name.chars().count();
+        if name_width < count {
+            prefix = "...";
+            room = room.saturating_sub(3);
+            let skip = name
+                .char_indices()
+                .nth(count - room)
+                .map_or(name.len(), |(i, _)| i);
+            shown = &name[skip..];
+            if let Some(slash) = shown.find('/') {
+                shown = &shown[slash..];
+            }
+        }
+        let pad = room.saturating_sub(shown.chars().count());
+        let _ = write!(out, " {prefix}{shown}{:pad$} | ", "");
+        if f.binary {
+            let _ = write!(out, "{:>number_width$}", "Bin");
+            if f.added == 0 && f.deleted == 0 {
+                out.push('\n');
+            } else {
+                let _ = writeln!(out, " {} -> {} bytes", f.deleted, f.added);
+            }
+            continue;
+        }
+        insertions += f.added;
+        deletions += f.deleted;
+        let total = f.added + f.deleted;
+        let _ = write!(out, "{total:>number_width$}");
+        if total > 0 {
+            out.push(' ');
+        }
+        let (mut add, mut del) = (f.added, f.deleted);
+        if graph <= max_change {
+            let mut scaled = scale(total, graph, max_change);
+            if scaled < 2 && add > 0 && del > 0 {
+                scaled = 2;
+            }
+            if add < del {
+                add = scale(add, graph, max_change);
+                del = scaled - add;
+            } else {
+                del = scale(del, graph, max_change);
+                add = scaled - del;
+            }
+        }
+        for (sign, n) in [('+', add), ('-', del)] {
+            (0..n).for_each(|_| out.push(sign));
+        }
+        out.push('\n');
+    }
+    let _ = write!(
+        out,
+        " {} file{} changed",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" }
+    );
+    if insertions > 0 || deletions == 0 {
+        let s = if insertions == 1 { "" } else { "s" };
+        let _ = write!(out, ", {insertions} insertion{s}(+)");
+    }
+    if deletions > 0 || insertions == 0 {
+        let s = if deletions == 1 { "" } else { "s" };
+        let _ = write!(out, ", {deletions} deletion{s}(-)");
+    }
+    out.push('\n');
+    summary(&mut out, files);
+    out
+}
+
+fn summary(out: &mut String, files: &[File]) {
+    for f in files {
+        match (&f.old, &f.new) {
+            (None, Some(new)) => {
+                let _ = writeln!(
+                    out,
+                    " create mode {} {}",
+                    new.mode.as_str(),
+                    quote("", f.path())
+                );
+            }
+            (Some(old), None) => {
+                let _ = writeln!(
+                    out,
+                    " delete mode {} {}",
+                    old.mode.as_str(),
+                    quote("", f.path())
+                );
+            }
+            _ if f.renamed() => {
+                let _ = writeln!(out, " rename {} (100%)", f.stat_name());
+                if let Some((a, b)) = f.modes() {
+                    let _ = writeln!(out, " mode change {} => {}", a.as_str(), b.as_str());
+                }
+            }
+            _ => {
+                if let Some((a, b)) = f.modes() {
+                    let _ = writeln!(
+                        out,
+                        " mode change {} => {} {}",
+                        a.as_str(),
+                        b.as_str(),
+                        quote("", f.path())
+                    );
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn diff_text(files: &[File], abbrev: usize, binary_patch: bool) -> String {
+    let mut out = String::new();
+    for f in files {
+        f.write(&mut out, abbrev, binary_patch);
+    }
+    out
+}
+
+fn literal(out: &mut String, data: &[u8]) {
+    let _ = writeln!(out, "literal {}", data.len());
+    for chunk in zlib_stored(data).chunks(BINARY_LINE) {
+        let n = u8::try_from(chunk.len()).unwrap_or(0);
+        out.push(char::from(if n <= 26 {
+            b'A' + n - 1
+        } else {
+            b'a' + n - 27
+        }));
+        for group in chunk.chunks(4) {
+            let mut acc = (0..4).fold(0_u32, |acc, i| {
+                acc << 8 | u32::from(group.get(i).copied().unwrap_or(0))
+            });
+            let mut five = [0_u8; 5];
+            for d in five.iter_mut().rev() {
+                *d = BASE85[usize::try_from(acc % 85).unwrap_or(0)];
+                acc /= 85;
+            }
+            for c in five {
+                out.push(char::from(c));
+            }
+        }
+        out.push('\n');
+    }
+    out.push('\n');
+}
+
+fn zlib_stored(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01];
+    if data.is_empty() {
+        out.extend([1, 0, 0, 0xff, 0xff]);
+    }
+    let mut blocks = data.chunks(STORED_BLOCK).peekable();
+    while let Some(block) = blocks.next() {
+        out.push(u8::from(blocks.peek().is_none()));
+        let n = u16::try_from(block.len()).unwrap_or(u16::MAX);
+        out.extend(n.to_le_bytes());
+        out.extend((!n).to_le_bytes());
+        out.extend(block);
+    }
+    let (mut a, mut b) = (1_u32, 0_u32);
+    for &byte in data {
+        a = (a + u32::from(byte)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    out.extend((b << 16 | a).to_be_bytes());
+    out
+}
+
+fn date(who: &Signature) -> String {
+    let local = who.time.unix() + i64::from(who.offset_minutes) * 60;
+    let days = local.div_euclid(86_400);
+    let secs = local.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let weekday = DAYS[usize::try_from(days.rem_euclid(7)).unwrap_or(0)];
+    let month = MONTHS[usize::try_from(month - 1).unwrap_or(0)];
+    let sign = if who.offset_minutes < 0 { '-' } else { '+' };
+    let offset = who.offset_minutes.unsigned_abs();
+    format!(
+        "{weekday}, {day} {month} {year} {:02}:{:02}:{:02} {sign}{:02}{:02}",
+        secs / 3600,
+        secs / 60 % 60,
+        secs % 60,
+        offset / 60,
+        offset % 60
+    )
+}
+
+fn last_line(out: &str) -> usize {
+    out.len() - out.rfind('\n').map_or(0, |i| i + 1)
+}
+
+fn needs_encoding(text: &str) -> bool {
+    !text.is_ascii() || text.contains("=?")
+}
+
+fn rfc2047(out: &mut String, text: &str, address: bool) {
+    let mut line = last_line(out) + 10;
+    out.push_str("=?UTF-8?q?");
+    for c in text.chars() {
+        let mut buf = [0_u8; 4];
+        let bytes = c.encode_utf8(&mut buf).as_bytes();
+        let special = bytes.len() > 1
+            || !c.is_ascii_graphic()
+            || matches!(c, '=' | '?' | '_')
+            || (address && !c.is_ascii_alphanumeric() && !matches!(c, '!' | '*' | '+' | '-' | '/'));
+        let width = if special { 3 * bytes.len() } else { 1 };
+        if line + width + 2 > ENCODED_WIDTH {
+            out.push_str("?=\n =?UTF-8?q?");
+            line = 11;
+        }
+        if special {
+            for b in bytes {
+                let _ = write!(out, "={b:02X}");
+            }
+        } else {
+            out.push(c);
+        }
+        line += width;
+    }
+    out.push_str("?=");
+}
+
+fn wrap(out: &mut String, text: &str) {
+    let bytes = text.as_bytes();
+    let first = last_line(out);
+    let (mut pos, mut bol, mut w) = (0, 0, first);
+    let mut space = Some(0);
+    let mut indent = 0;
+    loop {
+        let c = bytes.get(pos).copied();
+        if c.is_none_or(|c| c.is_ascii_whitespace()) {
+            if w <= MAIL_WIDTH || space.is_none() {
+                if c.is_none() && pos == bol {
+                    return;
+                }
+                let start = space.unwrap_or_else(|| {
+                    (0..indent).for_each(|_| out.push(' '));
+                    bol
+                });
+                out.push_str(&text[start..pos]);
+                if c.is_none() {
+                    return;
+                }
+                space = Some(pos);
+                w += 1;
+                pos += 1;
+            } else {
+                out.push('\n');
+                let s = space.unwrap_or(bol);
+                pos = s + usize::from(bytes.get(s).is_some_and(u8::is_ascii_whitespace));
+                bol = pos;
+                space = None;
+                w = 1;
+                indent = 1;
+            }
+            continue;
+        }
+        let step = text[pos..].chars().next().map_or(1, char::len_utf8);
+        w += 1;
+        pos += step;
+    }
+}
+
+fn quoted_name(name: &str) -> String {
+    if !name.contains([
+        '(', ')', '<', '>', '[', ']', ':', ';', '@', ',', '.', '"', '\\',
+    ]) {
+        return name.to_owned();
+    }
+    let mut out = String::from("\"");
+    for c in name.chars() {
+        if matches!(c, '"' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// One `git format-patch` mail as GitHub writes it: no signature, and `[PATCH n/m]` when
+/// `number` gives the commit's place among `m`.
+pub(crate) fn mail(
+    id: ObjectId,
+    commit: &Commit,
+    number: Option<(usize, usize)>,
+    files: &[File],
+    abbrev: usize,
+) -> String {
+    let who = &commit.author;
+    let mut out = format!("From {id} Mon Sep 17 00:00:00 2001\nFrom: ");
+    let mut width = MAIL_WIDTH;
+    if needs_encoding(&who.name) {
+        rfc2047(&mut out, &who.name, true);
+        width = ENCODED_WIDTH;
+    } else {
+        wrap(&mut out, &quoted_name(&who.name));
+    }
+    if width < last_line(&out) + 3 + who.email.len() {
+        out.push('\n');
+    }
+    let _ = writeln!(out, " <{}>\nDate: {}", who.email, date(who));
+    let message = commit.message.trim_start_matches('\n');
+    let mut lines = message.lines();
+    let subject: Vec<&str> = lines
+        .by_ref()
+        .take_while(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .collect();
+    let subject = subject.join(" ");
+    match number {
+        Some((n, m)) => {
+            let _ = write!(out, "Subject: [PATCH {n}/{m}] ");
+        }
+        None => out.push_str("Subject: [PATCH] "),
+    }
+    if needs_encoding(&subject) {
+        rfc2047(&mut out, &subject, false);
+    } else {
+        wrap(&mut out, &subject);
+    }
+    out.push('\n');
+    if !message.is_ascii() {
+        out.push_str(
+            "MIME-Version: 1.0\nContent-Type: text/plain; charset=UTF-8\nContent-Transfer-Encoding: 8bit\n",
+        );
+    }
+    out.push('\n');
+    let body: Vec<&str> = lines.skip_while(|l| l.trim().is_empty()).collect();
+    let end = body
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map_or(0, |i| i + 1);
+    for line in &body[..end] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("---\n");
+    out.push_str(&stat(files));
+    out.push('\n');
+    out.push_str(&diff_text(files, abbrev, true));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_picks_the_abbreviation_from_the_object_count() {
+        for (objects, want) in [(0, 7), (20, 7), (1 << 14, 8), (5_000_000, 12)] {
+            assert_eq!(abbrev(objects), want, "{objects}");
+        }
+    }
+
+    #[test]
+    fn a_rename_shows_the_common_directories_once() {
+        for (a, b, want) in [
+            (
+                "community/Hardhat.gitignore",
+                "community/JavaScript/Hardhat.gitignore",
+                "community/{ => JavaScript}/Hardhat.gitignore",
+            ),
+            ("a.txt", "b.txt", "a.txt => b.txt"),
+            ("src/old/x.rs", "src/new/x.rs", "src/{old => new}/x.rs"),
+        ] {
+            assert_eq!(rename_name(a, b), want);
+        }
+    }
+
+    #[test]
+    fn a_stored_zlib_stream_inflates_to_its_data() {
+        let data: Vec<u8> = (0..70_000_u32)
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
+        let z = zlib_stored(&data);
+        assert_eq!(&z[..2], &[0x78, 0x01]);
+        assert_eq!(z.len(), 2 + 5 + 65_535 + 5 + (70_000 - 65_535) + 4);
+        assert_eq!(
+            zlib_stored(&[]),
+            [0x78, 0x01, 1, 0, 0, 0xff, 0xff, 0, 0, 0, 1]
+        );
+    }
+
+    #[test]
+    fn a_long_subject_folds_at_78_columns() {
+        let mut out = String::from("Subject: [PATCH] ");
+        wrap(&mut out, "word ".repeat(20).trim_end());
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines.iter().all(|l| l.len() <= MAIL_WIDTH), "{out}");
+        assert!(lines[1].starts_with(" word"), "{out}");
+    }
+}

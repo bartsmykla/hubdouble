@@ -312,3 +312,208 @@ async fn graphql_leaves_answer_values_of_their_schema_types() {
     assert_eq!(positions, [json!(1), json!(1)]);
     assert_eq!(answer.json().get("errors"), None, "{}", answer.json());
 }
+
+const SPOON_PATCH: &str = include_str!("live/spoon-knife-compare.patch");
+const SPOON_DIFF: &str = include_str!("live/spoon-knife-compare.diff");
+const RENAME_PATCH: &str = include_str!("live/gitignore-rename.patch");
+const BINARY_DIFF: &str = include_str!("live/explore-binary.diff");
+const SPOON: &str = "repos/acme/spoon";
+const FIRST: &str = "bb4cc8d3b2e14b3af5df699876dd4ff3acd00b7f";
+const SECOND: &str = "d0dd1f61b33d64e29d8bc1372a94ef6a2fee76a9";
+
+fn added(diff: &str, path: &str) -> String {
+    let start = diff.find(&format!("+++ b/{path}\n")).unwrap();
+    let mut content = String::new();
+    for line in diff[start..]
+        .lines()
+        .skip(2)
+        .take_while(|line| line.starts_with('+'))
+    {
+        content.push_str(&line[1..]);
+        content.push('\n');
+    }
+    content
+}
+
+fn abbreviated(text: &str) -> String {
+    text.split_inclusive('\n')
+        .map(|line| match line.strip_prefix("index ") {
+            Some(rest) => {
+                let end = rest.find([' ', '\n']).unwrap();
+                let (a, b) = rest[..end].split_once("..").unwrap();
+                format!("index {}..{}{}", &a[..7], &b[..7], &rest[end..])
+            }
+            None => line.to_owned(),
+        })
+        .collect()
+}
+
+fn octocat(message: &str, date: &str, files: &Value) -> Value {
+    json!({"branch": "fork", "message": message, "files": files,
+        "author": {"name": "The Octocat", "email": "octocat@nowhere.com", "date": date}})
+}
+
+async fn spoon_server() -> TestServer {
+    let v1 = added(SPOON_PATCH, "README.md");
+    let css = added(SPOON_PATCH, "styles.css");
+    let v2 = added(SPOON_DIFF, "README.md");
+    let ignore = json!({"community/Hardhat.gitignore": "node_modules\n"});
+    let moved = json!({"community/Hardhat.gitignore": null,
+        "community/JavaScript/Hardhat.gitignore": "node_modules\n"});
+    let mut commits = vec![
+        octocat(
+            "Create styles.css and updated README\n",
+            "2014-02-04T22:38:36Z",
+            &json!({"README.md": v1, "styles.css": css}),
+        ),
+        octocat(
+            "Pointing to the guide for forking\n",
+            "2014-02-12T23:20:44Z",
+            &json!({"README.md": v2}),
+        ),
+    ];
+    for files in [
+        ignore,
+        moved,
+        json!({"topics/git/git.png": "\u{0}a"}),
+        json!({"topics/git/git.png": "\u{0}b"}),
+    ] {
+        commits.push(json!({"branch": "moves", "message": "Move", "files": files}));
+    }
+    let repo = json!({"kind": "repository", "owner": "acme", "name": "spoon",
+        "visibility": "public", "files": {"index.html": "<html></html>\n"}, "commits": commits});
+    let pull = json!({"kind": "pull_request", "repository": "acme/spoon", "user": "alice",
+        "title": "fork", "head": "fork", "base": "main"});
+    whole_server(&[repo, pull]).await
+}
+
+async fn text(client: &GoGithub, path: &str, accept: &'static str) -> (String, String, String) {
+    let answer = client
+        .call_json_headers(
+            http::Method::GET,
+            path,
+            Vec::new(),
+            headers(&[("accept", accept)]),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::OK, "{path} {accept}");
+    (
+        String::from_utf8(answer.body.to_vec()).unwrap(),
+        answer.header("content-type").to_owned(),
+        answer.header("x-github-media-type").to_owned(),
+    )
+}
+
+async fn shas(client: &GoGithub, branch: &str) -> Vec<String> {
+    let answer = client.get(&format!("{SPOON}/commits?sha={branch}")).await;
+    let mut shas: Vec<String> = answer
+        .json()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["sha"].as_str().unwrap().to_owned())
+        .collect();
+    shas.reverse();
+    shas
+}
+
+#[tokio::test]
+async fn diff_and_patch_media_answer_the_bytes_github_writes() {
+    // Given the two Spoon-Knife commits, seeded with their files, authors and dates in UTC
+    let server = spoon_server().await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let fork = shas(&alice, "fork").await;
+    let (first, second) = (&fork[1], &fork[2]);
+    let live = abbreviated(SPOON_PATCH)
+        .replace(FIRST, first)
+        .replace(SECOND, second)
+        .replace("4 Feb 2014 14:38:36 -0800", "4 Feb 2014 22:38:36 +0000")
+        .replace("12 Feb 2014 15:20:44 -0800", "12 Feb 2014 23:20:44 +0000");
+    let first_mail = &live[..live.find(&format!("\nFrom {second}")).unwrap()];
+
+    // When the client asks a commit, the compare and the pull request for diff and patch text
+    let commit = format!("{SPOON}/commits/{first}");
+    let compare = format!("{SPOON}/compare/main...fork");
+    let commit_diff = text(&alice, &commit, "application/vnd.github.diff").await;
+    let commit_patch = text(&alice, &commit, "application/vnd.github.patch").await;
+    let compare_diff = text(&alice, &compare, "application/vnd.github.v3.diff").await;
+    let compare_patch = text(&alice, &compare, "application/vnd.github.patch").await;
+    let pull_diff = text(
+        &alice,
+        &format!("{SPOON}/pulls/1"),
+        "application/vnd.github.diff",
+    )
+    .await;
+    let pull_patch = text(
+        &alice,
+        &format!("{SPOON}/pulls/1"),
+        "application/vnd.github.v3.patch",
+    )
+    .await;
+
+    // Then each body is live GitHub's, with the seed's SHAs, UTC dates and 7-character IDs
+    let diff_type = "application/vnd.github.diff; charset=utf-8".to_owned();
+    let patch_type = "application/vnd.github.patch; charset=utf-8".to_owned();
+    assert_eq!(
+        commit_diff,
+        (
+            first_mail[first_mail.find("diff --git").unwrap()..].to_owned(),
+            diff_type.clone(),
+            "github.v3; param=diff".to_owned()
+        )
+    );
+    assert_eq!(commit_patch.0, first_mail.replace("[PATCH 1/2]", "[PATCH]"));
+    assert_eq!(
+        (commit_patch.1, commit_patch.2),
+        (patch_type.clone(), "github.v3; param=patch".to_owned())
+    );
+    assert_eq!(compare_diff.0, abbreviated(SPOON_DIFF));
+    assert_eq!(compare_patch.0, live);
+    assert_eq!((pull_diff.0, pull_diff.1), (compare_diff.0, diff_type));
+    assert_eq!((pull_patch.0, pull_patch.1), (live, patch_type));
+}
+
+async fn blob(client: &GoGithub, sha: &str) -> String {
+    let answer = client.get(&format!("{SPOON}/commits/{sha}")).await;
+    answer.json()["files"][0]["sha"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn renames_and_binary_files_take_the_lines_github_writes() {
+    // Given a rename of an unchanged file and a change of a binary file
+    let server = spoon_server().await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let moves = shas(&alice, "moves").await;
+    let (rename, binary) = (&moves[2], &moves[4]);
+    let (old, new) = (blob(&alice, &moves[3]).await, blob(&alice, binary).await);
+
+    // When the client asks the two commits for patch and diff text
+    let commit = |sha: &str| format!("{SPOON}/commits/{sha}");
+    let rename_patch = text(&alice, &commit(rename), "application/vnd.github.patch").await;
+    let binary_diff = text(&alice, &commit(binary), "application/vnd.github.diff").await;
+    let binary_patch = text(&alice, &commit(binary), "application/vnd.github.patch").await;
+
+    // Then the rename and binary lines are live GitHub's, and the patch holds the full binary
+    assert!(rename_patch.0.ends_with(RENAME_PATCH), "{}", rename_patch.0);
+    assert_eq!(
+        binary_diff.0,
+        BINARY_DIFF.replace(
+            "e88d9a3c6525..d141110537fa",
+            &format!("{}..{}", &old[..7], &new[..7])
+        )
+    );
+    let patch = binary_patch.0;
+    assert!(
+        patch.contains("\n topics/git/git.png | Bin 2 -> 2 bytes\n 1 file changed, 0 insertions(+), 0 deletions(-)\n\n"),
+        "{patch}"
+    );
+    assert!(
+        patch.contains(&format!(
+            "\nindex {old}..{new} 100644\nGIT binary patch\nliteral 2\n"
+        )),
+        "{patch}"
+    );
+}

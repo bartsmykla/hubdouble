@@ -300,6 +300,10 @@ pub(crate) fn get_commit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         };
         return Reply::raw(content_type, id.to_string()).header(ETAG, &format!("\"{id}\""));
     }
+    let base = commit.parents.first().copied();
+    if let Some(reply) = crate::text_reply(ctx, view.repo.id, || Ok((base, id, vec![id]))) {
+        return reply;
+    }
     let files = view.files(id, &commit)?;
     let pageable = &files[..files.len().min(MAX_COMMIT_FILES)];
     let page = commit_page(ctx)?;

@@ -7,8 +7,9 @@ use crate::odb::Odb;
 
 const BINARY_PROBE: usize = 8000;
 const CONTEXT: u32 = 3;
+const FUNC_NAME: usize = 80;
 
-type Leaf = (EntryMode, ObjectId);
+pub(crate) type Leaf = (EntryMode, ObjectId);
 
 pub(crate) struct Change {
     pub path: String,
@@ -69,7 +70,7 @@ fn walk(
     Ok(())
 }
 
-pub(crate) fn file_diffs(odb: &Odb, changes: &[Change]) -> Result<Vec<FileDiff>, GitError> {
+pub(crate) fn renames(changes: &[Change]) -> HashMap<usize, usize> {
     let mut removed: HashMap<ObjectId, Vec<usize>> = HashMap::new();
     for (i, c) in changes.iter().enumerate() {
         if let (Some((_, id)), None) = (c.old, c.new) {
@@ -86,6 +87,11 @@ pub(crate) fn file_diffs(odb: &Odb, changes: &[Change]) -> Result<Vec<FileDiff>,
             renamed_from.insert(i, from);
         }
     }
+    renamed_from
+}
+
+pub(crate) fn file_diffs(odb: &Odb, changes: &[Change]) -> Result<Vec<FileDiff>, GitError> {
+    let renamed_from = renames(changes);
     let consumed: std::collections::HashSet<usize> = renamed_from.values().copied().collect();
     let mut out = Vec::with_capacity(changes.len());
     for (i, c) in changes.iter().enumerate() {
@@ -134,7 +140,7 @@ fn content(odb: &Odb, side: Option<Leaf>) -> Result<Option<std::sync::Arc<[u8]>>
     }
 }
 
-fn text(bytes: &[u8]) -> Option<&str> {
+pub(crate) fn text(bytes: &[u8]) -> Option<&str> {
     if bytes[..bytes.len().min(BINARY_PROBE)].contains(&0) {
         return None;
     }
@@ -163,6 +169,18 @@ fn range(start: u32, len: u32) -> String {
     }
 }
 
+fn func_name(line: &str) -> Option<&str> {
+    let first = line.bytes().next()?;
+    if !(first.is_ascii_alphabetic() || first == b'_' || first == b'$') {
+        return None;
+    }
+    let mut end = line.len().min(FUNC_NAME);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(line[..end].trim_end_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']))
+}
+
 fn line(out: &mut String, sign: char, text: &str) {
     out.push(sign);
     out.push_str(text);
@@ -183,6 +201,8 @@ pub(crate) fn text_patch(a: &str, b: &str) -> (Option<String>, u64, u64) {
     let new = |i: u32| input.interner[input.after[i as usize]];
     let old_len = u32::try_from(input.before.len()).unwrap_or(u32::MAX);
     let mut out = String::new();
+    let mut func = "";
+    let mut searched = 0;
     let mut i = 0;
     while i < hunks.len() {
         let mut j = i;
@@ -201,7 +221,16 @@ pub(crate) fn text_patch(a: &str, b: &str) -> (Option<String>, u64, u64) {
         out.push_str(&range(old_start, old_end - old_start));
         out.push_str(" +");
         out.push_str(&range(new_start, new_end - new_start));
-        out.push_str(" @@\n");
+        out.push_str(" @@");
+        if let Some(found) = (searched..old_start).rev().find_map(|k| func_name(old(k))) {
+            func = found;
+        }
+        searched = old_start;
+        if !func.is_empty() {
+            out.push(' ');
+            out.push_str(func);
+        }
+        out.push('\n');
         let mut pos = old_start;
         for h in &hunks[i..=j] {
             (pos..h.before.start).for_each(|k| line(&mut out, ' ', old(k)));

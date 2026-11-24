@@ -37,6 +37,10 @@ impl Odb {
             .ok_or(GitError::NotFound)
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.shards.iter().map(|s| s.read().len()).sum()
+    }
+
     pub(crate) fn contains(&self, id: ObjectId) -> bool {
         self.shard(id).read().contains_key(&id)
     }

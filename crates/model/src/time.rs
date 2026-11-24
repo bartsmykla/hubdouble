@@ -158,7 +158,9 @@ pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
+/// The proleptic Gregorian `(year, month, day)` of a count of days since 1970-01-01.
+#[must_use]
+pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;

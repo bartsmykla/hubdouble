@@ -10,7 +10,7 @@ use serde::{Serialize, Serializer};
 
 use crate::odb::Odb;
 use crate::sign::WebFlow;
-use crate::{diff, events, history, merge, refs, tree};
+use crate::{diff, events, format, history, merge, refs, tree};
 
 /// A SHA-1 git object ID.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -886,6 +886,57 @@ impl Git {
             commits: history::compare_order(&odb, head, &behind_set)?,
             files: diff::file_diffs(&odb, &changes)?,
         })
+    }
+
+    /// The changes from the commit `base` (the empty tree when `None`) to the commit `head` as
+    /// GitHub answers `application/vnd.github.diff`: `git diff` text in path order, with
+    /// exact renames, `Binary files ... differ`, and git's automatic abbreviation for the
+    /// repository network's object count.
+    ///
+    /// # Errors
+    ///
+    /// [`GitError::NotFound`] when either commit is missing.
+    pub fn diff(
+        &self,
+        tx: &Tx,
+        repo: i64,
+        base: Option<ObjectId>,
+        head: ObjectId,
+    ) -> Result<String, GitError> {
+        let odb = self.odb(tx, repo);
+        let files = Self::files(&odb, base, head)?;
+        Ok(format::diff_text(&files, format::abbrev(odb.len()), false))
+    }
+
+    /// Each commit, in the order given, as a `git format-patch` mail against its first
+    /// parent, as GitHub answers `application/vnd.github.patch`; two or more commits are
+    /// numbered `[PATCH n/m]`.
+    ///
+    /// # Errors
+    ///
+    /// [`GitError::NotFound`] when a commit is missing.
+    pub fn patch(&self, tx: &Tx, repo: i64, commits: &[ObjectId]) -> Result<String, GitError> {
+        let odb = self.odb(tx, repo);
+        let abbrev = format::abbrev(odb.len());
+        let mut mails = Vec::with_capacity(commits.len());
+        for (i, &id) in commits.iter().enumerate() {
+            let (id, commit) = odb.peel_commit(id)?;
+            let files = Self::files(&odb, commit.parents.first().copied(), id)?;
+            let number = (commits.len() > 1).then_some((i + 1, commits.len()));
+            mails.push(format::mail(id, &commit, number, &files, abbrev));
+        }
+        Ok(mails.join("\n"))
+    }
+
+    fn files(
+        odb: &Odb,
+        base: Option<ObjectId>,
+        head: ObjectId,
+    ) -> Result<Vec<format::File>, GitError> {
+        let from = base.map(|b| odb.peel_commit(b)).transpose()?;
+        let (_, to) = odb.peel_commit(head)?;
+        let changes = diff::tree_changes(odb, from.map(|(_, c)| c.tree), Some(to.tree))?;
+        format::files(odb, &changes)
     }
 
     /// Merges `head` (a branch, ref or commit ID) into the branch `base` with a web-flow signed

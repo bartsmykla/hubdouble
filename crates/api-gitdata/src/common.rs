@@ -113,6 +113,38 @@ pub(crate) fn accepted_media<'a>(ctx: &'a Ctx<'_>, name: &str) -> Option<&'a str
     })
 }
 
+/// The range a diff or patch answer shows: the base commit (none for the empty tree), the head
+/// commit, and the commits of the range, oldest first.
+pub type TextRange = (Option<ObjectId>, ObjectId, Vec<ObjectId>);
+
+/// The `application/vnd.github.diff` or `.patch` answer for the `range` of repository `repo`
+/// when the request accepts one of those media types; `None`, without calling `range`, when
+/// it accepts neither.
+#[must_use]
+pub fn text_reply(
+    ctx: &Ctx<'_>,
+    repo: i64,
+    range: impl FnOnce() -> Result<TextRange, ApiError>,
+) -> Option<Result<hubdouble_rest::Reply, ApiError>> {
+    let diff = accepts(ctx, "diff");
+    if !diff && !accepts(ctx, "patch") {
+        return None;
+    }
+    let (git, tx) = (ctx.git(), ctx.tx());
+    Some(range().and_then(|(base, head, commits)| {
+        let text = if diff {
+            git.diff(tx, repo, base, head).map(|t| (DIFF_MEDIA, t))
+        } else {
+            git.patch(tx, repo, &commits).map(|t| (PATCH_MEDIA, t))
+        };
+        text.map(|(media, t)| hubdouble_rest::Reply::raw(media, t))
+            .map_err(|_| ApiError::not_found())
+    }))
+}
+
+const DIFF_MEDIA: &str = "application/vnd.github.diff; charset=utf-8";
+const PATCH_MEDIA: &str = "application/vnd.github.patch; charset=utf-8";
+
 pub(crate) fn unprocessable(resource: &str, field: &str, message: &str) -> ApiError {
     ApiError::unprocessable(message).with_error(FieldError {
         resource: resource.to_owned(),

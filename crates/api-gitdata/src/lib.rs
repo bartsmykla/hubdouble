@@ -15,7 +15,7 @@ use hubdouble_git::{
 };
 use hubdouble_model::{Grant, Requirement, Scope};
 
-pub use common::{account_by_email, decode_base64, wrapped_base64};
+pub use common::{account_by_email, decode_base64, text_reply, wrapped_base64};
 pub use refs::{denied_workflow, workflow_refusal};
 
 pub(crate) const READ_CONTENTS: Requirement = Requirement {

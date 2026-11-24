@@ -1,0 +1,9 @@
+---
+ community/{ => JavaScript}/Hardhat.gitignore | 0
+ 1 file changed, 0 insertions(+), 0 deletions(-)
+ rename community/{ => JavaScript}/Hardhat.gitignore (100%)
+
+diff --git a/community/Hardhat.gitignore b/community/JavaScript/Hardhat.gitignore
+similarity index 100%
+rename from community/Hardhat.gitignore
+rename to community/JavaScript/Hardhat.gitignore

@@ -53,6 +53,12 @@ pub(crate) fn compare(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             format!("No common ancestor between {base} and {head}."),
         )
     })?;
+    if let Some(reply) = crate::text_reply(ctx, view.repo.id, || {
+        let ids = cmp.commits.iter().map(|(id, _)| *id).collect();
+        Ok((Some(merge_base), head_id, ids))
+    }) {
+        return reply;
+    }
     let load = |id: ObjectId| -> Result<Arc<Commit>, ApiError> {
         match view.git.object(view.tx, view.repo.id, id)?.data {
             ObjectData::Commit(c) => Ok(c),
