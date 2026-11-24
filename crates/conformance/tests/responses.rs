@@ -295,6 +295,109 @@ const LIVE_INTROSPECTION_ANSWER: &str = r#"{"data":{"__typename":"Query","t":nul
 
 const CLASSIC_INTROSPECTION_QUERY: &str = "query IntrospectionQuery { __schema { queryType { name } mutationType { name } subscriptionType { name } types { ...FullType } directives { name description locations args { ...InputValue } } } } fragment FullType on __Type { kind name description fields(includeDeprecated: true) { name description args { ...InputValue } type { ...TypeRef } isDeprecated deprecationReason } inputFields { ...InputValue } interfaces { ...TypeRef } enumValues(includeDeprecated: true) { name description isDeprecated deprecationReason } possibleTypes { ...TypeRef } } fragment InputValue on __InputValue { name description type { ...TypeRef } defaultValue } fragment TypeRef on __Type { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } } } }";
 
+const AUTHENTICATED_VARY: &str =
+    "Accept, Authorization, Cookie, X-GitHub-OTP,Accept-Encoding, Accept, X-Requested-With";
+const ANONYMOUS_VARY: &str = "Accept,Accept-Encoding, Accept, X-Requested-With";
+const PLAIN_VARY: &str = "Accept-Encoding, Accept, X-Requested-With";
+
+fn tagged(tag: &str, extra: &[(&'static str, &'static str)]) -> HeaderMap {
+    let mut map = headers(extra);
+    map.insert(
+        http::header::IF_NONE_MATCH,
+        HeaderValue::from_str(tag).unwrap(),
+    );
+    map
+}
+
+#[tokio::test]
+async fn rest_reads_answer_githubs_cache_vary_and_etag_headers() {
+    // Given a user and an anonymous caller of a public repository
+    let server = whole_server(&[]).await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let anonymous = GoGithub::new(&server);
+    let plain = headers(&[("accept-encoding", "identity")]);
+
+    // When each reads it with and without gzip and reads it again with the tag
+    let read = alice.get(REPO).await;
+    let unzipped = alice.call_headers(Method::GET, REPO, plain.clone()).await;
+    let again = alice
+        .call_headers(Method::GET, REPO, tagged(read.header("etag"), &[]))
+        .await;
+    let public = anonymous.get(REPO).await;
+    let public_again = anonymous
+        .call_headers(Method::GET, REPO, tagged(public.header("etag"), &[]))
+        .await;
+    let file = alice.get(&format!("{REPO}/contents/README.md")).await;
+    let sha = file.json()["sha"].as_str().unwrap().to_owned();
+    let blob = alice.get(&format!("{REPO}/git/blobs/{sha}")).await;
+    let missing = alice.get(&format!("{REPO}/issues/999999")).await;
+    let posted = alice
+        .call_bytes(
+            Method::POST,
+            "graphql",
+            br#"{"query":"{ viewer { login } }"}"#.to_vec(),
+        )
+        .await;
+
+    // Then a user's read is private and varies on the credentials, and a gzip client gets the
+    // weak form of the tag that a plain client gets
+    assert_eq!(read.status, StatusCode::OK);
+    assert_eq!(
+        read.header("cache-control"),
+        "private, max-age=60, s-maxage=60"
+    );
+    assert_eq!(read.header("vary"), AUTHENTICATED_VARY);
+    assert_eq!(unzipped.header("content-encoding"), "");
+    let strong = unzipped.header("etag");
+    assert!(strong.starts_with('"'), "{strong}");
+    assert_eq!(read.header("etag"), format!("W/{strong}"));
+
+    // Then the user's 304 keeps the cache headers and the strong tag and drops the content type
+    assert_eq!(again.status, StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        again.header("cache-control"),
+        "private, max-age=60, s-maxage=60"
+    );
+    assert_eq!(again.header("vary"), AUTHENTICATED_VARY);
+    assert_eq!(again.header("etag"), strong);
+    assert_eq!(again.header("content-type"), "");
+
+    // Then an anonymous read is public, and its 304 keeps the content type
+    assert_eq!(
+        public.header("cache-control"),
+        "public, max-age=60, s-maxage=60"
+    );
+    assert_eq!(public.header("vary"), ANONYMOUS_VARY);
+    assert_eq!(public_again.status, StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        public_again.header("cache-control"),
+        "public, max-age=60, s-maxage=60"
+    );
+    assert_eq!(
+        public_again.header("content-type"),
+        "application/json; charset=utf-8"
+    );
+
+    // Then a file read is not compressed, varies with GitHub's spacing and is tagged with its
+    // blob SHA, and a blob read is cached for a day
+    assert_eq!(file.header("etag"), format!("\"{sha}\""));
+    assert_eq!(
+        file.header("vary"),
+        "Accept, Authorization, Cookie, X-GitHub-OTP, Accept-Encoding, Accept, X-Requested-With"
+    );
+    assert_eq!(
+        blob.header("cache-control"),
+        "private, max-age=86400, s-maxage=86400"
+    );
+
+    // Then an error and a GraphQL post have no cache header and vary on the encoding only
+    for answer in [&missing, &posted] {
+        assert_eq!(answer.header("cache-control"), "");
+        assert_eq!(answer.header("vary"), PLAIN_VARY);
+    }
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn a_graphql_answer_keeps_the_order_of_its_selection() {
     // Given a user of the GraphQL endpoint

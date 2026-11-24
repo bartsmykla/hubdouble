@@ -361,6 +361,11 @@ async fn a_private_asset_reaches_its_bytes_only_through_the_checked_redirect() {
         .await;
     // Then
     assert_eq!(redirect.status, StatusCode::FOUND);
+    assert_eq!(redirect.header("cache-control"), "");
+    assert_eq!(
+        redirect.header("vary"),
+        "Accept-Encoding, Accept, X-Requested-With"
+    );
     assert_eq!(&checked.body[..], b"the asset bytes");
     assert!(!landed.contains("7101"), "landed on {landed}");
     assert_eq!(guessed.status, StatusCode::NOT_FOUND);

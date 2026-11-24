@@ -215,12 +215,12 @@ async fn the_api_version_header_selects_a_published_version() {
 
 #[tokio::test]
 async fn a_matching_if_none_match_answers_304() {
-    // Given a first GET that returns a weak ETag
+    // Given a first GET without gzip, which returns a strong ETag
     let s = start().await;
     let first = get(s.addr, "/zen", &[]).await;
     assert_eq!(first.status, StatusCode::OK);
     let tag = first.header("etag").to_owned();
-    assert!(tag.starts_with("W/\""));
+    assert!(tag.starts_with('"'));
     // When the client sends it back
     let again = get(s.addr, "/zen", &[("If-None-Match", &tag)]).await;
     // Then the answer is 304 with no body and the same tag

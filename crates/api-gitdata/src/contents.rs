@@ -321,7 +321,8 @@ fn file(
             }
             _ => RAW,
         };
-        return Ok(Reply::raw(content_type, data.to_vec()));
+        return Reply::raw(content_type, data.to_vec())
+            .header(http::header::ETAG, &format!("\"{id}\""));
     }
     let content = if data.len() > MAX_INLINE_BYTES {
         ("none", String::new())
@@ -335,7 +336,8 @@ fn file(
         ObjectKind::Blob,
         data.len(),
         Some(content),
-    ))
+    ))?
+    .header(http::header::ETAG, &format!("\"{id}\""))
 }
 
 fn entry_content(

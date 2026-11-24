@@ -1,11 +1,14 @@
 use std::fmt::Write as _;
 use std::hash::{BuildHasher as _, Hash as _, Hasher as _};
+use std::io::Write as _;
 use std::net::IpAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use foldhash::fast::{FixedState, FoldHasher};
 use http::header::{self, HeaderName, HeaderValue};
 use http::request::Parts as RequestParts;
@@ -54,6 +57,15 @@ pub(crate) struct Inner {
 struct Who {
     login: Option<String>,
     scopes: Option<String>,
+    authenticated: bool,
+}
+
+impl Who {
+    fn of(&mut self, actor: &Actor) {
+        self.login = actor.login().map(str::to_owned);
+        self.scopes = actor.oauth_scopes().map(|s| s.join(", "));
+        self.authenticated = !matches!(actor, Actor::Anonymous);
+    }
 }
 
 struct Call<'r> {
@@ -268,8 +280,7 @@ impl Inner {
         } else {
             hubdouble_auth::authenticate(tx, services.clock.as_ref(), r.headers)?
         };
-        who.login = actor.login().map(str::to_owned);
-        who.scopes = actor.oauth_scopes().map(|s| s.join(", "));
+        who.of(&actor);
         let served: &[&str] = if r.entry.operation_id == "repos/get-release-asset" {
             &["application/octet-stream"]
         } else {
@@ -354,8 +365,7 @@ impl Inner {
             let actor = services.store.view(|tx| {
                 hubdouble_auth::authenticate(tx, services.clock.as_ref(), &parts.headers)
             })?;
-            who.login = actor.login().map(str::to_owned);
-            who.scopes = actor.oauth_scopes().map(|s| s.join(", "));
+            who.of(&actor);
             if matches!(actor, Actor::Anonymous | Actor::App { .. }) {
                 return Err(
                     ApiError::new(401, "This endpoint requires you to be authenticated.")
@@ -398,8 +408,7 @@ impl Inner {
             .store
             .view(|tx| hubdouble_auth::authenticate(tx, services.clock.as_ref(), &parts.headers))
             .and_then(|actor| {
-                who.login = actor.login().map(str::to_owned);
-                who.scopes = actor.oauth_scopes().map(|s| s.join(", "));
+                who.of(&actor);
                 if matches!(actor, Actor::Anonymous | Actor::App { .. }) {
                     return Err(ApiError::new(
                         401,
@@ -410,8 +419,10 @@ impl Inner {
                 if let Some(unsupported) = unsupported_accept(&parts.headers, &[]) {
                     return Err(unsupported);
                 }
-                Reply::raw(hubdouble_rest::JSON, self.gql.schema().introspection())
-                    .header(header::CACHE_CONTROL, "private, max-age=60, s-maxage=60")
+                Ok(Reply::raw(
+                    hubdouble_rest::JSON,
+                    self.gql.schema().introspection(),
+                ))
             });
         self.finish(Call {
             operation_id: "graphql",
@@ -523,22 +534,32 @@ impl Inner {
                 set(&mut reply.headers, "x-accepted-oauth-scopes", "repo");
             }
         }
-        let conditional = parts.method == Method::GET || parts.method == Method::HEAD;
-        if conditional && reply.status == StatusCode::OK {
-            let tag = if let Some(t) = reply.headers.get(header::ETAG) {
-                t.clone()
-            } else {
-                let tag = weak_etag(&media, &reply.body);
-                let value =
-                    HeaderValue::from_str(&tag).unwrap_or(HeaderValue::from_static("W/\"\""));
-                reply.headers.insert(header::ETAG, value.clone());
-                value
+        let read = parts.method == Method::GET || parts.method == Method::HEAD;
+        let mut tag = None;
+        if read && reply.status == StatusCode::OK {
+            let strong = match reply
+                .headers
+                .get(header::ETAG)
+                .and_then(|t| t.to_str().ok())
+            {
+                Some(t) => t.trim_start_matches("W/").to_owned(),
+                None => etag(&media, &reply.body),
             };
-            if if_none_match(&parts.headers, &tag) {
+            if if_none_match(&parts.headers, &strong) {
                 reply.status = StatusCode::NOT_MODIFIED;
                 reply.body = Bytes::new();
-                reply.headers.remove(header::CONTENT_TYPE);
+                if who.authenticated {
+                    reply.headers.remove(header::CONTENT_TYPE);
+                }
             }
+            set(&mut reply.headers, "etag", &strong);
+            tag = Some(strong);
+        }
+        cache_headers(&mut reply, operation_id, read, who.authenticated);
+        if gzip(&mut reply, &parts.headers, operation_id)
+            && let Some(strong) = tag
+        {
+            set(&mut reply.headers, "etag", &format!("W/{strong}"));
         }
         self.record(parts, operation_id, who.login.as_deref(), reply.status);
         to_response(reply, parts.method == Method::HEAD)
@@ -932,7 +953,93 @@ fn vendor_media(range: &str, default: &str) -> String {
     out
 }
 
-pub(crate) fn weak_etag(media: &str, body: &[u8]) -> String {
+const AUTHENTICATED_VARY: &str =
+    "Accept, Authorization, Cookie, X-GitHub-OTP,Accept-Encoding, Accept, X-Requested-With";
+const AUTHENTICATED_SPACED_VARY: &str =
+    "Accept, Authorization, Cookie, X-GitHub-OTP, Accept-Encoding, Accept, X-Requested-With";
+const ANONYMOUS_VARY: &str = "Accept,Accept-Encoding, Accept, X-Requested-With";
+const ANONYMOUS_SPACED_VARY: &str = "Accept, Accept-Encoding, Accept, X-Requested-With";
+const PLAIN_VARY: &str = "Accept-Encoding, Accept, X-Requested-With";
+const SPACED_VARY: [&str; 2] = ["repos/get-content", "pulls/get"];
+const ANONYMOUS_SPACED_ONLY: [&str; 1] = ["pulls/list"];
+const DAY_CACHE: [&str; 1] = ["git/get-blob"];
+const UNCOMPRESSED: [&str; 1] = ["repos/get-content"];
+const GZIP_MIN_BYTES: usize = 20;
+
+fn cache_headers(reply: &mut Reply, operation_id: &str, read: bool, authenticated: bool) {
+    let cached = reply.status == StatusCode::OK || reply.status == StatusCode::NOT_MODIFIED;
+    let vary = if read && cached {
+        let spaced = SPACED_VARY.contains(&operation_id);
+        let age = if DAY_CACHE.contains(&operation_id) {
+            86_400
+        } else {
+            60
+        };
+        let scope = if authenticated { "private" } else { "public" };
+        if !reply.headers.contains_key(header::CACHE_CONTROL) {
+            let value = format!("{scope}, max-age={age}, s-maxage={age}");
+            set(&mut reply.headers, "cache-control", &value);
+        }
+        match (authenticated, spaced) {
+            (true, false) => AUTHENTICATED_VARY,
+            (true, true) => AUTHENTICATED_SPACED_VARY,
+            (false, false) if !ANONYMOUS_SPACED_ONLY.contains(&operation_id) => ANONYMOUS_VARY,
+            (false, _) => ANONYMOUS_SPACED_VARY,
+        }
+    } else {
+        PLAIN_VARY
+    };
+    set(&mut reply.headers, "vary", vary);
+}
+
+fn accepts_gzip(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::ACCEPT_ENCODING)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|coding| {
+            let mut parts = coding.split(';');
+            let name = parts.next().unwrap_or_default().trim();
+            let refused = parts.any(|p| {
+                p.trim()
+                    .strip_prefix("q=")
+                    .and_then(|q| q.trim().parse::<f32>().ok())
+                    == Some(0.0)
+            });
+            name.eq_ignore_ascii_case("gzip") && !refused
+        })
+}
+
+fn gzip(reply: &mut Reply, request: &HeaderMap, operation_id: &str) -> bool {
+    let compressible = reply
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|t| t.to_str().ok())
+        .is_some_and(|t| t.starts_with("application/json") || t.starts_with("text/plain"));
+    if !compressible
+        || reply.body.len() < GZIP_MIN_BYTES
+        || UNCOMPRESSED.contains(&operation_id)
+        || !accepts_gzip(request)
+    {
+        return false;
+    }
+    let mut encoder = GzEncoder::new(
+        Vec::with_capacity(reply.body.len() / 2),
+        Compression::fast(),
+    );
+    let Ok(body) = encoder
+        .write_all(&reply.body)
+        .and_then(|()| encoder.finish())
+    else {
+        return false;
+    };
+    reply.body = Bytes::from(body);
+    set(&mut reply.headers, "content-encoding", "gzip");
+    true
+}
+
+pub(crate) fn etag(media: &str, body: &[u8]) -> String {
     let lane = |seed: u64, value: &dyn Fn(&mut FoldHasher<'static>)| {
         let mut hasher = FixedState::with_seed(seed).build_hasher();
         value(&mut hasher);
@@ -942,14 +1049,11 @@ pub(crate) fn weak_etag(media: &str, body: &[u8]) -> String {
     let (a, b) = (lane(1, &content), lane(2, &content));
     let digest = |h: &mut FoldHasher<'static>| (a, b).hash(h);
     let (c, d) = (lane(3, &digest), lane(4, &digest));
-    format!("W/\"{a:016x}{b:016x}{c:016x}{d:016x}\"")
+    format!("\"{a:016x}{b:016x}{c:016x}{d:016x}\"")
 }
 
-fn if_none_match(headers: &HeaderMap, tag: &HeaderValue) -> bool {
+fn if_none_match(headers: &HeaderMap, tag: &str) -> bool {
     let strip = |t: &str| t.trim().trim_start_matches("W/").to_owned();
-    let Ok(tag) = tag.to_str() else {
-        return false;
-    };
     let tag = strip(tag);
     headers
         .get_all(header::IF_NONE_MATCH)
@@ -1077,11 +1181,11 @@ mod unit {
 
     #[test]
     fn the_etag_changes_with_the_media_type_and_the_body() {
-        let a = weak_etag("github.v3; format=json", b"{}");
-        assert!(a.starts_with("W/\""));
-        assert_eq!(a, weak_etag("github.v3; format=json", b"{}"));
-        assert_ne!(a, weak_etag("github.v3; param=raw", b"{}"));
-        assert_ne!(a, weak_etag("github.v3; format=json", b"[]"));
+        let a = etag("github.v3; format=json", b"{}");
+        assert!(a.starts_with('"'));
+        assert_eq!(a, etag("github.v3; format=json", b"{}"));
+        assert_ne!(a, etag("github.v3; param=raw", b"{}"));
+        assert_ne!(a, etag("github.v3; format=json", b"[]"));
     }
 
     #[test]
