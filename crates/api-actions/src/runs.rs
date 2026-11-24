@@ -4,7 +4,7 @@ use std::sync::Arc;
 use http::StatusCode;
 use hubdouble_model::{ApiError, Conclusion, RunStatus, Timestamp, WorkflowJob, WorkflowRun};
 use hubdouble_rest::{Ctx, Page, PageLimit, Query, Registry, Reply};
-use hubdouble_store::{Accounts, Entity, Rows, Tx, WorkflowJobs, WorkflowRuns};
+use hubdouble_store::{Accounts, Blobs, Entity, Rows, Tx, WorkflowJobs, WorkflowRuns};
 
 use crate::lifecycle::Rerun;
 use crate::{ACTIONS_READ, ACTIONS_WRITE, lifecycle, views, workflows};
@@ -389,12 +389,29 @@ fn get_job(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     Reply::json(&hubdouble_render::Job::new(ctx.urls(), job(ctx)?, &name))
 }
 
+const LOG_LINK_SECONDS: i64 = 600;
+
 fn logs(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let id = job(ctx)?
         .log_blob_id
         .as_deref()
         .ok_or_else(ApiError::not_found)?;
-    Reply::redirect(&format!("{}/_blobs/{id}", ctx.tx().config().base_url))
+    let base = &ctx.tx().config().base_url;
+    let expiry = ctx.now().plus_seconds(LOG_LINK_SECONDS);
+    let signature = ctx
+        .tx()
+        .table::<Blobs>()
+        .get(id)
+        .and_then(|blob| blob.link_signature(id, expiry));
+    let link = match signature {
+        Some(sig) => {
+            let time = |t: Timestamp| t.to_string().replace(':', "%3A");
+            let (st, se) = (time(ctx.now().plus_seconds(-5)), time(expiry));
+            format!("{base}/_blobs/{id}?rsct=text%2Fplain&se={se}&sig={sig}&sp=r&st={st}")
+        }
+        None => format!("{base}/_blobs/{id}"),
+    };
+    Reply::redirect(&link)
 }
 
 fn cancel(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {

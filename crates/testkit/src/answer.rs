@@ -595,7 +595,12 @@ fn blob(x: &Exchange<'_>) -> Vec<String> {
         206 if header(x.headers, "content-range").is_empty() => {
             errors.push("a 206 without Content-Range".to_owned());
         }
-        200 | 206 | 404 | 416 => {}
+        403 if header(x.headers, "x-ms-error-code") != "AuthenticationFailed"
+            || header(x.headers, "content-type") != "application/xml" =>
+        {
+            errors.push("a 403 that is not the storage's AuthenticationFailed".to_owned());
+        }
+        200 | 206 | 403 | 404 | 416 => {}
         s => errors.push(format!("status {s}")),
     }
     errors

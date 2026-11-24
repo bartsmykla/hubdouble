@@ -272,6 +272,7 @@ fn release_kind(ctx: &mut SeedCtx<'_>, v: Value) -> Result<(), ApiError> {
             Blob {
                 content_type: content_type.clone(),
                 data: data.clone(),
+                link_key: None,
             },
         );
         ctx.tx.table_mut::<ReleaseAssets>().insert(ReleaseAsset {

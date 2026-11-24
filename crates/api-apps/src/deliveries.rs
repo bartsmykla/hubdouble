@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, KeyInit, Mac};
 use http::{StatusCode, header::LINK};
-use hubdouble_model::{ApiError, App};
+use hubdouble_model::{ApiError, App, Delivery};
 use hubdouble_render::{HookDelivery, HookDeliveryItem};
 use hubdouble_rest::{Ctx, Registry, Reply};
 use hubdouble_store::Deliveries;
@@ -59,6 +59,13 @@ fn cursor_mac(app: &App, id: i64, filter: Filter) -> Result<Hmac<Sha256>, ApiErr
     Ok(mac)
 }
 
+const RETENTION_SECONDS: i64 = 3 * 86_400;
+
+fn kept(ctx: &Ctx<'_>) -> impl Fn(&Delivery) -> bool + use<> {
+    let since = ctx.now().plus_seconds(-RETENTION_SECONDS);
+    move |d: &Delivery| d.delivered_at > since
+}
+
 fn invalid_cursor() -> ApiError {
     ApiError::unprocessable("Invalid delivery cursor")
 }
@@ -83,6 +90,7 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let app = app(ctx)?;
     let filter = Filter::parse(ctx.query().get("status"))?;
     let per_page = ctx.per_page();
+    let kept = kept(ctx);
     let rows = ctx.tx().table::<Deliveries>();
     let before = ctx
         .query()
@@ -99,7 +107,7 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .children(app.id)
         .rev()
         .skip_while(|d| before.is_some_and(|id| d.id >= id))
-        .filter(|d| filter.matches(d.status_code));
+        .filter(|d| filter.matches(d.status_code) && kept(d));
     let page: Vec<_> = items
         .by_ref()
         .take(per_page)
@@ -123,19 +131,26 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 }
 
 fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
-    let app = app(ctx)?;
-    let delivery = ctx
-        .tx()
-        .table::<Deliveries>()
-        .get(ctx.param_i64("delivery_id")?)
-        .filter(|delivery| delivery.app_id == app.id && !delivery.request.payload.is_empty())
-        .ok_or_else(ApiError::not_found)?;
+    let delivery = retained(ctx)?;
     Reply::json(&HookDelivery::new(delivery))
 }
 
+fn retained<'a>(ctx: &'a Ctx<'_>) -> Result<&'a Delivery, ApiError> {
+    let app = app(ctx)?;
+    let kept = kept(ctx);
+    ctx.tx()
+        .table::<Deliveries>()
+        .get(ctx.param_i64("delivery_id")?)
+        .map(AsRef::as_ref)
+        .filter(|d| d.app_id == app.id && !d.request.payload.is_empty() && kept(d))
+        .ok_or_else(ApiError::not_found)
+}
+
 fn redeliver(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
-    let app_id = app(ctx)?.id;
-    let id = ctx.param_i64("delivery_id")?;
+    let (app_id, id) = {
+        let d = retained(ctx)?;
+        (d.app_id, d.id)
+    };
     hubdouble_hooks::redeliver(ctx.tx_mut()?, app_id, id)?;
     Ok(Reply::json(&serde_json::json!({}))?.status(StatusCode::ACCEPTED))
 }

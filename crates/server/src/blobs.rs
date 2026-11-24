@@ -1,10 +1,46 @@
-use http::header::{self, HeaderValue};
+use http::header::{self, HeaderName, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
-use hubdouble_model::ApiError;
+use hubdouble_admin::Services;
+use hubdouble_model::{ApiError, Timestamp};
 use hubdouble_rest::Reply;
-use hubdouble_store::{Blobs, Store};
+use hubdouble_store::Blobs;
 
 use crate::pipeline::{HttpResponse, error_reply, to_response};
+
+const NOT_SIGNED: &str = "se is mandatory. Cannot be empty";
+
+fn expired(start: Option<Timestamp>, expiry: Timestamp, now: Timestamp) -> String {
+    let start = start.map_or_else(String::new, Timestamp::http_date);
+    format!(
+        "Signature not valid in the specified time frame: Start [{start}] - Expiry [{}] - \
+         Current [{}]",
+        expiry.http_date(),
+        now.http_date()
+    )
+}
+
+fn storage_refusal(detail: &str, now: Timestamp) -> Reply {
+    let request = uuid::Uuid::new_v4();
+    let time = now.to_string().replace('Z', ".0000000Z");
+    let body = format!(
+        "\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>AuthenticationFailed</Code>\
+         <Message>Server failed to authenticate the request. Make sure the value of Authorization \
+         header is formed correctly including the signature.\nRequestId:{request}\nTime:{time}\
+         </Message><AuthenticationErrorDetail>{detail}</AuthenticationErrorDetail></Error>"
+    );
+    let mut reply = Reply::raw("application/xml", body).status(StatusCode::FORBIDDEN);
+    insert(
+        &mut reply.headers,
+        HeaderName::from_static("x-ms-error-code"),
+        "AuthenticationFailed",
+    );
+    insert(
+        &mut reply.headers,
+        HeaderName::from_static("x-ms-request-id"),
+        &request.to_string(),
+    );
+    reply
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Range {
@@ -52,10 +88,45 @@ fn parse_range(value: &str, len: usize) -> Range {
     }
 }
 
-pub(crate) fn serve(store: &Store, method: &Method, headers: &HeaderMap, id: &str) -> HttpResponse {
+struct Link<'q> {
+    start: Option<Timestamp>,
+    expiry: Option<Timestamp>,
+    sig: Option<&'q str>,
+}
+
+fn link(query: Option<&str>) -> Link<'_> {
+    let mut link = Link {
+        start: None,
+        expiry: None,
+        sig: None,
+    };
+    let time = |value: &str| Timestamp::parse(&value.replace("%3A", ":")).ok();
+    for (name, value) in query
+        .unwrap_or_default()
+        .split('&')
+        .filter_map(|p| p.split_once('='))
+    {
+        match name {
+            "st" => link.start = time(value),
+            "se" => link.expiry = time(value),
+            "sig" => link.sig = Some(value),
+            _ => {}
+        }
+    }
+    link
+}
+
+pub(crate) fn serve(
+    services: &Services,
+    method: &Method,
+    query: Option<&str>,
+    headers: &HeaderMap,
+    id: &str,
+) -> HttpResponse {
     let head = method == Method::HEAD;
     let blob = if head || method == Method::GET {
-        store
+        services
+            .store
             .view(|tx| Ok(tx.table::<Blobs>().get(id).cloned()))
             .ok()
             .flatten()
@@ -65,6 +136,23 @@ pub(crate) fn serve(store: &Store, method: &Method, headers: &HeaderMap, id: &st
     let Some(blob) = blob else {
         return to_response(error_reply(&ApiError::not_found()), head);
     };
+    if blob.link_key.is_some() {
+        let now = services.clock.now();
+        let link = link(query);
+        let refusal = match link.expiry {
+            None => Some(NOT_SIGNED.to_owned()),
+            Some(at)
+                if link.sig.is_none() || blob.link_signature(id, at).as_deref() != link.sig =>
+            {
+                Some("Signature did not match.".to_owned())
+            }
+            Some(at) if now > at => Some(expired(link.start, at, now)),
+            Some(_) => None,
+        };
+        if let Some(detail) = refusal {
+            return to_response(storage_refusal(&detail, now), head);
+        }
+    }
     let len = blob.data.len();
     let content_type: &'static str = "application/octet-stream";
     let range = headers

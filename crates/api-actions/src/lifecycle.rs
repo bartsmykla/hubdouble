@@ -430,6 +430,7 @@ fn apply_job(
             Blob {
                 content_type: "text/plain; charset=utf-8".to_owned(),
                 data: logs.into(),
+                link_key: Some(Uuid::new_v4().to_string().into()),
             },
         );
         job.log_blob_id = Some(id);

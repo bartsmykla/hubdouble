@@ -179,6 +179,7 @@ fn change_everything(tx: &mut TxMut<'_>) -> Result<(), ApiError> {
         Blob {
             content_type: "text/plain".to_owned(),
             data: Bytes::from_static(b"x"),
+            link_key: None,
         },
     );
     tx.push_outbox(entry("push"));

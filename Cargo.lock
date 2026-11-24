@@ -2663,6 +2663,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2678,9 +2679,11 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "criterion",
+ "hmac 0.13.0",
  "hubdouble-model",
  "parking_lot 0.13.0",
  "serde_json",
+ "sha2 0.11.1",
  "thiserror 2.0.21",
  "tokio",
 ]

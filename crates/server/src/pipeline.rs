@@ -89,7 +89,13 @@ impl Inner {
         }
         if let Some(id) = path.strip_prefix("/_blobs/") {
             let id = id.to_owned();
-            return crate::blobs::serve(&self.services.store, req.method(), req.headers(), &id);
+            return crate::blobs::serve(
+                &self.services,
+                req.method(),
+                req.uri().query(),
+                req.headers(),
+                &id,
+            );
         }
         let (parts, body) = req.into_parts();
         let (v3, api_path) = split_prefix(parts.uri.path());

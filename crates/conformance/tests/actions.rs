@@ -917,7 +917,9 @@ async fn log_range(server: &TestServer, path: &str) {
         .await;
     assert_eq!(logs.status, StatusCode::FOUND);
     let path = logs.header("location").strip_prefix(&server.base).unwrap();
-    let id = path.strip_prefix("/_blobs/").unwrap().as_bytes();
+    let (blob, query) = path.split_once('?').unwrap();
+    assert!(query.split('&').any(|p| p.starts_with("se=")), "{query}");
+    let id = blob.strip_prefix("/_blobs/").unwrap().as_bytes();
     assert_eq!(id.len(), 36);
     for (index, byte) in id.iter().enumerate() {
         if matches!(index, 8 | 13 | 18 | 23) {
@@ -942,6 +944,58 @@ async fn log_range(server: &TestServer, path: &str) {
     assert_eq!(range.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(range.header("content-range"), "bytes 6-11/13");
     assert_eq!(&range.body[..], b"second");
+}
+
+fn storage_refused(answer: &hubdouble_testkit::Answer) {
+    assert_eq!(answer.status, StatusCode::FORBIDDEN);
+    assert_eq!(answer.header("content-type"), "application/xml");
+    assert_eq!(answer.header("x-ms-error-code"), "AuthenticationFailed");
+    let body = String::from_utf8_lossy(&answer.body);
+    assert!(body.contains("<Code>AuthenticationFailed</Code>"), "{body}");
+}
+
+#[tokio::test]
+async fn a_job_log_link_answers_as_github_storage_after_it_expires() {
+    // Given a completed job with logs
+    let server = server("none").await;
+    let client = client(&server);
+    let run_id = dispatch_workflow(&client, "multi.yml", "main").await["workflow_run_id"]
+        .as_i64()
+        .unwrap();
+    let jobs = client
+        .get(&format!("{ACTIONS}/runs/{run_id}/jobs"))
+        .await
+        .json();
+    let job = jobs["jobs"][0]["id"].as_i64().unwrap();
+    let done = server
+        .admin(
+            Method::POST,
+            &format!("actions/runs/{run_id}"),
+            Some(&json!({"conclusion": "success", "jobs": [{"id": job, "logs": "line\n"}]})),
+        )
+        .await;
+    assert_eq!(done.status, StatusCode::OK);
+    let logs = format!("{ACTIONS}/jobs/{job}/logs");
+    let link = client.get(&logs).await.header("location").to_owned();
+    let path = link.strip_prefix(&server.base).unwrap().to_owned();
+    let root = GoGithub::new(&server);
+    // When the link is read ten minutes after the redirect, as live cli/cli job 138283445124's link set se ten minutes after its request
+    server.clock.advance(600);
+    let last = root.get(&path).await;
+    // Then it still answers the log
+    assert_eq!(last.status, StatusCode::OK);
+    assert_eq!(&last.body[..], b"line\n");
+    // When it is read a second later, or without its expiry
+    server.clock.advance(1);
+    let expired = root.get(&path).await;
+    let (blob, _) = path.split_once('?').unwrap();
+    let bare = root.get(blob).await;
+    // Then both answer Azure storage's AuthenticationFailed, and a new redirect gives a link that works
+    storage_refused(&expired);
+    storage_refused(&bare);
+    let fresh = client.get(&logs).await.header("location").to_owned();
+    let fresh = root.get(fresh.strip_prefix(&server.base).unwrap()).await;
+    assert_eq!(fresh.status, StatusCode::OK);
 }
 
 #[tokio::test]

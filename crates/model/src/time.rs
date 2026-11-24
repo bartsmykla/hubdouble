@@ -171,6 +171,28 @@ pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
+impl Timestamp {
+    /// The time as an HTTP date (RFC 9110 `IMF-fixdate`): `Tue, 24 Nov 2026 07:28:47 GMT`.
+    #[must_use]
+    pub fn http_date(self) -> String {
+        const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        let days = self.0.div_euclid(86_400);
+        let (year, month, day) = civil_from_days(days);
+        let secs = self.0.rem_euclid(86_400);
+        let weekday = DAYS[usize::try_from((days + 4).rem_euclid(7)).unwrap_or(0)];
+        let month = MONTHS[usize::try_from(month - 1).unwrap_or(0)];
+        format!(
+            "{weekday}, {day:02} {month} {year:04} {:02}:{:02}:{:02} GMT",
+            secs / 3600,
+            secs / 60 % 60,
+            secs % 60
+        )
+    }
+}
+
 impl fmt::Display for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (year, month, day) = civil_from_days(self.0.div_euclid(86_400));
@@ -243,6 +265,13 @@ impl Clock for ManualClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_http_dates_as_the_storage_answer_of_an_expired_job_log_link() {
+        let current = Timestamp::parse("2026-11-24T07:28:47Z").unwrap();
+        assert_eq!(current.http_date(), "Tue, 24 Nov 2026 07:28:47 GMT");
+        assert_eq!(Timestamp::SEED.http_date(), "Thu, 01 Jan 2026 00:00:00 GMT");
+    }
 
     #[test]
     fn formats_and_parses_rfc3339_utc() {

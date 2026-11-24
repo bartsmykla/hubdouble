@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use hmac::{Hmac, KeyInit, Mac};
+use hubdouble_model::Timestamp;
+use sha2::Sha256;
 
 use crate::store::{Table, TableMut};
 
@@ -10,7 +13,30 @@ use crate::store::{Table, TableMut};
 pub struct Blob {
     pub content_type: String,
     pub data: Bytes,
+    /// The key that signs links to the blob when each link expires, as a job log link does;
+    /// `None` serves the blob at its bare path.
+    pub link_key: Option<Arc<str>>,
 }
+
+impl Blob {
+    /// The signature of a link to the blob `id` that expires at `expiry`, or `None` for a blob
+    /// whose links do not expire.
+    #[must_use]
+    pub fn link_signature(&self, id: &str, expiry: Timestamp) -> Option<String> {
+        let key = self.link_key.as_deref()?;
+        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key.as_bytes()).ok()?;
+        mac.update(id.as_bytes());
+        mac.update(&expiry.unix().to_be_bytes());
+        let tag = mac.finalize().into_bytes();
+        Some(tag.iter().fold(String::with_capacity(64), |mut s, b| {
+            s.push(char::from(HEX[usize::from(b >> 4)]));
+            s.push(char::from(HEX[usize::from(b & 0xf)]));
+            s
+        }))
+    }
+}
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(Debug, Clone, Default)]
 pub struct Blobs {

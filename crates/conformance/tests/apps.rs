@@ -340,6 +340,53 @@ async fn patch(server: &TestServer, path: &str, value: &Value) {
 }
 
 #[tokio::test]
+async fn deliveries_older_than_three_days_leave_the_list_and_answer_404() {
+    // Given one delivery a second more than three days ago and one a second less, as GitHub keeps deliveries from the past 3 days
+    let server = setup().start().await;
+    let app = app(&server);
+    let now = hubdouble_model::Timestamp::SEED;
+    server.clock.set(now.plus_seconds(-3 * 86_400 - 1));
+    patch(&server, "installation/5001", &json!({"suspended": true})).await;
+    drain(&server).await;
+    server.clock.set(now.plus_seconds(-3 * 86_400 + 1));
+    patch(&server, "installation/5001", &json!({"suspended": false})).await;
+    drain(&server).await;
+    server.clock.set(now);
+    // When the App lists its deliveries now
+    let list = get(&app, DELIVERY_PATH, "apps/list-webhook-deliveries").await;
+    // Then only the newer one is listed, and only it can be read and redelivered
+    let rows = list.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{list}");
+    assert_eq!(rows[0]["action"], "unsuspend");
+    let kept = rows[0]["id"].as_i64().unwrap();
+    let gone = server
+        .server
+        .services()
+        .store
+        .view(|tx| {
+            Ok(tx
+                .table::<hubdouble_store::Deliveries>()
+                .children(4001)
+                .find(|d| d.action.as_deref() == Some("suspend"))
+                .map(|d| d.id))
+        })
+        .unwrap()
+        .unwrap();
+    for (id, expected) in [(kept, StatusCode::OK), (gone, StatusCode::NOT_FOUND)] {
+        status(&app.get(&format!("{DELIVERY_PATH}/{id}")).await, expected);
+    }
+    let attempts = |id: i64| format!("{DELIVERY_PATH}/{id}/attempts");
+    status(
+        &app.call(Method::POST, &attempts(gone)).await,
+        StatusCode::NOT_FOUND,
+    );
+    status(
+        &app.call(Method::POST, &attempts(kept)).await,
+        StatusCode::ACCEPTED,
+    );
+}
+
+#[tokio::test]
 async fn delivery_pages_filter_resume_after_reset_and_redeliver_only_for_the_app() {
     let server = setup().start().await;
     let app = app(&server);

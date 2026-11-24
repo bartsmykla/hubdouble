@@ -319,6 +319,7 @@ async fn blobs_answer_head_and_ranges() {
             let blob = Blob {
                 content_type: "text/plain".to_owned(),
                 data: Bytes::from_static(b"0123456789"),
+                link_key: None,
             };
             tx.table_mut::<Blobs>().insert("log-1".to_owned(), blob);
             Ok(())
