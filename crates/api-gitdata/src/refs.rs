@@ -86,7 +86,8 @@ pub(crate) fn get_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let name = full_ref(ctx.param("ref")?);
     let target = exact_ref(ctx, &name).ok_or_else(ApiError::not_found)?;
     let links = Links::of(ctx)?;
-    Reply::json(&render_ref(ctx, &links, &Ref { name, target })?)
+    let updated = ctx.repo()?.updated_at;
+    Ok(Reply::json(&render_ref(ctx, &links, &Ref { name, target })?)?.modified(updated))
 }
 
 fn exact_ref(ctx: &Ctx<'_>, name: &str) -> Option<ObjectId> {

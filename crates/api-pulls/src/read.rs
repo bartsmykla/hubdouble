@@ -19,7 +19,8 @@ pub(crate) fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     if let Some(reply) = text(ctx, issue) {
         return reply;
     }
-    let reply = Reply::json(&render::detail(ctx.git(), ctx.tx(), ctx.urls(), issue)?)?;
+    let reply = Reply::json(&render::detail(ctx.git(), ctx.tx(), ctx.urls(), issue)?)?
+        .modified(issue.updated_at);
     mergeability::read(ctx.read_jobs(), ctx.tx(), issue);
     Ok(reply)
 }

@@ -137,7 +137,7 @@ fn in_network(repos: &Repos, r: &Repo, root: i64) -> bool {
 
 fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?;
-    Reply::json(&full(ctx.tx(), ctx.urls(), ctx.actor(), repo)?)
+    Ok(Reply::json(&full(ctx.tx(), ctx.urls(), ctx.actor(), repo)?)?.modified(repo.updated_at))
 }
 
 fn keep(kind: &str, tx: &Tx, actor: &Actor, r: &Repo) -> bool {

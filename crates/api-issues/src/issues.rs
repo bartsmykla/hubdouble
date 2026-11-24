@@ -347,7 +347,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 pub(crate) fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?.clone();
     let issue = issue_by_number(ctx.tx(), &repo, ctx.param_i64("issue_number")?)?;
-    view_reply(ctx.tx(), ctx.urls(), &repo, &issue)
+    Ok(view_reply(ctx.tx(), ctx.urls(), &repo, &issue)?.modified(issue.updated_at))
 }
 
 #[derive(Deserialize)]

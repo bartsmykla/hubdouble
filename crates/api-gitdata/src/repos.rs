@@ -308,7 +308,12 @@ pub(crate) fn get_commit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let pageable = &files[..files.len().min(MAX_COMMIT_FILES)];
     let page = commit_page(ctx)?;
     let body = view.with_files(id, &commit, &files, slice(pageable, page));
-    with_link(ctx, Reply::json(&body)?, page, pageable.len())
+    with_link(
+        ctx,
+        Reply::json(&body)?.modified(commit.committer.time),
+        page,
+        pageable.len(),
+    )
 }
 
 fn touches(git: &Git, tx: &Tx, repo: i64, id: ObjectId, c: &Commit, path: &str) -> bool {
@@ -383,11 +388,12 @@ pub(crate) fn list_commits(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         }
     }
     let page = ctx.page_params()?;
-    let rendered: Vec<_> = slice(&log, page)
-        .iter()
-        .map(|(id, c)| view.commit(*id, c))
-        .collect();
-    let reply = Reply::json(&rendered)?;
+    let shown = slice(&log, page);
+    let rendered: Vec<_> = shown.iter().map(|(id, c)| view.commit(*id, c)).collect();
+    let mut reply = Reply::json(&rendered)?;
+    if let Some((_, first)) = shown.first() {
+        reply = reply.modified(first.committer.time);
+    }
     let Page { page, per_page } = page;
     let last = log.len().div_ceil(per_page).max(1);
     let mut rels = Vec::with_capacity(4);

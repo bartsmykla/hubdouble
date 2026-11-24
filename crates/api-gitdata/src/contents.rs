@@ -255,15 +255,21 @@ pub(crate) fn get_content(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .object(tx, repo.id, id)
         .map_err(|_| ApiError::not_found())?
         .data;
-    match data {
+    let modified = if matches!(data, ObjectData::Tree(_)) {
+        repo.updated_at
+    } else {
+        commit.committer.time
+    };
+    let reply = match data {
         ObjectData::Blob(data) if mode == EntryMode::Symlink => {
             if let Some(target) = tree.file_target(path, &data) {
-                return file(ctx, &at, path, id, &target);
+                file(ctx, &at, path, id, &target)
+            } else {
+                Reply::json(&Symlink {
+                    content: at.content("symlink", path, id, ObjectKind::Blob, data.len(), None),
+                    target: String::from_utf8_lossy(&data).into_owned(),
+                })
             }
-            Reply::json(&Symlink {
-                content: at.content("symlink", path, id, ObjectKind::Blob, data.len(), None),
-                target: String::from_utf8_lossy(&data).into_owned(),
-            })
         }
         ObjectData::Blob(data) => file(ctx, &at, path, id, &data),
         ObjectData::Tree(entries) => {
@@ -287,7 +293,8 @@ pub(crate) fn get_content(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             }
         }
         ObjectData::Commit(_) | ObjectData::Tag(_) => Err(ApiError::not_found()),
-    }
+    }?;
+    Ok(reply.modified(modified))
 }
 
 fn file(

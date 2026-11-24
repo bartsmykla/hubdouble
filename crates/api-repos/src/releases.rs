@@ -112,7 +112,7 @@ fn by_tag(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .by_tag(repo.id, ctx.param("tag")?)
         .filter(|r| !r.draft)
         .ok_or_else(ApiError::not_found)?;
-    Reply::json(&render(tx, ctx.urls(), r)?)
+    Ok(Reply::json(&render(tx, ctx.urls(), r)?)?.modified(r.updated_at))
 }
 
 fn wants_bytes(ctx: &Ctx<'_>) -> bool {

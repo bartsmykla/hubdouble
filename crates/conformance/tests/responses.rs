@@ -399,6 +399,83 @@ async fn rest_reads_answer_githubs_cache_vary_and_etag_headers() {
 }
 
 #[tokio::test]
+async fn rest_reads_answer_last_modified_and_if_modified_since_as_github_does() {
+    // Given a user of a seeded repository
+    let server = whole_server(&[]).await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let since = |date: &'static str, extra: &[(&'static str, &'static str)]| {
+        let mut map = headers(extra);
+        map.insert(
+            http::header::IF_MODIFIED_SINCE,
+            HeaderValue::from_static(date),
+        );
+        map
+    };
+
+    // When the user reads the repository, its contents and commits, and reads the repository
+    // again with If-Modified-Since
+    let read = alice.get(REPO).await;
+    let file = alice.get(&format!("{REPO}/contents/README.md")).await;
+    let root = alice.get(&format!("{REPO}/contents/")).await;
+    let commits = alice.get(&format!("{REPO}/commits")).await;
+    let modified = read.header("last-modified").to_owned();
+    let at_modified = alice
+        .call_headers(
+            Method::GET,
+            REPO,
+            since("Thu, 01 Jan 2026 00:00:00 GMT", &[]),
+        )
+        .await;
+    let rfc850 = alice
+        .call_headers(
+            Method::GET,
+            REPO,
+            since("Thursday, 01-Jan-26 00:00:00 GMT", &[]),
+        )
+        .await;
+    let before = alice
+        .call_headers(
+            Method::GET,
+            REPO,
+            since("Wed, 31 Dec 2025 23:59:59 GMT", &[]),
+        )
+        .await;
+    let other_tag = alice
+        .call_headers(
+            Method::GET,
+            REPO,
+            since(
+                "Thu, 01 Jan 2026 00:00:00 GMT",
+                &[("if-none-match", "\"other\"")],
+            ),
+        )
+        .await;
+
+    // Then each read sends the time of what it shows: the repository's update, the commit of
+    // the ref for a file and the first listed commit for a list
+    assert_eq!(read.json()["updated_at"], "2026-01-01T00:00:00Z");
+    assert_eq!(modified, "Thu, 01 Jan 2026 00:00:00 GMT");
+    assert_eq!(root.header("last-modified"), modified);
+    assert_eq!(
+        commits.json()[0]["commit"]["committer"]["date"],
+        "2026-01-01T00:00:00Z"
+    );
+    assert_eq!(commits.header("last-modified"), modified);
+    assert_eq!(file.header("last-modified"), modified);
+
+    // Then a time at or after it answers 304 with the headers of the read, in either date form
+    for answer in [&at_modified, &rfc850] {
+        assert_eq!(answer.status, StatusCode::NOT_MODIFIED);
+        assert_eq!(answer.header("last-modified"), modified);
+        assert!(answer.header("etag").starts_with('"'));
+    }
+
+    // Then an earlier time, or a tag that does not match, answers the full read
+    assert_eq!(before.status, StatusCode::OK);
+    assert_eq!(other_tag.status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn a_graphql_answer_keeps_the_order_of_its_selection() {
     // Given a user of the GraphQL endpoint
     let server = whole_server(&[]).await;

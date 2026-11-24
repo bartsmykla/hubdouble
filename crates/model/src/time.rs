@@ -122,6 +122,44 @@ impl Timestamp {
         )))
     }
 
+    /// Reads an HTTP date in any of the three forms of RFC 9110: IMF-fixdate, RFC 850 and
+    /// asctime, as GitHub reads `If-Modified-Since`. The weekday is not checked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimestampError`] for any other text.
+    pub fn parse_http_date(text: &str) -> Result<Timestamp, TimestampError> {
+        let parts: Vec<&str> = text.split_ascii_whitespace().collect();
+        let (day, month, year, time) = match parts.as_slice() {
+            [_, day, month, year, time, "GMT"] | [_, month, day, time, year] => {
+                (*day, *month, (*year).to_owned(), *time)
+            }
+            [_, date, time, "GMT"] => {
+                let mut d = date.split('-');
+                let (Some(day), Some(month), Some(year), None) =
+                    (d.next(), d.next(), d.next(), d.next())
+                else {
+                    return Err(TimestampError);
+                };
+                let year = match year.parse::<u8>() {
+                    Ok(short) if year.len() == 2 && short < 50 => format!("20{year}"),
+                    Ok(_) if year.len() == 2 => format!("19{year}"),
+                    _ => year.to_owned(),
+                };
+                (day, month, year, *time)
+            }
+            _ => return Err(TimestampError),
+        };
+        let month = MONTHS
+            .iter()
+            .position(|m| *m == month)
+            .ok_or(TimestampError)?;
+        if year.len() != 4 || time.len() != 8 || day.is_empty() || day.len() > 2 {
+            return Err(TimestampError);
+        }
+        Timestamp::parse(&format!("{year}-{:02}-{day:0>2}T{time}Z", month + 1))
+    }
+
     /// Whether a SQL `DATETIME` holds the time: `1000-01-01T00:00:00Z` to `9999-12-31T23:59:59Z`.
     #[must_use]
     pub fn is_datetime(self) -> bool {
@@ -143,6 +181,10 @@ impl QueryTime {
         t > self.at || (t == self.at && self.micros == 0)
     }
 }
+
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("not an RFC 3339 timestamp")]
@@ -178,9 +220,6 @@ impl Timestamp {
     #[must_use]
     pub fn http_date(self) -> String {
         const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        const MONTHS: [&str; 12] = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
         let days = self.0.div_euclid(86_400);
         let (year, month, day) = civil_from_days(days);
         let secs = self.0.rem_euclid(86_400);
@@ -453,6 +492,39 @@ mod tests {
         ] {
             assert_eq!(
                 Timestamp::parse_commit_date(text, now),
+                Err(TimestampError),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn http_dates_read_as_live_github_reads_if_modified_since() {
+        // Given the Last-Modified of live GET /users/octocat, 2026-11-24, and the forms of
+        // If-Modified-Since that it answered with 304
+        let at = Timestamp::parse("2026-11-22T12:47:20Z");
+        // When / Then
+        for text in [
+            "Sun, 22 Nov 2026 12:47:20 GMT",
+            "Sunday, 22-Nov-26 12:47:20 GMT",
+            "Sun Nov 22 12:47:20 2026",
+            "Sun Nov  2 12:47:20 2026",
+        ] {
+            let expected = if text.contains(" 2 ") {
+                Timestamp::parse("2026-11-02T12:47:20Z")
+            } else {
+                at
+            };
+            assert_eq!(Timestamp::parse_http_date(text), expected, "{text}");
+        }
+        for text in [
+            "garbage",
+            "2026-11-22T12:47:20Z",
+            "Sun, 22 Foo 2026 12:47:20 GMT",
+            "",
+        ] {
+            assert_eq!(
+                Timestamp::parse_http_date(text),
                 Err(TimestampError),
                 "{text}"
             );

@@ -17,7 +17,7 @@ use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hubdouble_admin::{Admin, Fault, FaultQuery, LogEntry, Services};
 use hubdouble_auth::{Actor, Target};
 use hubdouble_git::ReadJobs;
-use hubdouble_model::{Account, AccountKind, ApiError, FieldError, Repo, Scope};
+use hubdouble_model::{Account, AccountKind, ApiError, FieldError, Repo, Scope, Timestamp};
 use hubdouble_render::Urls;
 use hubdouble_rest::{Access, Ctx, Entry, Params, Parts, Query, Reply};
 use hubdouble_store::{Accounts, RepoRedirects, Repos, Tx};
@@ -545,7 +545,7 @@ impl Inner {
                 Some(t) => t.trim_start_matches("W/").to_owned(),
                 None => etag(&media, &reply.body),
             };
-            if if_none_match(&parts.headers, &strong) {
+            if not_modified(&parts.headers, &reply.headers, &strong) {
                 reply.status = StatusCode::NOT_MODIFIED;
                 reply.body = Bytes::new();
                 if who.authenticated {
@@ -1061,6 +1061,25 @@ fn if_none_match(headers: &HeaderMap, tag: &str) -> bool {
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
         .any(|t| t.trim() == "*" || strip(t) == tag)
+}
+
+fn not_modified(request: &HeaderMap, reply: &HeaderMap, tag: &str) -> bool {
+    if request.contains_key(header::IF_NONE_MATCH) {
+        return if_none_match(request, tag);
+    }
+    let date = |headers: &HeaderMap, name| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| Timestamp::parse_http_date(v).ok())
+    };
+    match (
+        date(reply, header::LAST_MODIFIED),
+        date(request, header::IF_MODIFIED_SINCE),
+    ) {
+        (Some(modified), Some(since)) => modified <= since,
+        _ => false,
+    }
 }
 
 fn set(headers: &mut HeaderMap, name: &'static str, value: &str) {

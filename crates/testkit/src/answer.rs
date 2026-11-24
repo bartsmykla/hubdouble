@@ -428,8 +428,12 @@ fn not_modified(x: &Exchange<'_>, id: &str) -> Vec<String> {
     if x.method != "GET" && x.method != "HEAD" {
         errors.push(format!("{id}: 304 for a {}", x.method));
     }
-    if header(x.request_headers, "if-none-match").is_empty() {
-        errors.push(format!("{id}: 304 for a request without If-None-Match"));
+    if header(x.request_headers, "if-none-match").is_empty()
+        && header(x.request_headers, "if-modified-since").is_empty()
+    {
+        errors.push(format!(
+            "{id}: 304 for a request without If-None-Match or If-Modified-Since"
+        ));
     }
     if !x.body.is_empty() {
         errors.push(format!("{id}: 304 with a body"));

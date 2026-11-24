@@ -1,7 +1,7 @@
 use bytes::Bytes;
-use http::header::{CONTENT_TYPE, LOCATION};
+use http::header::{CONTENT_TYPE, LAST_MODIFIED, LOCATION};
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
-use hubdouble_model::ApiError;
+use hubdouble_model::{ApiError, Timestamp};
 use serde::Serialize;
 
 pub const JSON: &str = "application/json; charset=utf-8";
@@ -80,6 +80,15 @@ impl Reply {
     pub fn header(mut self, name: HeaderName, value: &str) -> Result<Reply, ApiError> {
         self.headers.insert(name, header_value(value)?);
         Ok(self)
+    }
+
+    /// Adds `Last-Modified`, which the server compares with `If-Modified-Since`.
+    #[must_use]
+    pub fn modified(mut self, at: Timestamp) -> Reply {
+        if let Ok(value) = HeaderValue::from_str(&at.http_date()) {
+            self.headers.insert(LAST_MODIFIED, value);
+        }
+        self
     }
 }
 

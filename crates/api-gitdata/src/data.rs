@@ -326,7 +326,10 @@ pub(crate) fn get_git_commit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         return Err(ApiError::not_found());
     };
     let links = Links::of(ctx)?;
-    Reply::json(&GitCommit::new(ctx.git(), ctx.repo()?.id, &links, id, &c))
+    Ok(
+        Reply::json(&GitCommit::new(ctx.git(), ctx.repo()?.id, &links, id, &c))?
+            .modified(c.committer.time),
+    )
 }
 
 #[derive(Deserialize)]

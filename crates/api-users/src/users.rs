@@ -115,7 +115,7 @@ fn authenticated(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let Actor::User { user, .. } = ctx.actor() else {
         return Err(ApiError::unauthorized());
     };
-    Reply::json(&render(ctx.tx(), ctx.urls(), user, true))
+    Ok(Reply::json(&render(ctx.tx(), ctx.urls(), user, true))?.modified(user.updated_at))
 }
 
 fn builtin(tx: &Tx, matches: impl Fn(&Account) -> bool) -> Option<Account> {
@@ -131,10 +131,13 @@ fn reply(
     builtin: impl FnOnce() -> Option<Account>,
 ) -> Result<Reply, ApiError> {
     if let Some(account) = found {
-        return Reply::json(&render(ctx.tx(), ctx.urls(), account, own(ctx, account)));
+        return Ok(
+            Reply::json(&render(ctx.tx(), ctx.urls(), account, own(ctx, account)))?
+                .modified(account.updated_at),
+        );
     }
     let account = builtin().ok_or_else(ApiError::not_found)?;
-    Reply::json(&render(ctx.tx(), ctx.urls(), &account, false))
+    Ok(Reply::json(&render(ctx.tx(), ctx.urls(), &account, false))?.modified(account.updated_at))
 }
 
 fn by_username(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
