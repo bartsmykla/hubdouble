@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -273,7 +273,7 @@ fn absolute(rounds: &[Round], cpu: Option<&str>, out: &mut String) -> usize {
 
 type Baselines = BTreeMap<String, BTreeMap<(&'static str, u32), f64>>;
 
-fn baselines(root: &Path, dir: &Path, found: &mut Baselines) {
+fn baselines(dir: &Path, found: &mut Baselines) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -290,36 +290,83 @@ fn baselines(root: &Path, dir: &Path, found: &mut Baselines) {
                 Some((side, n.parse::<u32>().ok()?))
             });
         let Some(round) = round else {
-            baselines(root, &path, found);
+            baselines(&path, found);
             continue;
         };
         let median = read(&path.join("estimates.json"))
             .ok()
             .and_then(|v| v["median"]["point_estimate"].as_f64());
-        let name = dir
-            .strip_prefix(root)
-            .map_or_else(|_| String::new(), |p| p.display().to_string());
-        if let Some(median) = median {
-            found.entry(name).or_default().insert(round, median);
+        let title = read(&path.join("benchmark.json"))
+            .ok()
+            .and_then(|v| v["title"].as_str().map(str::to_owned));
+        if let (Some(title), Some(median)) = (title, median) {
+            found.entry(title).or_default().insert(round, median);
         }
     }
 }
 
+fn listed(dir: &Path, side: &str) -> Result<BTreeSet<String>, String> {
+    let path = dir.join(format!("expected-{side}.txt"));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(text
+        .lines()
+        .filter_map(|l| l.strip_suffix(": benchmark"))
+        .map(str::to_owned)
+        .collect())
+}
+
 fn criterion(dir: &Path, out: &mut String) -> usize {
+    let (base, head) = match (listed(dir, "base"), listed(dir, "head")) {
+        (Ok(base), Ok(head)) if !base.is_empty() || !head.is_empty() => (base, head),
+        (Err(e), _) | (_, Err(e)) => {
+            let _ = writeln!(
+                out,
+                "MISSING  criterion: no bench list recorded before the runs, {e}"
+            );
+            return 1;
+        }
+        _ => {
+            let _ = writeln!(
+                out,
+                "MISSING  criterion: the bench lists in {} name no bench",
+                dir.display()
+            );
+            return 1;
+        }
+    };
     let mut found = Baselines::new();
-    baselines(dir, dir, &mut found);
-    if found.is_empty() {
+    baselines(dir, &mut found);
+    let mut failed = 0;
+    for name in found
+        .keys()
+        .filter(|n| !base.contains(*n) && !head.contains(*n))
+    {
+        failed += 1;
         let _ = writeln!(
             out,
-            "MISSING  criterion: no readable base-N or head-N baseline in {}",
-            dir.display()
+            "UNKNOWN  criterion {name}: a result of no listed bench"
         );
-        return 1;
     }
-    let mut failed = 0;
-    for (name, runs) in found {
-        if runs.keys().all(|(side, _)| *side == "head") {
-            let _ = writeln!(out, "new      criterion {name}");
+    let empty = BTreeMap::new();
+    for name in base.union(&head) {
+        let runs = found.get(name).unwrap_or(&empty);
+        let readable = |side: &str| runs.keys().filter(|(s, _)| *s == side).count();
+        if !head.contains(name) {
+            failed += 1;
+            let _ = writeln!(out, "MISSING  criterion {name}: on main, dropped now");
+            continue;
+        }
+        if !base.contains(name) {
+            if readable("head") < ROUNDS {
+                failed += 1;
+                let _ = writeln!(
+                    out,
+                    "MISSING  criterion {name}: new with {} readable rounds, {ROUNDS} needed",
+                    readable("head")
+                );
+            } else {
+                let _ = writeln!(out, "new      criterion {name}");
+            }
             continue;
         }
         let pairs: Vec<(f64, f64)> = runs
@@ -388,6 +435,14 @@ pub(crate) fn compare(target: &Path, dir: Option<&Path>, cpu: Option<&str>) -> (
                 "head against main, {} interleaved rounds each:",
                 rounds.len()
             );
+            if rounds.len() < ROUNDS {
+                failed += 1;
+                let _ = writeln!(
+                    out,
+                    "MISSING  rounds: {} paired rounds, {ROUNDS} needed",
+                    rounds.len()
+                );
+            }
             failed += relative(&rounds, &mut out);
             let _ = writeln!(out, "plan section 9 targets, median of the head rounds:");
             failed += absolute(&rounds, cpu, &mut out);

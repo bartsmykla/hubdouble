@@ -53,6 +53,16 @@ jobs:
             test -x "$RUNNER_TEMP/$side/targets"
             docker build -q -t "hubdouble:bench-$side" .
           done
+      - name: the criterion benchmarks that the base and the head have
+        run: |
+          mkdir -p "$CRITERION_HOME"
+          for side in base head; do
+            for exe in "$RUNNER_TEMP/$side"/*; do
+              [ "$(basename "$exe")" = targets ] && continue
+              "$exe" --bench --list --format terse
+            done > "$CRITERION_HOME/expected-$side.txt"
+            wc -l "$CRITERION_HOME/expected-$side.txt"
+          done
       - name: criterion benchmarks, base and head rounds interleaved
         run: |
           names=$(find "$RUNNER_TEMP/base" "$RUNNER_TEMP/head" -type f -printf '%f\n' | sort -u)
