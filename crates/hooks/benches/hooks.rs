@@ -8,7 +8,7 @@ use http::Uri;
 use http_body_util::{BodyExt, Full};
 use hubdouble_hooks::{ConnectFuture, Connector, Handle, Io, Options, emit};
 use hubdouble_model::{
-    Account, AccountKind, App, Event, Installation, Repo, RepositorySelection, SystemClock,
+    Access, Account, AccountKind, App, Event, Installation, Repo, RepositorySelection, SystemClock,
     Timestamp, Visibility, Webhook, node_id,
 };
 use hubdouble_store::{Accounts, Apps, Installations, Repos, Store, StoreBuilder};
@@ -127,7 +127,7 @@ fn world() -> Store {
                     secret: Some("secret".to_owned()),
                     active: true,
                 }),
-                permissions: BTreeMap::new(),
+                permissions: issues_read(),
                 events: vec!["issue_comment".to_owned()],
                 device_flow: false,
                 created_at: Timestamp::SEED,
@@ -140,7 +140,7 @@ fn world() -> Store {
                 account_id: ORG,
                 repository_selection: RepositorySelection::All,
                 repo_ids: Vec::new(),
-                permissions: BTreeMap::new(),
+                permissions: issues_read(),
                 events: Vec::new(),
                 suspended_at: None,
                 suspended_by: None,
@@ -196,27 +196,40 @@ fn start(rt: &Runtime, store: &Store, delay: Duration, queue_capacity: usize) ->
     .unwrap_or_else(|e| panic!("{e:?}"))
 }
 
+fn issues_read() -> BTreeMap<String, Access> {
+    BTreeMap::from([("issues".to_owned(), Access::Read)])
+}
+
+fn reaches_the_app(store: &Store) {
+    emit_events(store, 1);
+    let bytes: usize = store
+        .take_outbox()
+        .iter()
+        .map(|c| c.entry.payload.len())
+        .sum();
+    assert!(
+        bytes > 0,
+        "the bench event reached no webhook, so the bench would time nothing"
+    );
+    eprintln!("outbox: one issue_comment entry holds a {bytes} byte payload");
+}
+
 fn enqueue(c: &mut Criterion) {
     let store = world();
+    reaches_the_app(&store);
     c.bench_function("emit_one_event", |b| {
         b.iter(|| {
             emit_events(&store, 1);
             store.take_outbox()
         });
     });
-    emit_events(&store, 1);
-    let bytes: usize = store
-        .take_outbox()
-        .iter()
-        .map(|c| c.entry.payload.len())
-        .sum();
-    eprintln!("outbox: one issue_comment entry holds a {bytes} byte payload");
 }
 
 fn throughput(c: &mut Criterion) {
     const EVENTS: usize = 200;
     let rt = Runtime::new().unwrap_or_else(|e| panic!("{e}"));
     let store = world();
+    reaches_the_app(&store);
     let hooks = start(&rt, &store, Duration::from_millis(1), 10_000);
     let mut g = c.benchmark_group("emit_to_delivered");
     g.throughput(Throughput::Elements(EVENTS as u64));
@@ -234,6 +247,7 @@ fn backlog(c: &mut Criterion) {
     const EVENTS: usize = 2_000;
     let rt = Runtime::new().unwrap_or_else(|e| panic!("{e}"));
     let store = world();
+    reaches_the_app(&store);
     let hooks = start(&rt, &store, Duration::from_millis(1), 64);
     let mut g = c.benchmark_group("backlog");
     g.throughput(Throughput::Elements(EVENTS as u64));
@@ -246,16 +260,19 @@ fn backlog(c: &mut Criterion) {
                 emit_events(&store, EVENTS);
                 spent += started.elapsed();
                 let _ = rt.block_on(hooks.drain());
+                assert!(
+                    hooks.stats().max_queued > 0,
+                    "the backlog bench queued no delivery, so its writers never met a full queue"
+                );
             }
             spent
         });
     });
     g.finish();
-    let stats = hooks.stats();
-    eprintln!(
-        "backlog: queue depth peaked at {} of 64 while {EVENTS} events were written",
-        stats.max_queued
-    );
+    let peak = hooks.stats().max_queued;
+    if peak > 0 {
+        eprintln!("backlog: queue depth peaked at {peak} of 64 while {EVENTS} events were written");
+    }
 }
 
 criterion_group!(benches, enqueue, throughput, backlog);
