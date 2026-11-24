@@ -21,6 +21,8 @@ const REPOSITORY_ISSUES_DOCS: &str =
     "https://docs.github.com/rest/issues/issues#list-repository-issues";
 const DEFAULT_TYPES: [&str; 3] = ["Task", "Bug", "Feature"];
 const LOCAL_EPOCH: Timestamp = Timestamp(8 * 3600);
+const LOCK_REASONS: [&str; 4] = ["off-topic", "too heated", "resolved", "spam"];
+const LOCK_DOCS: &str = "https://docs.github.com/rest/issues/issues#lock-an-issue";
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -645,6 +647,52 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         Some(refused) => hubdouble_api_pulls::kept(&refused),
         None => view_reply(tx, &urls, &repo, &issue),
     }
+}
+
+#[derive(Deserialize)]
+struct LockInput {
+    lock_reason: Option<String>,
+}
+
+pub(crate) fn lock(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    let input: Option<LockInput> = ctx.body()?;
+    let reason = input.and_then(|i| i.lock_reason);
+    if let Some(r) = reason.as_deref().filter(|r| !LOCK_REASONS.contains(r)) {
+        return Err(invalid_value("Issue", "lock_reason", r).with_docs(LOCK_DOCS));
+    }
+    set_lock(ctx, What::Locked(reason))
+}
+
+pub(crate) fn unlock(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    set_lock(ctx, What::Unlocked)
+}
+
+fn set_lock(ctx: &mut Ctx<'_>, what: What) -> Result<Reply, ApiError> {
+    let (locked, reason, action) = match &what {
+        What::Locked(reason) => (true, reason.clone(), "locked"),
+        _ => (false, None, "unlocked"),
+    };
+    let repo = ctx.repo()?.clone();
+    let number = ctx.param_i64("issue_number")?;
+    let who = who(ctx, &repo)?;
+    if !who.can(RepoRole::Write) {
+        return Err(ApiError::forbidden("Must have admin rights to Repository."));
+    }
+    let now = ctx.now();
+    let tx = ctx.tx_mut()?;
+    let old = issue_by_number(tx, &repo, number)?;
+    if old.locked == locked {
+        return Ok(Reply::empty());
+    }
+    let mut issue = Issue::clone(&old);
+    issue.locked = locked;
+    issue.active_lock_reason = reason;
+    issue.updated_at = now;
+    let issue = Arc::new(issue);
+    tx.table_mut::<Issues>().replace(issue.clone())?;
+    events::record(tx, &issue, who.account.id, who.via_app, what, now)?;
+    emit_issue(tx, &repo, &issue, action, who.account.id, Vec::new())?;
+    Ok(Reply::empty())
 }
 
 pub(crate) fn add_labels(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {

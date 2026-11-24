@@ -115,11 +115,11 @@ Events the client consumes (its `internal/metrics/metrics.go` `knownEvents`, plu
 | --- | --- | --- |
 | `ping` | webhook set | P0-E |
 | `push`, `create`, and `delete` (`ref`, `ref_type` and `pusher_type` as GitHub sends; not consumed by the client today, does not block done) | every ref change (section 6.4), so every deletion path sends `delete` | P0-C via the ref subscriber |
-| `pull_request` (opened, edited, closed, reopened, synchronize, ready_for_review, converted_to_draft, review_requested, review_request_removed, labeled, unlabeled) | PR changes; synchronize from the ref subscriber | T5 |
+| `pull_request` (opened, edited, closed, reopened, synchronize, ready_for_review, converted_to_draft, review_requested, review_request_removed, labeled, unlabeled, locked, unlocked) | PR changes; synchronize from the ref subscriber | T5 |
 | `pull_request_review` (submitted, edited, dismissed) | reviews | T6 |
 | `pull_request_review_comment` (created, edited, deleted) | review comments | T6 |
 | `pull_request_review_thread` (resolved, unresolved) | `resolveReviewThread`, `unresolveReviewThread` | T6 |
-| `issues` (opened, edited, closed, reopened, labeled, assigned) | issues; the client does not consume it today, so it does not block done | T7 |
+| `issues` (opened, edited, closed, reopened, labeled, assigned, locked, unlocked) | issues; the client does not consume it today, so it does not block done | T7 |
 | `issue_comment` (created, edited, deleted) | comments on issues and PRs; on a PR, `issue.pull_request` holds `url`, `html_url`, `diff_url` and `patch_url`, which the client reads to tell a PR from an issue (`internal/webhook/payload.go:264`), and a conformance case checks it for both | T7 |
 | `check_run` (created, completed, rerequested, requested_action), `check_suite` (requested, completed, rerequested) | checks; a suite per App on each pushed head; GitHub Actions' suite of each workflow run and the check run of each job (`created`, `completed`, and the suite's `completed`, section 4.5) | T8 |
 | `status` | commit status | T8 |

@@ -39,6 +39,8 @@ pub(crate) enum What {
         message: Option<String>,
         commit: Option<String>,
     },
+    Locked(Option<String>),
+    Unlocked,
 }
 
 impl What {
@@ -54,6 +56,8 @@ impl What {
             What::Merged(_) => "merged",
             What::PullRef(name) => name,
             What::ReviewDismissed { .. } => "review_dismissed",
+            What::Locked(_) => "locked",
+            What::Unlocked => "unlocked",
         }
     }
 
@@ -69,6 +73,8 @@ impl What {
             What::Merged(_) => "ME",
             What::PullRef(_) => "",
             What::ReviewDismissed { .. } => "RDE",
+            What::Locked(_) => "LOE",
+            What::Unlocked => "UNLOE",
         }
     }
 
@@ -284,7 +290,8 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
                 vec![("state_reason", Value::Null), ("intent", Value::Null)]
             }
             What::Reopened => vec![("state_reason", json!("reopened"))],
-            What::Merged(_) | What::PullRef(_) => vec![],
+            What::Locked(reason) => vec![("lock_reason", json!(reason))],
+            What::Merged(_) | What::PullRef(_) | What::Unlocked => vec![],
             What::ReviewDismissed {
                 review_id,
                 state,

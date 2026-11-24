@@ -3,7 +3,7 @@
     reason = "tests fail immediately when an answer and its contract differ"
 )]
 
-use http::{HeaderMap, HeaderValue, StatusCode};
+use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use hubdouble_testkit::fixture::{self, ALICE, ALICE_TOKEN};
 use hubdouble_testkit::{GoGithub, Graphql, TestServer};
 use serde_json::{Value, json};
@@ -261,6 +261,100 @@ async fn a_classic_token_without_scopes_reads_public_repositories_only() {
             "{token}"
         );
     }
+}
+
+#[tokio::test]
+async fn an_issue_locks_with_each_reason_and_unlocks_as_github_does() {
+    // Given an issue of acme/public, alice who pushes to it, and carol who reads it
+    let server = whole_server(&[]).await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let carol = GoGithub::new(&server).with_token(fixture::CAROL_TOKEN);
+    let opened = alice
+        .post(&format!("{REPO}/issues"), &json!({"title": "talk"}))
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED);
+    let issue = format!("{REPO}/issues/{}", opened.json()["number"]);
+    let lock = format!("{issue}/lock");
+    let query = r#"query($n: Int!) { repository(owner: "acme", name: "public") {
+        issue(number: $n) { activeLockReason } } }"#;
+    let vars = json!({"n": opened.json()["number"]});
+    let graphql = Graphql::new(alice.clone());
+    let mut actions = Vec::new();
+
+    for (reason, value) in [
+        (Some("off-topic"), "OFF_TOPIC"),
+        (Some("too heated"), "TOO_HEATED"),
+        (Some("resolved"), "RESOLVED"),
+        (Some("spam"), "SPAM"),
+        (None, ""),
+    ] {
+        // When alice locks it with the reason, or with no body, and unlocks it
+        let locked = match reason {
+            Some(r) => {
+                alice
+                    .call_json(Method::PUT, &lock, &json!({"lock_reason": r}))
+                    .await
+            }
+            None => alice.call(Method::PUT, &lock).await,
+        };
+        let read = alice.get(&issue).await.json();
+        let gql = graphql.query(query, &vars).await.json();
+        let unlocked = alice.call(Method::DELETE, &lock).await;
+        let after = alice.get(&issue).await.json();
+        let gql_after = graphql.query(query, &vars).await.json();
+
+        // Then REST and GraphQL answer the reason while it is locked, and none after
+        assert_eq!(locked.status, StatusCode::NO_CONTENT, "{reason:?}");
+        assert_eq!(read["locked"], true);
+        assert_eq!(read["active_lock_reason"], json!(reason));
+        let active = &gql["data"]["repository"]["issue"]["activeLockReason"];
+        match reason {
+            Some(_) => assert_eq!(active, value, "{gql}"),
+            None => assert!(active.is_null(), "{gql}"),
+        }
+        assert_eq!(unlocked.status, StatusCode::NO_CONTENT);
+        assert_eq!(after["locked"], false);
+        assert!(after["active_lock_reason"].is_null());
+        assert!(gql_after["data"]["repository"]["issue"]["activeLockReason"].is_null());
+        actions.extend(["locked", "unlocked"]);
+    }
+    let bad = alice
+        .call_json(Method::PUT, &lock, &json!({"lock_reason": "rude"}))
+        .await;
+    let refused = carol.call(Method::PUT, &lock).await;
+    let events = alice.get(&format!("{issue}/events")).await.json();
+    server.admin(Method::POST, "hooks/drain", None).await;
+    let received = server.receiver.received().await;
+
+    // And a wrong reason or a reader changes nothing, and each change is an event and a webhook
+    assert_eq!(bad.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(bad.json()["errors"][0]["field"], "lock_reason");
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(alice.get(&issue).await.json()["locked"], false);
+    let events = events.as_array().unwrap();
+    let named: Vec<_> = events
+        .iter()
+        .map(|e| e["event"].as_str().unwrap())
+        .collect();
+    assert_eq!(named, actions);
+    assert_eq!(events[2]["lock_reason"], "too heated");
+    assert!(events[8]["lock_reason"].is_null());
+    assert!(events[1].get("lock_reason").is_none());
+    assert!(events[0]["node_id"].as_str().unwrap().starts_with("LOE_"));
+    assert!(events[1]["node_id"].as_str().unwrap().starts_with("UNLOE_"));
+    let delivered: Vec<_> = received
+        .iter()
+        .filter(|d| d.header("x-github-event") == "issues")
+        .map(|d| d.json())
+        .filter(|p| p["action"] != "opened")
+        .collect();
+    let delivered_actions: Vec<_> = delivered
+        .iter()
+        .map(|p| p["action"].as_str().unwrap())
+        .collect();
+    assert_eq!(delivered_actions, actions);
+    assert_eq!(delivered[4]["issue"]["active_lock_reason"], "resolved");
+    assert_eq!(delivered[4]["issue"]["locked"], true);
 }
 
 #[tokio::test]
