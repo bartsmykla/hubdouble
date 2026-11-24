@@ -569,6 +569,7 @@ pub(crate) fn merge(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             title: input.commit_title,
             message: input.commit_message,
             sha: input.sha,
+            author_email: None,
         },
     )?;
     Reply::json(&json!({"sha": sha, "merged": true, "message": "Pull Request successfully merged"}))
@@ -579,6 +580,7 @@ pub(crate) struct MergeOptions {
     pub(crate) title: Option<String>,
     pub(crate) message: Option<String>,
     pub(crate) sha: Option<String>,
+    pub(crate) author_email: Option<String>,
 }
 
 pub(crate) fn merge_pull(
@@ -630,18 +632,37 @@ pub(crate) fn merge_pull(
             let title = title.unwrap_or_else(|| format!("Merge pull request #{}", issue.number));
             let detail = message.as_deref().unwrap_or(&issue.title);
             let message = format!("{title}\n\n{detail}");
-            git.merge(tx, repo.id, sender, &p.base.ref_name, &sha, &message)
-                .map_err(|e| match e {
-                    GitError::Conflict { .. } | GitError::NothingToMerge => merging::cannot_merge(),
-                    other => other.into(),
-                })?
-                .commit
+            if options.author_email.is_some() {
+                let merger = (sender, options.author_email.as_deref());
+                let commit =
+                    merging::merge_commit(tx, git, (repo.id, merger), (base, head), message)?;
+                let name = format!("refs/heads/{}", p.base.ref_name);
+                git.update_ref(tx, repo.id, sender, &name, Some(base), Some(commit), false)?;
+                commit
+            } else {
+                git.merge(tx, repo.id, sender, &p.base.ref_name, &sha, &message)
+                    .map_err(|e| match e {
+                        GitError::Conflict { .. } | GitError::NothingToMerge => {
+                            merging::cannot_merge()
+                        }
+                        other => other.into(),
+                    })?
+                    .commit
+            }
         }
         method => {
+            let merger = (sender, options.author_email.as_deref());
             let commit = if method == MergeMethod::Squash {
-                merging::squash(tx, git, (repo, issue), (base, head), (title, message))?
+                merging::squash(
+                    tx,
+                    git,
+                    (repo, issue),
+                    merger,
+                    (base, head),
+                    (title, message),
+                )?
             } else {
-                merging::rebase(tx, git, (repo.id, sender), (base, head))?
+                merging::rebase(tx, git, (repo.id, merger), (base, head))?
             };
             let name = format!("refs/heads/{}", p.base.ref_name);
             git.update_ref(tx, repo.id, sender, &name, Some(base), Some(commit), false)?;

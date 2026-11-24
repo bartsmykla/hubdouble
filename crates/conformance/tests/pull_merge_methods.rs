@@ -472,6 +472,63 @@ async fn the_repository_settings_and_the_ruleset_choose_the_merge_methods() {
     assert_eq!(json_of(&alice, PULL).await["merged"], true);
 }
 
+async fn merge_as(alice: &GoGithub, method: &str, email: &str) -> Value {
+    let id = json_of(alice, PULL).await["node_id"].clone();
+    Graphql::new(alice.clone())
+        .query(
+            "mutation($id: ID!, $method: PullRequestMergeMethod!, $email: String!) {
+             mergePullRequest(input: {pullRequestId: $id, mergeMethod: $method,
+             authorEmail: $email}) {pullRequest {mergeCommit {oid}}}}",
+            &json!({"id": id, "method": method, "email": email}),
+        )
+        .await
+        .json()
+}
+
+#[tokio::test]
+async fn graphql_merge_pull_request_refuses_an_author_email_of_another_account() {
+    // Given a pull request by alice
+    let (_server, alice) = diverged().await;
+
+    // When alice merges it with an address that is not hers, and with an empty one
+    let mut answers = Vec::new();
+    for email in ["bob@builder.example", ""] {
+        answers.push(merge_as(&alice, "MERGE", email).await);
+    }
+
+    // Then both are refused as cli/cli issue 14711 shows, and the pull request stays open
+    for answer in &answers {
+        assert_eq!(answer["data"]["mergePullRequest"], Value::Null, "{answer}");
+        assert_eq!(answer["errors"][0]["type"], "UNPROCESSABLE", "{answer}");
+        assert_eq!(answer["errors"][0]["path"], json!(["mergePullRequest"]));
+    }
+    assert_eq!(json_of(&alice, PULL).await["state"], "open");
+}
+
+#[tokio::test]
+async fn graphql_merge_pull_request_writes_the_author_email_into_the_merge() {
+    for (method, role) in [
+        ("MERGE", "author"),
+        ("SQUASH", "author"),
+        ("REBASE", "committer"),
+    ] {
+        // Given a pull request by alice, who has her own address and a noreply address
+        let (_server, alice) = diverged().await;
+        let noreply = format!("{ALICE_ID}+alice@users.noreply.github.com");
+
+        // When alice merges it with her noreply address
+        let answer = merge_as(&alice, method, &noreply).await;
+
+        // Then the commit that the merge writes for her carries that address
+        let sha = answer["data"]["mergePullRequest"]["pullRequest"]["mergeCommit"]["oid"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{method}: {answer}"))
+            .to_owned();
+        let commit = json_of(&alice, &format!("{REPO}/commits/{sha}")).await;
+        assert_eq!(commit["commit"][role]["email"], json!(noreply), "{method}");
+    }
+}
+
 #[tokio::test]
 async fn graphql_merge_pull_request_squashes_with_the_given_headline() {
     // Given a pull request of two commits

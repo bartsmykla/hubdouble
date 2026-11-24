@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use hubdouble_git::{Commit, Git, ObjectId, Signature};
 use hubdouble_model::{
-    ApiError, Issue, Repo, SquashMergeCommitMessage, SquashMergeCommitTitle, Timestamp,
+    Account, ApiError, Issue, Repo, SquashMergeCommitMessage, SquashMergeCommitTitle, Timestamp,
 };
 use hubdouble_store::{Accounts, Tx};
 
@@ -20,6 +20,7 @@ pub(crate) fn squash(
     tx: &Tx,
     git: &Git,
     (repo, issue): (&Repo, &Issue),
+    (sender, email): (i64, Option<&str>),
     (base, head): (ObjectId, ObjectId),
     (title, message): (Option<String>, Option<String>),
 ) -> Result<ObjectId, ApiError> {
@@ -28,7 +29,8 @@ pub(crate) fn squash(
         .test_merge(tx, repo.id, issue.user_id, base, head)?
         .ok_or_else(cannot_merge)?;
     let now = git.now();
-    let author = signature(tx, issue.user_id, now)?;
+    let email = email.filter(|_| sender == issue.user_id);
+    let author = merger_signature(tx, (issue.user_id, email), now)?;
     let message = squash_message(repo, issue, &commits, &author.email, (title, message));
     let mut commit = Commit {
         tree: state::commit_node(git, tx, repo.id, merged)?.commit.tree,
@@ -45,14 +47,14 @@ pub(crate) fn squash(
 pub(crate) fn rebase(
     tx: &Tx,
     git: &Git,
-    (repo, merger): (i64, i64),
+    (repo, (merger, email)): (i64, (i64, Option<&str>)),
     (base, head): (ObjectId, ObjectId),
 ) -> Result<ObjectId, ApiError> {
     let commits = pull_commits(tx, git, repo, (base, head))?;
     let test_merge = git
         .test_merge(tx, repo, merger, base, head)?
         .ok_or_else(cannot_merge)?;
-    let committer = signature(tx, merger, git.now())?;
+    let committer = merger_signature(tx, (merger, email), git.now())?;
     let mut tip = base;
     let mut tree = state::commit_node(git, tx, repo, base)?.commit.tree;
     for (id, c) in commits.iter().filter(|(_, c)| c.parents.len() < 2) {
@@ -118,12 +120,60 @@ fn signature(tx: &Tx, account: i64, time: Timestamp) -> Result<Signature, ApiErr
             .name
             .clone()
             .unwrap_or_else(|| account.login.clone()),
-        email: account.email.clone().unwrap_or_else(|| {
-            format!("{}+{}@users.noreply.github.com", account.id, account.login)
-        }),
+        email: account.email.clone().unwrap_or_else(|| noreply(account)),
         time,
         offset_minutes: 0,
     })
+}
+
+fn noreply(account: &Account) -> String {
+    format!("{}+{}@users.noreply.github.com", account.id, account.login)
+}
+
+pub(crate) fn owns_email(tx: &Tx, account: i64, email: &str) -> bool {
+    tx.table::<Accounts>().get(account).is_some_and(|a| {
+        a.email
+            .iter()
+            .cloned()
+            .chain([noreply(a)])
+            .any(|own| own.eq_ignore_ascii_case(email))
+    })
+}
+
+fn merger_signature(
+    tx: &Tx,
+    (merger, email): (i64, Option<&str>),
+    time: Timestamp,
+) -> Result<Signature, ApiError> {
+    let mut signature = signature(tx, merger, time)?;
+    if let Some(email) = email {
+        email.clone_into(&mut signature.email);
+    }
+    Ok(signature)
+}
+
+pub(crate) fn merge_commit(
+    tx: &Tx,
+    git: &Git,
+    (repo, merger): (i64, (i64, Option<&str>)),
+    (base, head): (ObjectId, ObjectId),
+    message: String,
+) -> Result<ObjectId, ApiError> {
+    pull_commits(tx, git, repo, (base, head))?;
+    let tested = git
+        .test_merge(tx, repo, merger.0, base, head)?
+        .ok_or_else(cannot_merge)?;
+    let now = git.now();
+    let mut commit = Commit {
+        tree: state::commit_node(git, tx, repo, tested)?.commit.tree,
+        parents: vec![base, head],
+        author: merger_signature(tx, merger, now)?,
+        committer: Signature::web_flow(now),
+        message,
+        gpg_signature: None,
+    };
+    git.sign(&mut commit)?;
+    Ok(git.write_commit(tx, repo, &commit)?)
 }
 
 fn squash_message(

@@ -11,7 +11,9 @@ use hubdouble_store::{Issues, Labels, Repos};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{CONTENTS_WRITE, READ, WRITE, change, events, mergeability, render, reviewing, state};
+use crate::{
+    CONTENTS_WRITE, READ, WRITE, change, events, mergeability, merging, render, reviewing, state,
+};
 
 macro_rules! fields {
     ($r:ident, $($field:literal => |$ctx:ident, $issue:ident, $p:ident| $value:expr),* $(,)?) => {
@@ -385,6 +387,7 @@ struct MergeInput {
     commit_body: Option<String>,
     expected_head_oid: Option<String>,
     merge_method: Option<String>,
+    author_email: Option<String>,
     client_mutation_id: Option<String>,
 }
 
@@ -409,6 +412,14 @@ fn merge(cx: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, GqlError> {
             ));
         }
     };
+    if let Some(email) = &input.author_email
+        && !merging::owns_email(&cx.tx, change::sender(cx.actor)?, email)
+    {
+        return Err(GqlError::new(
+            ErrorType::Unprocessable,
+            "Invalid email address",
+        ));
+    }
     change::merge_pull(
         &mut cx.tx,
         cx.git,
@@ -419,6 +430,7 @@ fn merge(cx: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, GqlError> {
             title: input.commit_headline,
             message: input.commit_body,
             sha: input.expected_head_oid,
+            author_email: input.author_email,
         },
     )?;
     let issue = cx
