@@ -12,6 +12,8 @@ use crate::{ACTIONS_READ, ACTIONS_WRITE};
 
 const DIRECTORY: &str = ".github/workflows";
 const DISPATCH: &str = "workflow_dispatch";
+const DISPATCH_DOCS: &str =
+    "https://docs.github.com/rest/actions/workflows#create-a-workflow-dispatch-event";
 
 pub(crate) type Workflows = Rows<Workflow>;
 
@@ -304,13 +306,7 @@ fn dispatch_inputs(
         Value::Object(events) => events.get(DISPATCH),
         _ => None,
     }
-    .ok_or_else(|| {
-        crate::invalid(
-            "Workflow",
-            "ref",
-            "Workflow does not have 'workflow_dispatch' trigger",
-        )
-    })?;
+    .ok_or_else(|| dispatch_error("Workflow does not have 'workflow_dispatch' trigger"))?;
     let declared = configured.get("inputs").and_then(Value::as_object);
     let unexpected: Vec<_> = inputs
         .keys()
@@ -318,27 +314,59 @@ fn dispatch_inputs(
         .map(|key| format!("{key:?}"))
         .collect();
     if !unexpected.is_empty() {
-        return Err(crate::invalid(
-            "Workflow",
-            "inputs",
-            format!("Unexpected inputs provided: [{}]", unexpected.join(", ")),
-        ));
+        return Err(dispatch_error(format!(
+            "Unexpected inputs provided: [{}]",
+            unexpected.join(", ")
+        )));
     }
     for (key, spec) in declared.into_iter().flatten() {
-        if inputs.contains_key(key) {
-            continue;
-        }
-        if let Some(default) = spec.get("default") {
+        if let Some(value) = inputs.get(key) {
+            check_input(key, spec, value)?;
+        } else if let Some(default) = spec.get("default") {
             inputs.insert(key.clone(), default.clone());
         } else if spec.get("required") == Some(&Value::Bool(true)) {
-            return Err(crate::invalid(
-                "Workflow",
-                "inputs",
-                format!("Required input {key:?} not provided"),
-            ));
+            return Err(dispatch_error(format!(
+                "Required input '{key}' not provided"
+            )));
         }
     }
     Ok(inputs)
+}
+
+fn scalar_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(_) | Value::Object(_) => None,
+        Value::String(text) => Some(text.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+fn check_input(key: &str, spec: &Value, value: &Value) -> Result<(), ApiError> {
+    let text = scalar_text(value)
+        .ok_or_else(|| dispatch_error(format!("Invalid value for input '{key}'")))?;
+    let allowed = match spec.get("type").and_then(Value::as_str) {
+        Some("boolean") => text == "true" || text == "false",
+        Some("choice") => spec
+            .get("options")
+            .and_then(Value::as_array)
+            .is_some_and(|options| {
+                options
+                    .iter()
+                    .any(|option| scalar_text(option).is_some_and(|option| option == text))
+            }),
+        _ => true,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(dispatch_error(format!(
+            "Provided value '{text}' for input '{key}' not in the list of allowed values"
+        )))
+    }
+}
+
+fn dispatch_error(message: impl Into<String>) -> ApiError {
+    ApiError::unprocessable(message).with_docs(DISPATCH_DOCS)
 }
 
 fn dispatch(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
@@ -346,14 +374,8 @@ fn dispatch(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = Arc::clone(ctx.repo()?);
     let actor = ctx.actor().account().ok_or_else(ApiError::unauthorized)?.id;
     let workflow = find(ctx.tx(), repo.id, ctx.param("workflow_id")?)?;
-    let (git_ref, sha) =
-        resolve(ctx.git(), ctx.tx(), repo.id, &input.git_ref).ok_or_else(|| {
-            crate::invalid(
-                "Workflow",
-                "ref",
-                format!("No ref found for: {}", input.git_ref),
-            )
-        })?;
+    let (git_ref, sha) = resolve(ctx.git(), ctx.tx(), repo.id, &input.git_ref)
+        .ok_or_else(|| dispatch_error(format!("No ref found for: {}", input.git_ref)))?;
     let object = ctx
         .git()
         .expression(ctx.tx(), repo.id, &format!("{sha}:{}", workflow.path))

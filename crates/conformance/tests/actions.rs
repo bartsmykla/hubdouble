@@ -26,6 +26,9 @@ use support::{
     drain, server, valid,
 };
 
+const DISPATCH_DOCS: &str =
+    "https://docs.github.com/rest/actions/workflows#create-a-workflow-dispatch-event";
+
 #[tokio::test]
 async fn dispatch_retry_and_validation_are_atomic_and_use_stable_workflow_ids() {
     let server = server("none").await;
@@ -54,7 +57,8 @@ async fn dispatch_retry_and_validation_are_atomic_and_use_stable_workflow_ids() 
         .await;
     assert_eq!(rejected.status, StatusCode::UNPROCESSABLE_ENTITY);
     let rejected = rejected.json();
-    assert_eq!(rejected["errors"][0]["field"], "inputs");
+    assert_eq!(rejected["documentation_url"], DISPATCH_DOCS);
+    assert!(rejected.get("errors").is_none());
     let message = rejected["message"].as_str().unwrap();
     assert!(message.find("\"a-input\"").unwrap() < message.find("\"z-input\"").unwrap());
     for (workflow, git_ref) in [
@@ -69,7 +73,8 @@ async fn dispatch_retry_and_validation_are_atomic_and_use_stable_workflow_ids() 
             )
             .await;
         assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(response.json()["errors"][0]["field"].is_string());
+        assert_eq!(response.json()["documentation_url"], DISPATCH_DOCS);
+        assert!(response.json().get("errors").is_none());
     }
     let empty = valid(
         "list-workflow-runs-for-repo",
@@ -181,6 +186,68 @@ async fn a_dispatch_delivers_a_signed_workflow_dispatch_webhook_to_apps_that_rea
     assert_eq!(payload["repository"]["id"], PUBLIC_REPO_ID);
     assert_eq!(payload["organization"]["login"], "acme");
     assert_eq!(payload["sender"]["id"], ALICE_ID);
+}
+
+#[tokio::test]
+async fn typed_dispatch_inputs_are_checked_and_defaulted_as_github_does() {
+    // Given
+    let server = server("none").await;
+    subscribe_to_dispatches(&server, "contents").await;
+    let client = client(&server);
+    let path = format!("{ACTIONS}/workflows/typed.yml/dispatches");
+
+    // When
+    let mut refused = Vec::new();
+    for inputs in [
+        json!({"level": "trace"}),
+        json!({"dry-run": "yes"}),
+        json!({"level": ["info"]}),
+    ] {
+        let answer = client
+            .post(&path, &json!({"ref": "main", "inputs": inputs}))
+            .await;
+        refused.push((answer.status, answer.json()));
+    }
+    let inputs = json!({"dry-run": true, "count": "many", "target": "nowhere"});
+    let accepted = client
+        .post(&path, &json!({"ref": "main", "inputs": inputs}))
+        .await;
+    drain(&server).await;
+
+    // Then
+    let messages: Vec<_> = refused
+        .iter()
+        .map(|(status, body)| {
+            assert_eq!(*status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(body["documentation_url"], DISPATCH_DOCS);
+            assert!(body.get("errors").is_none());
+            body["message"].clone()
+        })
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "Provided value 'trace' for input 'level' not in the list of allowed values",
+            "Provided value 'yes' for input 'dry-run' not in the list of allowed values",
+            "Invalid value for input 'level'",
+        ]
+    );
+    assert_eq!(accepted.status, StatusCode::NO_CONTENT);
+    let runs = valid(
+        "list-workflow-runs-for-repo",
+        &client.get(&format!("{ACTIONS}/runs")).await,
+    );
+    assert_eq!(runs["total_count"], 1);
+    let received = server.receiver.received().await;
+    let dispatched: Vec<_> = received
+        .iter()
+        .filter(|d| d.header("x-github-event") == "workflow_dispatch")
+        .map(|d| d.json()["inputs"].clone())
+        .collect();
+    assert_eq!(
+        dispatched,
+        [json!({"count": "many", "dry-run": "true", "level": "info", "target": "nowhere"})]
+    );
 }
 
 #[tokio::test]

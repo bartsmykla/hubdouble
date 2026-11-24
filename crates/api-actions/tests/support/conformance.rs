@@ -45,6 +45,13 @@ pub(super) async fn server(auto_complete: &str) -> TestServer {
                 entry["files"][".github/workflows/input.yml"] = json!(
                     "on:\n  workflow_dispatch:\n    inputs:\n      ref-name: {required: true}\njobs: {test: {}}\n"
                 );
+                entry["files"][".github/workflows/typed.yml"] = json!(concat!(
+                    "on:\n  workflow_dispatch:\n    inputs:\n",
+                    "      level: {type: choice, options: [info, debug], default: info}\n",
+                    "      dry-run: {type: boolean, default: false}\n",
+                    "      count: {type: number}\n      target: {type: environment}\n",
+                    "jobs: {run: {}}\n",
+                ));
                 entry["files"][".github/workflows/multi.yml"] =
                     json!("name: Multi\non: workflow_dispatch\njobs: {fail: {}, pass: {}}\n");
                 entry["files"][".github/workflows/chain.yml"] = json!(concat!(
