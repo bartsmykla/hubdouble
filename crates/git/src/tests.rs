@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     Commit, EntryMode, FileChange, FileStatus, Git, GitBuilder, GitError, ObjectData, ObjectId,
-    ObjectKind, RefChange, RefSubscriber, Signature, SignatureState, Tag, TreeEntry,
+    ObjectKind, ReadJobs, RefChange, RefSubscriber, Signature, SignatureState, Tag, TreeEntry,
 };
 
 const ORG: i64 = 1;
@@ -30,6 +30,17 @@ impl Table for Seen {}
 )]
 fn record(tx: &mut TxMut<'_>, _: &Git, change: &RefChange) -> Result<(), ApiError> {
     tx.table_mut::<Seen>().get_mut().0.push(change.clone());
+    Ok(())
+}
+
+#[derive(Clone, Default)]
+struct Ran(Vec<i64>);
+
+impl Table for Ran {}
+
+#[expect(clippy::unnecessary_wraps, reason = "a read job returns a Result")]
+fn mark(tx: &mut TxMut<'_>, _: &Git, id: i64) -> Result<(), ApiError> {
+    tx.table_mut::<Ran>().get_mut().0.push(id);
     Ok(())
 }
 
@@ -102,7 +113,7 @@ struct Fx {
 
 fn fixture_with(subscribers: &[RefSubscriber]) -> Fx {
     let mut builder = StoreBuilder::new();
-    builder.register_table::<Seen>();
+    builder.register_table::<Seen>().register_table::<Ran>();
     let mut git = GitBuilder::new(&mut builder);
     git.on_ref_update(record);
     for s in subscribers {
@@ -1272,4 +1283,25 @@ fn write_tree_and_write_commit_refuse_missing_objects() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn read_jobs_run_once_per_subject_and_only_for_the_request_that_asked() {
+    // Given two requests whose reads ask for jobs, and a third that fails after its read asked
+    let fx = fixture();
+    let first = ReadJobs::default();
+    first.ask(mark, 7);
+    first.ask(mark, 7);
+    first.ask(mark, 3);
+    let second = ReadJobs::default();
+    second.ask(mark, 7);
+    let failed = ReadJobs::default();
+    failed.ask(mark, 9);
+    drop(failed);
+    // When the two requests run their jobs, the second first
+    second.run(&fx.git, &fx.store).unwrap();
+    first.run(&fx.git, &fx.store).unwrap();
+    // Then each request ran its own jobs once per subject, and the failed request's job never ran
+    let ran = fx.store.view(|tx| Ok(tx.table::<Ran>().0.clone()));
+    assert_eq!(ran, Ok(vec![7, 3, 7]));
 }

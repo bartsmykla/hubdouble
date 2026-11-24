@@ -12,6 +12,7 @@ use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hubdouble_admin::{Admin, Fault, FaultQuery, LogEntry, Services};
 use hubdouble_auth::{Actor, Target};
+use hubdouble_git::ReadJobs;
 use hubdouble_model::{Account, AccountKind, ApiError, FieldError, Repo};
 use hubdouble_render::Urls;
 use hubdouble_rest::{Access, Ctx, Entry, Params, Parts, Query, Reply};
@@ -159,13 +160,16 @@ impl Inner {
         let read = (parts.method == Method::GET || parts.method == Method::HEAD) && !entry.writes;
         let store = &self.services.store;
         let result = catch_unwind(AssertUnwindSafe(|| {
-            if read {
-                let reply = store.view(|tx| self.run(&request, Access::Read(tx), &mut who))?;
-                self.services.git.run_read_jobs(store)?;
-                Ok(reply)
+            let jobs = ReadJobs::default();
+            let reply = if read {
+                store.view(|tx| self.run(&request, Access::Read(tx), &jobs, &mut who))?
             } else {
-                store.update(|tx| self.run(&request, Access::Write(tx.reborrow()), &mut who))
-            }
+                store.update(|tx| {
+                    self.run(&request, Access::Write(tx.reborrow()), &jobs, &mut who)
+                })?
+            };
+            jobs.run(&self.services.git, store)?;
+            Ok(reply)
         }))
         .unwrap_or_else(|_| Err(ApiError::internal("Internal Server Error")));
         self.finish(Call {
@@ -219,6 +223,7 @@ impl Inner {
         &self,
         r: &RestRequest<'_>,
         access: Access<'_>,
+        read_jobs: &ReadJobs,
         who: &mut Who,
     ) -> Result<Reply, ApiError> {
         let tx: &Tx = match &access {
@@ -251,6 +256,7 @@ impl Inner {
             actor: &actor,
             repo,
             git: &services.git,
+            read_jobs,
             access,
             clock: services.clock.as_ref(),
             urls: r.urls,

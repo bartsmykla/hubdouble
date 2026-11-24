@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use hubdouble_auth::{Actor, Target as AuthTarget};
-use hubdouble_git::Git;
+use hubdouble_git::{Git, ReadJobs};
 use hubdouble_model::{ApiError, Clock, Repo, Requirement};
 use hubdouble_render::Urls;
 use hubdouble_store::{Store, Tx, TxMut};
@@ -151,6 +151,8 @@ pub enum Target<'t> {
 pub struct Ctx<'a> {
     pub tx: &'a Tx,
     pub git: &'a Git,
+    /// The request's own collector, which the executor runs before it answers.
+    pub read_jobs: &'a ReadJobs,
     pub actor: &'a Actor,
     pub clock: &'a dyn Clock,
     pub urls: &'a Urls,
@@ -174,6 +176,7 @@ impl Ctx<'_> {
 pub struct MutCtx<'a> {
     pub tx: TxMut<'a>,
     pub git: &'a Git,
+    pub read_jobs: &'a ReadJobs,
     pub actor: &'a Actor,
     pub clock: &'a dyn Clock,
     pub urls: &'a Urls,
@@ -187,6 +190,7 @@ impl MutCtx<'_> {
         Ctx {
             tx: &self.tx,
             git: self.git,
+            read_jobs: self.read_jobs,
             actor: self.actor,
             clock: self.clock,
             urls: self.urls,

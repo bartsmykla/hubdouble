@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use http::{Method, StatusCode};
@@ -206,6 +207,42 @@ async fn the_reads_a_computation_takes_come_from_the_seed_and_the_admin_api() {
     assert_eq!(settled.status, StatusCode::OK, "{}", settled.json());
     assert_eq!(settled.json()["mergeable"], true);
     assert_eq!(conflicted(&client).await, (false, 1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_reads_from_many_clients_each_count_once() {
+    // Given a pending computation that takes as many reads as there are clients
+    const CLIENTS: u32 = 16;
+    let reads = json!({"kind": "mergeability", "repository": "acme/public", "reads": CLIENTS});
+    let server = server(&[reads, pull_request()]).await;
+    let client = alice(&server);
+    let node = client.settled_pull(PULL).await["node_id"].clone();
+    push(&server, "feature", "src/next.txt", "next\n");
+    let mut others = String::new();
+    for i in 0..100 {
+        write!(
+            others,
+            " t{i}: node(id: $id) {{... on PullRequest {{title body headRefOid}}}}"
+        )
+        .unwrap();
+    }
+    let query =
+        format!("query($id: ID!) {{node(id: $id) {{... on PullRequest {{mergeable}}}}{others}}}");
+    // When each client reads mergeable at the same time, in a query that goes on after the read
+    let mut reading = tokio::task::JoinSet::new();
+    for _ in 0..CLIENTS {
+        let graphql = Graphql::new(alice(&server));
+        let (query, node) = (query.clone(), node.clone());
+        reading.spawn(async move { graphql.query(&query, &json!({"id": node})).await.json() });
+    }
+    let answers = reading.join_all().await;
+    // Then every read answers UNKNOWN, and the read after them answers the computed value
+    for answer in &answers {
+        assert_eq!(answer.get("errors"), None, "{answer}");
+        assert_eq!(answer["data"]["node"]["mergeable"], "UNKNOWN");
+    }
+    let pull = client.get(PULL).await.json();
+    assert_eq!(pending(&pull), json!([true, "clean", true]));
 }
 
 #[tokio::test]

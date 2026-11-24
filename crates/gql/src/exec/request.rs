@@ -4,7 +4,7 @@ use apollo_compiler::parser::SourceMap;
 use apollo_compiler::request::RequestError;
 use apollo_compiler::response::JsonMap;
 use hubdouble_auth::Actor;
-use hubdouble_git::Git;
+use hubdouble_git::{Git, ReadJobs};
 use hubdouble_model::ApiError;
 use hubdouble_store::Store;
 use serde_json::{Map, Value};
@@ -43,28 +43,26 @@ pub(crate) fn execute(
         warnings: Vec::new(),
         omit_data: false,
     };
+    let read_jobs = ReadJobs::default();
     let data = match op.operation_type {
-        OperationType::Query => store
-            .view(|tx| {
-                let cx = Ctx {
-                    tx,
-                    git,
-                    actor,
-                    clock: request.clock,
-                    urls: request.urls,
-                    registry,
-                };
-                let root = Obj {
-                    type_name: QUERY,
-                    value: registry.root.clone(),
-                };
-                Ok(ex.root(&cx, &root, &op.selection_set))
-            })
-            .and_then(|data| git.run_read_jobs(store).map(|()| data))?,
+        OperationType::Query => store.view(|tx| {
+            let cx = Ctx {
+                tx,
+                git,
+                read_jobs: &read_jobs,
+                actor,
+                clock: request.clock,
+                urls: request.urls,
+                registry,
+            };
+            let root = Obj {
+                type_name: QUERY,
+                value: registry.root.clone(),
+            };
+            Ok(ex.root(&cx, &root, &op.selection_set))
+        })?,
         OperationType::Mutation => {
-            let data = ex.mutations(store, git, actor, request, &op.selection_set);
-            git.run_read_jobs(store)?;
-            data
+            ex.mutations(store, (git, &read_jobs), actor, request, &op.selection_set)
         }
         OperationType::Subscription => {
             return Ok(failed(vec![ResponseError {
@@ -76,6 +74,7 @@ pub(crate) fn execute(
             }]));
         }
     };
+    read_jobs.run(git, store)?;
     let extensions = (!ex.warnings.is_empty()).then(|| {
         let mut m = Map::new();
         m.insert("warnings".to_owned(), Value::Array(ex.warnings));

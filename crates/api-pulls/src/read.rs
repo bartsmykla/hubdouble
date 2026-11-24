@@ -17,7 +17,7 @@ pub(crate) fn issue<'a>(ctx: &'a Ctx<'_>) -> Result<&'a Arc<Issue>, ApiError> {
 pub(crate) fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let issue = issue(ctx)?;
     let reply = Reply::json(&render::detail(ctx.git(), ctx.tx(), ctx.urls(), issue)?)?;
-    mergeability::read(ctx.git(), ctx.tx(), issue);
+    mergeability::read(ctx.read_jobs(), ctx.tx(), issue);
     Ok(reply)
 }
 

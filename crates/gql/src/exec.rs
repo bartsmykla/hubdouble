@@ -8,7 +8,7 @@ use apollo_compiler::executable::{Field, Selection, SelectionSet};
 use apollo_compiler::schema::FieldDefinition;
 use apollo_compiler::{ExecutableDocument, Node};
 use hubdouble_auth::Actor;
-use hubdouble_git::Git;
+use hubdouble_git::{Git, ReadJobs};
 use hubdouble_model::ApiError;
 use hubdouble_store::Store;
 use serde_json::{Map, Value, json};
@@ -108,7 +108,7 @@ impl<'r> Exec<'r> {
     fn mutations(
         &mut self,
         store: &Store,
-        git: &Git,
+        git: (&Git, &ReadJobs),
         actor: &Actor,
         request: &Request<'_>,
         set: &'r SelectionSet,
@@ -135,7 +135,7 @@ impl<'r> Exec<'r> {
     fn mutation(
         &mut self,
         store: &Store,
-        git: &Git,
+        (git, read_jobs): (&Git, &ReadJobs),
         actor: &Actor,
         request: &Request<'_>,
         fields: &Fields<'r>,
@@ -171,6 +171,7 @@ impl<'r> Exec<'r> {
             let mut m = MutCtx {
                 tx: tx.reborrow(),
                 git,
+                read_jobs,
                 actor,
                 clock: request.clock,
                 urls: request.urls,

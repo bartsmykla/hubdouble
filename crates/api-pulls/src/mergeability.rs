@@ -4,7 +4,7 @@ use http::{Method, StatusCode};
 use hubdouble_admin::{
     AdminHandler, AdminRequest, Registrar, SeedCtx, error_response, json_response,
 };
-use hubdouble_git::Git;
+use hubdouble_git::{Git, ReadJobs};
 use hubdouble_model::{ApiError, Issue, IssueState};
 use hubdouble_render::Urls;
 use hubdouble_rest::Params;
@@ -74,9 +74,9 @@ pub(crate) fn start(tx: &mut TxMut<'_>, git: &Git, issue: &Issue) -> Result<(), 
     Ok(())
 }
 
-pub(crate) fn read(git: &Git, tx: &Tx, issue: &Issue) {
+pub(crate) fn read(jobs: &ReadJobs, tx: &Tx, issue: &Issue) {
     if pending(tx, issue.id) {
-        git.ask_after_read(counted, issue.id);
+        jobs.ask(counted, issue.id);
     }
 }
 

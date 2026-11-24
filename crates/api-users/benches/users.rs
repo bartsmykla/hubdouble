@@ -6,7 +6,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use http::{HeaderMap, Method};
 use hubdouble_admin::{Admin, Registrar};
 use hubdouble_auth::Actor;
-use hubdouble_git::GitBuilder;
+use hubdouble_git::{GitBuilder, ReadJobs};
 use hubdouble_model::{
     Account, AccountKind, ApiError, ManualClock, Timestamp, Token, TokenKind, node_id,
 };
@@ -88,6 +88,7 @@ fn bench(c: &mut Criterion) {
             b.iter(|| {
                 store
                     .view(|tx| {
+                        let read_jobs = ReadJobs::default();
                         let mut ctx = Ctx::new(Parts {
                             operation_id: entry.operation_id,
                             path,
@@ -98,6 +99,7 @@ fn bench(c: &mut Criterion) {
                             actor: black_box(&actor),
                             repo: None,
                             git: &git,
+                            read_jobs: &read_jobs,
                             access: Access::Read(tx),
                             clock: clock.as_ref(),
                             urls: &urls,

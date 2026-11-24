@@ -61,11 +61,11 @@ pub(crate) fn register(r: &mut Registry) {
         "updatedAt" => |_cx, issue, _p| issue.updated_at,
         "mergedAt" => |_cx, _issue, p| p.merged_at,
         "mergeable" => |cx, issue, p| {
-            mergeability::read(cx.git, cx.tx, issue);
+            mergeability::read(cx.read_jobs, cx.tx, issue);
             match p.mergeable { Some(true) => "MERGEABLE", Some(false) => "CONFLICTING", None => "UNKNOWN" }
         },
         "mergeStateStatus" => |cx, issue, _p| {
-            mergeability::read(cx.git, cx.tx, issue);
+            mergeability::read(cx.read_jobs, cx.tx, issue);
             crate::mergeable_state(cx.tx, issue).to_ascii_uppercase()
         },
         "authorAssociation" => |cx, issue, _p| association(cx, issue)?,

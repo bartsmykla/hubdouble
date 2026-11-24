@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 
 use fake::{Notes, Probe, World};
 use hubdouble_auth::Actor;
+use hubdouble_git::ReadJobs;
 use hubdouble_gql::{Ctx, ErrorType, GqlError, Obj, Registry, Resolved, Target};
 use hubdouble_model::{Account, AccountKind, Repo, Timestamp, Visibility, node_id};
 use hubdouble_store::{Accounts, Repos};
@@ -511,6 +512,7 @@ fn load_checks_the_target_and_the_actors_grant() {
         let cx = Ctx {
             tx,
             git: &w.git,
+            read_jobs: &ReadJobs::default(),
             actor: &Actor::Anonymous,
             clock: &w.clock,
             urls: &w.urls,

@@ -7,7 +7,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use http::{HeaderMap, Method};
 use hubdouble_admin::{Admin, Registrar};
 use hubdouble_auth::Actor;
-use hubdouble_git::GitBuilder;
+use hubdouble_git::{GitBuilder, ReadJobs};
 use hubdouble_model::{
     Account, AccountKind, ApiError, ManualClock, Repo, RunStatus, Timestamp, Visibility,
     WorkflowRun, node_id,
@@ -147,6 +147,7 @@ fn run_list(c: &mut Criterion) {
                             actor: &Actor::Anonymous,
                             repo: Some(&repo),
                             git: &git,
+                            read_jobs: &ReadJobs::default(),
                             access: Access::Read(tx),
                             clock: &clock,
                             urls: &urls,

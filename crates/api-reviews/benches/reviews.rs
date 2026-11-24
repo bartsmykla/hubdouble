@@ -6,7 +6,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use http::{HeaderMap, Method};
 use hubdouble_admin::{Admin, Registrar};
 use hubdouble_auth::Actor;
-use hubdouble_git::GitBuilder;
+use hubdouble_git::{GitBuilder, ReadJobs};
 use hubdouble_model::{
     Account, AccountKind, Issue, IssueState, ManualClock, Pull, PullRef, Repo, Review, ReviewState,
     Timestamp, Visibility, node_id,
@@ -167,6 +167,7 @@ fn bench(c: &mut Criterion) {
                         actor: &Actor::Anonymous,
                         repo: tx.table::<Repos>().get(2),
                         git: &git,
+                        read_jobs: &ReadJobs::default(),
                         access: Access::Read(tx),
                         clock: &clock,
                         urls: &Urls::new(tx.config(), ""),

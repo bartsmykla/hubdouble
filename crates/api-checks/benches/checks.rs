@@ -5,7 +5,7 @@ use http::{HeaderMap, Method};
 use hubdouble_admin::{Admin, Registrar};
 use hubdouble_api_checks::actions;
 use hubdouble_auth::Actor;
-use hubdouble_git::{Git, GitBuilder, Signature};
+use hubdouble_git::{Git, GitBuilder, ReadJobs, Signature};
 use hubdouble_model::{
     Access, Account, AccountKind, ApiError, App, Installation, ManualClock, Repo,
     RepositorySelection, RunStatus, Timestamp, Token, TokenKind, Visibility, WorkflowJob, node_id,
@@ -194,6 +194,7 @@ fn bench(c: &mut Criterion) {
         .into();
         store
             .update_quiet(|tx| {
+                let read_jobs = ReadJobs::default();
                 let mut ctx = Ctx::new(Parts {
                     operation_id: route.operation_id,
                     path,
@@ -204,6 +205,7 @@ fn bench(c: &mut Criterion) {
                     actor: &fixture.actor,
                     repo: Some(&fixture.repo),
                     git: &git,
+                    read_jobs: &read_jobs,
                     access: StoreAccess::Write(tx.reborrow()),
                     clock: &clock,
                     urls: &fixture.urls,
@@ -229,6 +231,7 @@ fn bench(c: &mut Criterion) {
             b.iter(|| {
                 store
                     .view(|tx| {
+                        let read_jobs = ReadJobs::default();
                         let mut ctx = Ctx::new(Parts {
                             operation_id: route.operation_id,
                             path: &path,
@@ -239,6 +242,7 @@ fn bench(c: &mut Criterion) {
                             actor: &Actor::Anonymous,
                             repo: Some(&fixture.repo),
                             git: &git,
+                            read_jobs: &read_jobs,
                             access: StoreAccess::Read(tx),
                             clock: &clock,
                             urls: &fixture.urls,

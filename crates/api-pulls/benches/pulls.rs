@@ -4,7 +4,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use http::{HeaderMap, Method};
 use hubdouble_admin::{Admin, Registrar};
 use hubdouble_auth::Actor;
-use hubdouble_git::{FileChange, Git, GitBuilder, Signature};
+use hubdouble_git::{FileChange, Git, GitBuilder, ReadJobs, Signature};
 use hubdouble_model::{Account, AccountKind, ManualClock, Repo, Timestamp, Visibility, node_id};
 use hubdouble_render::Urls;
 use hubdouble_rest::{Access, Ctx, Parts, Query, Registry};
@@ -153,6 +153,7 @@ fn bench(c: &mut Criterion) {
     let input = r#"{"title":"feature","head":"feature","base":"main"}"#.into();
     store
         .update_quiet(|tx| {
+            let read_jobs = ReadJobs::default();
             let mut ctx = Ctx::new(Parts {
                 operation_id: route.operation_id,
                 path,
@@ -163,6 +164,7 @@ fn bench(c: &mut Criterion) {
                 actor: &actor,
                 repo: Some(&repo),
                 git: &git,
+                read_jobs: &read_jobs,
                 access: Access::Write(tx.reborrow()),
                 clock: &clock,
                 urls: &urls,
@@ -189,6 +191,7 @@ fn bench(c: &mut Criterion) {
             b.iter(|| {
                 store
                     .view(|tx| {
+                        let read_jobs = ReadJobs::default();
                         let mut ctx = Ctx::new(Parts {
                             operation_id: route.operation_id,
                             path,
@@ -199,6 +202,7 @@ fn bench(c: &mut Criterion) {
                             actor: &Actor::Anonymous,
                             repo: Some(&repo),
                             git: &git,
+                            read_jobs: &read_jobs,
                             access: Access::Read(tx),
                             clock: &clock,
                             urls: &urls,

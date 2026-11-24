@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use hubdouble_auth::Actor;
+use hubdouble_git::ReadJobs;
 use hubdouble_gql::{Args, Ctx, ErrorType, Obj, Resolved};
 use hubdouble_model::{Issue, IssueState, Pull, PullRef, Repo, Timestamp, node_id};
 use hubdouble_render::Urls;
@@ -96,6 +97,7 @@ async fn issue_and_pull_request_resolve_only_their_own_kind_of_number() {
             let ctx = Ctx {
                 tx,
                 git: &services.git,
+                read_jobs: &ReadJobs::default(),
                 actor: &Actor::Anonymous,
                 clock: &*services.clock,
                 urls: &urls,

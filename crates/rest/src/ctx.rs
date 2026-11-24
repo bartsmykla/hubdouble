@@ -5,7 +5,7 @@ use bytes::Bytes;
 use http::HeaderMap;
 use http::header::LINK;
 use hubdouble_auth::Actor;
-use hubdouble_git::Git;
+use hubdouble_git::{Git, ReadJobs};
 use hubdouble_model::{ApiError, Clock, Repo, Timestamp};
 use hubdouble_render::{Urls, query_escape};
 use hubdouble_store::{Tx, TxMut};
@@ -50,6 +50,8 @@ pub struct Parts<'a> {
     pub actor: &'a Actor,
     pub repo: Option<&'a Arc<Repo>>,
     pub git: &'a Git,
+    /// The request's own collector, which the pipeline runs after the handler.
+    pub read_jobs: &'a ReadJobs,
     pub access: Access<'a>,
     pub clock: &'a dyn Clock,
     pub urls: &'a Urls,
@@ -167,6 +169,11 @@ impl<'a> Ctx<'a> {
     #[must_use]
     pub fn git(&self) -> &Git {
         self.p.git
+    }
+
+    #[must_use]
+    pub fn read_jobs(&self) -> &ReadJobs {
+        self.p.read_jobs
     }
 
     #[must_use]
