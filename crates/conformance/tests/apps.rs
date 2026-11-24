@@ -1,6 +1,7 @@
 use http::{Method, StatusCode};
 use hubdouble_auth::{self as auth, Target};
 use hubdouble_model::{Grant, Requirement, Scope};
+use hubdouble_render::query_escape;
 use hubdouble_store::Repos;
 use hubdouble_testkit::{Answer, Builder, GoGithub, Graphql, TestServer, fixture, validate};
 use serde_json::{Value, json};
@@ -535,4 +536,42 @@ async fn installation_admin_changes_emit_app_specific_events() {
     );
     let created = event(&server, "installation", "created").await;
     assert_eq!(created["repositories"], deleted["repositories"]);
+}
+
+#[tokio::test]
+async fn the_installation_list_reads_since_as_the_other_lists_do() {
+    // Given the two installations of the app, updated at 2026-01-01T00:00:00Z
+    let server = setup().start().await;
+    let app = app(&server);
+
+    // When the list reads a since at, or just past, that second
+    for (since, listed) in [
+        ("2026-01-01T00:00:00Z", 2),
+        ("2025-12-31 16:00 PST", 2),
+        ("Dec 31 2025", 2),
+        ("2026-01-01T00:00:00.000001Z", 0),
+        ("Jan 1 2026", 0),
+    ] {
+        let answer = app
+            .get(&format!("app/installations?since={}", query_escape(since)))
+            .await;
+
+        // Then hubdouble reads it as the comment lists do (docs/fidelity.md)
+        let listed_ids = body(&answer, "apps/list-installations", StatusCode::OK);
+        assert_eq!(listed_ids.as_array().map(Vec::len), Some(listed), "{since}");
+    }
+
+    // When the list reads a since that Ruby cannot read
+    let answer = app.get("app/installations?since=yesterday").await;
+
+    // Then the refusal has the body of the other lists
+    let refusal = body(
+        &answer,
+        "apps/list-installations",
+        StatusCode::UNPROCESSABLE_ENTITY,
+    );
+    assert_eq!(
+        refusal["documentation_url"],
+        "https://docs.github.com/rest/apps/apps#list-installations-for-the-authenticated-app"
+    );
 }

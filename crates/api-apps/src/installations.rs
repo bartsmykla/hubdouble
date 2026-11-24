@@ -5,7 +5,7 @@ use http::{StatusCode, header::LINK};
 use hubdouble_auth::{Actor, INSTALLATION_TOKEN_TTL, NarrowRequest, narrow};
 use hubdouble_model::{
     Access, Account, AccountKind, ApiError, Installation, Repo, RepositorySelection, Requirement,
-    Scope, Timestamp, Token, TokenKind,
+    Scope, Token, TokenKind,
 };
 use hubdouble_render::{self as render, Urls};
 use hubdouble_rest::{Ctx, Page, Registry, Reply};
@@ -63,17 +63,14 @@ pub(crate) fn render(
 
 fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let app = app(ctx)?;
-    let since = ctx
-        .query()
-        .get("since")
-        .map(Timestamp::parse)
-        .transpose()
-        .map_err(|e| ApiError::unprocessable(e.to_string()))?;
+    let since = ctx.since(
+        "https://docs.github.com/rest/apps/apps#list-installations-for-the-authenticated-app",
+    )?;
     let items = ctx
         .tx()
         .table::<Installations>()
         .children(app.id)
-        .filter(|i| since.is_none_or(|time| i.updated_at > time));
+        .filter(|i| since.is_none_or(|s| s.admits(i.updated_at)));
     let params = ctx.page_params()?;
     let (items, total) = page(params, items, |i| render(ctx.tx(), ctx.urls(), i))?;
     paged_reply(ctx, params, total, &items)
