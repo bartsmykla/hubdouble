@@ -285,7 +285,10 @@ impl CheckResults {
             .in_repo(repo)
             .filter(|s| s.sha == sha)
         {
-            statuses.insert(status.context.clone(), (status.state, status.creator_id));
+            statuses.insert(
+                status.context.to_lowercase(),
+                (status.state, status.creator_id),
+            );
         }
         CheckResults { runs, statuses }
     }
@@ -307,7 +310,7 @@ impl CheckResults {
             .map(|a| a.bot_id);
         let status = self
             .statuses
-            .get(context)
+            .get(&context.to_lowercase())
             .filter(|&&(_, creator)| app.is_none() || bot == Some(creator))
             .map(|&(state, _)| state == StatusState::Success);
         match (run, status) {
