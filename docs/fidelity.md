@@ -60,7 +60,7 @@ GitHub documents redirect responses for the [repository endpoint](https://docs.g
 - A page list answers `422` when `page * per_page` is larger than `9223372036854775807`. The repository issue list without `after` or `before` answers `422` when `page * (per_page + 1)` is larger than 10 000, the repository comment list past 30 000 results, releases past 10 000 and workflow runs past 40 000.
 - Successful API GET responses use a weak `ETag` derived from the media type and response body. A match with `If-None-Match` returns `304`.
 - API responses include GitHub request, media type, version, and rate-limit headers. Rate-limit counters are fixed and the remaining count stays above zero unless a fault overrides it. User tokens can receive `X-OAuth-Scopes`.
-- The API accepts `X-GitHub-Api-Version` values `2022-11-28` and `2026-03-10`. It defaults to `2022-11-28` and returns `400` for other versions.
+- The REST API accepts `X-GitHub-Api-Version` values `2022-11-28` and `2026-03-10`. It defaults to `2022-11-28` and returns `400` for other versions. GraphQL ignores the header and sends no `X-GitHub-Api-Version-Selected`, and its `X-GitHub-Media-Type` defaults to `github.v4`.
 - New object IDs use a server-wide signed 64-bit sequence. An explicit admin ID at or below that sequence returns `422`. Current GraphQL node IDs have a type prefix and an opaque payload. For a resolved legacy base64 ID, GraphQL returns a `DEPRECATION` warning in `extensions` with `next_global_id`.
 - Timestamps use RFC 3339 in UTC with second precision. Reads of an unchanged Git ref return the same target.
 - The App delivery log retains the last 50,000 attempts per App.

@@ -11,6 +11,11 @@ static SCHEMA: LazyLock<Schema> = LazyLock::new(|| {
 });
 
 pub(crate) fn check(query: &str, variables: &Value, answer: &Answer) {
+    assert!(
+        !answer.headers.contains_key("x-github-api-version-selected"),
+        "GitHub's GraphQL API selects no REST API version"
+    );
+    assert_eq!(answer.header("x-ratelimit-resource"), "graphql");
     let body = answer.json();
     if answer.status == StatusCode::OK {
         if let Err(error) = SCHEMA.check_answer(query, variables, &body) {

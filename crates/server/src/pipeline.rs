@@ -107,9 +107,13 @@ impl Inner {
             &self.root_urls
         };
         let resource = if graphql { "graphql" } else { "core" };
-        let version = match api_version(&parts.headers) {
-            Ok(v) => v,
-            Err(e) => return self.finish(error_call(&parts, "", resource, "", e)),
+        let version = if graphql {
+            ""
+        } else {
+            match api_version(&parts.headers) {
+                Ok(v) => v,
+                Err(e) => return self.finish(error_call(&parts, "", resource, "", e)),
+            }
         };
         let body = match Limited::new(body, self.services.config.max_body_bytes)
             .collect()
@@ -377,7 +381,8 @@ impl Inner {
         let status =
             StatusCode::from_u16(fault.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let mut reply = Reply::raw(hubdouble_rest::JSON, fault.body).status(status);
-        self.common_headers(&mut reply.headers, &parts.headers, resource, Some(version));
+        let selected = (!version.is_empty()).then_some(version);
+        self.common_headers(&mut reply.headers, &parts.headers, resource, selected);
         for (name, value) in &fault.headers {
             if let (Ok(n), Ok(v)) = (
                 HeaderName::from_bytes(name.as_bytes()),
@@ -404,6 +409,9 @@ impl Inner {
         let media = self.common_headers(&mut reply.headers, &parts.headers, resource, selected);
         if let Some(scopes) = &who.scopes {
             set(&mut reply.headers, "x-oauth-scopes", scopes);
+            if resource == "graphql" {
+                set(&mut reply.headers, "x-accepted-oauth-scopes", "repo");
+            }
         }
         let conditional = parts.method == Method::GET || parts.method == Method::HEAD;
         if conditional && reply.status == StatusCode::OK {
@@ -451,7 +459,11 @@ impl Inner {
     ) -> String {
         let seq = self.request_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let now = self.services.clock.now();
-        let media = media_type(request.get(header::ACCEPT).and_then(|v| v.to_str().ok()));
+        let default = if resource == "graphql" { "v4" } else { "v3" };
+        let media = media_type(
+            request.get(header::ACCEPT).and_then(|v| v.to_str().ok()),
+            default,
+        );
         set(
             out,
             "x-github-request-id",
@@ -674,15 +686,20 @@ fn api_version(headers: &HeaderMap) -> Result<&'static str, ApiError> {
         })
 }
 
-pub(crate) fn media_type(accept: Option<&str>) -> String {
-    let range = accept
+pub(crate) fn media_type(accept: Option<&str>, default: &str) -> String {
+    let mut ranges = accept
         .unwrap_or("")
         .split(',')
         .filter_map(|r| r.split(';').next())
-        .map(str::trim)
+        .map(str::trim);
+    let range = ranges
+        .clone()
         .find_map(|r| r.strip_prefix("application/vnd.github"));
     let Some(range) = range else {
-        return "github.v3; format=json".to_owned();
+        if ranges.any(|r| r == "application/json") {
+            return format!("github.{default}");
+        }
+        return format!("github.{default}; format=json");
     };
     let (names, format) = match range.split_once('+') {
         Some((n, f)) => (n, Some(f)),
@@ -694,18 +711,13 @@ pub(crate) fn media_type(accept: Option<&str>) -> String {
             n.strip_prefix('v')
                 .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
         })
-        .unwrap_or("v3");
-    let param = names.next();
+        .unwrap_or(default);
     let mut out = format!("github.{version}");
-    if let Some(p) = param {
+    if let Some(p) = names.next() {
         let _ = write!(out, "; param={p}");
     }
-    match (param, format) {
-        (_, Some(f)) => {
-            let _ = write!(out, "; format={f}");
-        }
-        (None, None) => out.push_str("; format=json"),
-        (Some(_), None) => {}
+    if let Some(f) = format {
+        let _ = write!(out, "; format={f}");
     }
     out
 }
@@ -777,27 +789,47 @@ mod unit {
 
     #[test]
     fn media_type_follows_the_accept_header() {
-        for (accept, want) in [
-            (None, "github.v3; format=json"),
-            (Some("application/json"), "github.v3; format=json"),
+        for (accept, default, want) in [
+            (None, "v3", "github.v3; format=json"),
+            (Some("*/*"), "v3", "github.v3; format=json"),
+            (Some("application/json"), "v3", "github.v3"),
+            (Some("*/*, application/json"), "v3", "github.v3"),
+            (Some("application/vnd.github"), "v3", "github.v3"),
+            (Some("application/vnd.github.v3"), "v3", "github.v3"),
             (
                 Some("application/vnd.github+json"),
+                "v3",
                 "github.v3; format=json",
             ),
             (
                 Some("application/vnd.github.v3.sha"),
+                "v3",
                 "github.v3; param=sha",
             ),
             (
                 Some("application/vnd.github.raw+json"),
+                "v3",
                 "github.v3; param=raw; format=json",
             ),
             (
                 Some("text/html, application/vnd.github.v3.diff"),
+                "v3",
                 "github.v3; param=diff",
             ),
+            (Some("application/json"), "v4", "github.v4"),
+            (
+                Some("application/vnd.github.v3+json"),
+                "v4",
+                "github.v3; format=json",
+            ),
+            (Some("*/*"), "v4", "github.v4; format=json"),
+            (
+                Some("application/vnd.github.merge-info-preview+json"),
+                "v4",
+                "github.v4; param=merge-info-preview; format=json",
+            ),
         ] {
-            assert_eq!(media_type(accept), want, "{accept:?}");
+            assert_eq!(media_type(accept, default), want, "{accept:?}");
         }
     }
 

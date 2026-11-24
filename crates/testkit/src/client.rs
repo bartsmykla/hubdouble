@@ -302,11 +302,35 @@ impl GoGithub {
     /// Sends `bytes` as a JSON request body without encoding them, for a body that a `Value` cannot
     /// hold, such as one with a repeated key.
     pub async fn call_bytes(&self, method: Method, path: &str, bytes: Vec<u8>) -> Answer {
-        let request = self
+        self.call_json_headers(method, path, bytes, HeaderMap::new())
+            .await
+    }
+
+    /// As [`GoGithub::call_bytes`], with `headers` set over go-github's own.
+    ///
+    /// # Panics
+    ///
+    /// When the request cannot be built or the answer differs from GitHub's docs.
+    pub async fn call_json_headers(
+        &self,
+        method: Method,
+        path: &str,
+        bytes: Vec<u8>,
+        headers: HeaderMap,
+    ) -> Answer {
+        let (http, request) = self
             .request(method, path)
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(bytes);
-        self.exchange(request).await
+            .body(bytes)
+            .build_split();
+        let mut request = request.unwrap_or_else(|e| panic!("build the request: {e}"));
+        for (name, value) in headers {
+            if let Some(name) = name {
+                request.headers_mut().insert(name, value);
+            }
+        }
+        self.exchange(reqwest::RequestBuilder::from_parts(http, request))
+            .await
     }
 
     pub async fn get(&self, path: &str) -> Answer {
@@ -394,8 +418,28 @@ impl Graphql {
     ///
     /// When the response does not match GitHub's GraphQL API.
     pub async fn query(&self, query: &str, variables: &Value) -> Answer {
+        self.query_headers(query, variables, HeaderMap::new()).await
+    }
+
+    /// As [`Graphql::query`], with `headers` set over go-github's own.
+    ///
+    /// # Panics
+    ///
+    /// When the response does not match GitHub's GraphQL API.
+    pub async fn query_headers(
+        &self,
+        query: &str,
+        variables: &Value,
+        headers: HeaderMap,
+    ) -> Answer {
         let body = serde_json::json!({ "query": query, "variables": variables });
-        let answer = self.client.post("graphql", &body).await;
+        let mut bytes =
+            serde_json::to_vec(&body).unwrap_or_else(|e| panic!("encode the body: {e}"));
+        bytes.push(b'\n');
+        let answer = self
+            .client
+            .call_json_headers(Method::POST, "graphql", bytes, headers)
+            .await;
         crate::graphql_answer::check(query, variables, &answer);
         answer
     }
