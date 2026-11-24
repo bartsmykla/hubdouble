@@ -349,7 +349,7 @@ pub(crate) fn list_commits(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let Page { page, per_page } = page;
     let last = log.len().div_ceil(per_page).max(1);
     let mut rels = Vec::with_capacity(4);
-    if page < last {
+    if rendered.len() == per_page {
         rels.extend([(page + 1, "next"), (last, "last")]);
     }
     if page > 1 {

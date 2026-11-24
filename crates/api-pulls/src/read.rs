@@ -125,6 +125,15 @@ fn page<'a, T, R: Serialize>(
     items: &'a [T],
     render: impl FnMut(&'a T) -> Result<R, ApiError>,
 ) -> Result<Reply, ApiError> {
+    page_linked(ctx, items, render, true)
+}
+
+fn page_linked<'a, T, R: Serialize>(
+    ctx: &Ctx<'_>,
+    items: &'a [T],
+    render: impl FnMut(&'a T) -> Result<R, ApiError>,
+    past_the_end: bool,
+) -> Result<Reply, ApiError> {
     let Page { page, per_page } = ctx.page_params()?;
     let start = (page - 1).saturating_mul(per_page).min(items.len());
     let end = start.saturating_add(per_page).min(items.len());
@@ -133,7 +142,11 @@ fn page<'a, T, R: Serialize>(
         .map(render)
         .collect::<Result<_, _>>()?;
     let reply = Reply::json(&answer)?;
-    match ctx.link_header(page, items.len().div_ceil(per_page).max(1)) {
+    let last = items.len().div_ceil(per_page).max(1);
+    match ctx
+        .link_header(page, last)
+        .filter(|_| past_the_end || page <= last)
+    {
         Some(link) => reply.header(LINK, &link),
         None => Ok(reply),
     }
@@ -158,7 +171,7 @@ pub(crate) fn commits(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let issue = issue(ctx)?;
     let comparison = state::compare(ctx.git(), ctx.tx(), issue)?;
     let full = render::full_name(ctx.tx(), issue.repo_id)?;
-    page(
+    page_linked(
         ctx,
         &comparison.commits[..comparison.commits.len().min(250)],
         |(id, commit)| {
@@ -172,6 +185,7 @@ pub(crate) fn commits(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
                 commit,
             ))
         },
+        false,
     )
 }
 

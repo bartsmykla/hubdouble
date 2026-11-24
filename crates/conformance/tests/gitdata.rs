@@ -677,7 +677,24 @@ async fn the_commit_list_and_compare_order_their_links_as_github_does() {
         (list.to_owned(), vec![r("next", "2"), r("last", "2")]),
         (
             format!("{list}&page=2"),
-            vec![r("first", "1"), r("prev", "1")],
+            vec![
+                r("next", "3"),
+                r("last", "2"),
+                r("first", "1"),
+                r("prev", "1"),
+            ],
+        ),
+        (
+            format!("{list}&page=3"),
+            vec![r("first", "1"), r("prev", "2")],
+        ),
+        (
+            "repos/acme/public/commits?sha=feature&per_page=2".to_owned(),
+            vec![r("next", "2"), r("last", "1")],
+        ),
+        (
+            "repos/acme/public/commits?sha=feature&per_page=3".to_owned(),
+            vec![],
         ),
         (
             format!("{list}&page=5"),
@@ -698,7 +715,9 @@ async fn the_commit_list_and_compare_order_their_links_as_github_does() {
     ] {
         let answer = client.get(&path).await;
 
-        // Then the links come in live cli/cli's order for commits and compare/v2.0.0...v2.1.0
+        // Then the links come in live cli/cli's order for commits and compare/v2.0.0...v2.1.0, and a
+        // full page of commits links the next page, as octocat/Hello-World's three commits do at
+        // page=3&per_page=1 (gh api, 2026-11-24)
         assert_eq!(answer.status, StatusCode::OK, "{path}");
         assert_eq!(rels(&answer), expected, "{path}");
     }

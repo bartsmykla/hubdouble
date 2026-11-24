@@ -197,6 +197,47 @@ async fn pull_list_sorts_newest_first_for_an_unknown_direction() {
 }
 
 #[tokio::test]
+async fn a_page_past_the_last_pull_request_commit_has_no_link_but_files_link_back() {
+    // Given a pull request with two commits that each change one file
+    let server = fixture().entry(json!({
+        "kind": "repository", "id": 3100, "owner": "bob", "name": "public", "fork_of": "acme/public",
+        "commits": [{"branch": "fork-work", "message": "first", "files": {"a.txt": "a\n"}},
+                    {"branch": "fork-work", "message": "second", "files": {"b.txt": "b\n"}}]
+    })).start().await;
+    let client = writer(&server);
+    let input = json!({"title": "Fork work", "head": "bob:fork-work", "base": "main"});
+    checked(
+        "pulls/create",
+        StatusCode::CREATED,
+        &client.post(PULLS, &input).await,
+    );
+
+    // When the commits and the files are read on the last page and past it
+    let last = client
+        .get(&format!("{NUM}/commits?per_page=1&page=2"))
+        .await;
+    let commits = client
+        .get(&format!("{NUM}/commits?per_page=1&page=9"))
+        .await;
+    let files = client.get(&format!("{NUM}/files?per_page=1&page=9")).await;
+
+    // Then the commit list past its end has no Link, as live cli/cli pull request 15149 at
+    // per_page=1&page=9, and the file list links back as cli/cli pull request 15000 does
+    // (gh api, 2026-11-24)
+    assert!(last.header("link").contains("rel=\"first\""));
+    assert_eq!(commits.status, StatusCode::OK);
+    assert_eq!(commits.json(), json!([]));
+    assert_eq!(commits.header("link"), "");
+    assert_eq!(files.json(), json!([]));
+    let rels: Vec<&str> = files
+        .header("link")
+        .split(", ")
+        .map(|l| l.rsplit_once("; rel=").map_or("", |(_, r)| r))
+        .collect();
+    assert_eq!(rels, ["\"prev\"", "\"last\"", "\"first\""]);
+}
+
+#[tokio::test]
 async fn fork_commits_and_files_preserve_head_and_base_identity() {
     // Given go-github v93 github/pulls.go:216,243,313,428,454.
     let server = fixture().entry(json!({
