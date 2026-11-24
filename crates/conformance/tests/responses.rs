@@ -139,7 +139,7 @@ async fn an_accept_header_without_json_answers_github_415() {
     let graphql = Graphql::new(alice.clone())
         .query_headers("{ viewer { login } }", &json!({}), accepting("text/html"))
         .await;
-    let served = [
+    let answered = [
         ("text/*", "github.v3"),
         ("application/*", "github.v3"),
         ("text/html, */*", "unknown, github.v3"),
@@ -159,7 +159,7 @@ async fn an_accept_header_without_json_answers_github_415() {
     assert_eq!(bad_token.status, StatusCode::UNAUTHORIZED);
     assert_eq!(user.status, StatusCode::UNAUTHORIZED);
     assert_eq!(write.status, StatusCode::UNAUTHORIZED);
-    for (accept, media) in served {
+    for (accept, media) in answered {
         let answer = get(&anonymous, REPO, accept).await;
         assert_eq!(answer.status, StatusCode::OK, "{accept}");
         assert_eq!(answer.header("x-github-media-type"), media, "{accept}");
@@ -466,7 +466,7 @@ async fn an_issue_locks_with_each_reason_and_unlocks_as_github_does() {
     let delivered: Vec<_> = received
         .iter()
         .filter(|d| d.header("x-github-event") == "issues")
-        .map(|d| d.json())
+        .map(hubdouble_testkit::Delivery::json)
         .filter(|p| p["action"] != "opened")
         .collect();
     let delivered_actions: Vec<_> = delivered
@@ -504,7 +504,7 @@ async fn a_pull_request_locks_through_its_issue_and_sends_pull_request() {
     let changes: Vec<_> = received
         .iter()
         .filter(|d| d.header("x-github-event") == "pull_request")
-        .map(|d| d.json())
+        .map(hubdouble_testkit::Delivery::json)
         .filter(|p| p["action"] != "opened")
         .map(|p| (p["action"].clone(), p["pull_request"]["locked"].clone()))
         .collect();
