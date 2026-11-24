@@ -13,6 +13,7 @@ use serde_json::json;
 
 use hubdouble_auth::{Target as AuthTarget, authorize};
 
+use crate::branch_rules::{Guard, Via, message};
 use crate::common::{decode_base64, signature_of};
 use crate::refs::{denied_workflow, workflow_refusal};
 use crate::{READ_CONTENTS, WRITE_CONTENTS};
@@ -444,6 +445,25 @@ fn unprocessable(message: impl Into<String>) -> GqlError {
     GqlError::new(ErrorType::Unprocessable, message)
 }
 
+fn refuse_violations(
+    m: &MutCtx<'_>,
+    repo: &Repo,
+    name: &str,
+    moves: (Option<ObjectId>, Option<ObjectId>),
+) -> Result<(), GqlError> {
+    let guard = Guard {
+        tx: &m.tx,
+        git: m.git,
+        actor: m.actor,
+        repo,
+    };
+    let violations = guard.check(name, moves, Via::Push)?;
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(unprocessable(message(&violations)))
+}
+
 fn loaded_repo(r: Resolved) -> Result<Arc<Repo>, GqlError> {
     match r {
         Resolved::Object { value, .. } => value
@@ -540,6 +560,7 @@ pub(crate) fn create_commit_on_branch(
             true,
         )
         .map_err(git_error)?;
+    refuse_violations(m, &repo, &full, (Some(expected), Some(id)))?;
     let ObjectData::Commit(commit) = m.git.object(&m.tx, repo.id, id).map_err(git_error)?.data
     else {
         return Err(GqlError::new(ErrorType::Internal, "the commit is missing"));
@@ -629,6 +650,7 @@ pub(crate) fn update_refs(m: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, G
                 return Err(unprocessable(workflow_refusal(&path)));
             }
         }
+        let previous = m.git.resolve_ref(&m.tx, repo.id, &u.name).ok();
         m.git
             .update_ref(
                 &mut m.tx,
@@ -640,6 +662,9 @@ pub(crate) fn update_refs(m: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, G
                 u.force.unwrap_or(false),
             )
             .map_err(git_error)?;
+        if previous != after {
+            refuse_violations(m, &repo, &u.name, (previous, after))?;
+        }
     }
     Ok(Resolved::Object {
         type_name: "UpdateRefsPayload",

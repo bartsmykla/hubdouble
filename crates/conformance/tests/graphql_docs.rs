@@ -158,6 +158,7 @@ async fn server() -> TestServer {
         .entry(repo)
         .entry(
             json!({"kind":"ruleset","repository":"acme/docs","name":"Require review",
+            "bypass_actors":[{"actor_type":"RepositoryRole","actor_id":5,"bypass_mode":"always"}],
             "conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},
             "rules":[{"type":"pull_request","parameters":{"required_approving_review_count":1}}]}),
         )

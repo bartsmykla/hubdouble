@@ -10,9 +10,7 @@ use hubdouble_store::{Issues, Labels, Repos};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{
-    CONTENTS_WRITE, READ, WRITE, change, events, merge_state, mergeability, render, state,
-};
+use crate::{CONTENTS_WRITE, READ, WRITE, change, events, mergeability, render, reviewing, state};
 
 macro_rules! fields {
     ($r:ident, $($field:literal => |$ctx:ident, $issue:ident, $p:ident| $value:expr),* $(,)?) => {
@@ -69,7 +67,7 @@ pub(crate) fn register(r: &mut Registry) {
             crate::mergeable_state(cx.tx, issue).to_ascii_uppercase()
         },
         "authorAssociation" => |cx, issue, _p| association(cx, issue)?,
-        "reviewDecision" => |cx, issue, p| merge_state::review_decision(cx.tx, issue, p),
+        "reviewDecision" => |cx, issue, p| reviewing::review_decision(cx.tx, issue, p),
         "url" => |cx, issue, _p| format!("{}/{}/pull/{}", cx.urls.web, render::full_name(cx.tx, issue.repo_id)?, issue.number),
     );
     r.object::<DraftPayload>("ReopenPullRequestPayload");

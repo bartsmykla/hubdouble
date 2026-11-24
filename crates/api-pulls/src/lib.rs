@@ -11,6 +11,7 @@ mod mergeability;
 mod read;
 mod render;
 mod reopen;
+mod reviewing;
 mod state;
 mod timeline;
 

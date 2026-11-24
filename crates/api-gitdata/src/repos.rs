@@ -12,6 +12,7 @@ use hubdouble_rest::{Ctx, Page, Reply};
 use hubdouble_store::{Accounts, Rulesets, Tx};
 use serde::{Deserialize, Serialize};
 
+use crate::branch_rules::{Guard, Via, refusal};
 use crate::common::{
     GitPerson, Links, ObjectLink, ParentLink, Verification, accepted_media, account_by_email,
     commit_at, object_node_id, sender, unprocessable, user_of,
@@ -23,6 +24,7 @@ const COMMIT_FILES: usize = 300;
 const MAX_COMMIT_FILES: usize = 3_000;
 const SHA_MEDIA: &str = "application/vnd.github.sha; charset=utf-8";
 const V3_SHA_MEDIA: &str = "application/vnd.github.v3.sha; charset=utf-8";
+const MERGE_DOCS: &str = "https://docs.github.com/rest/branches/branches#merge-a-branch";
 
 #[derive(Serialize)]
 struct CommitDetail {
@@ -412,15 +414,13 @@ pub(crate) fn merge(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?.id;
     let account = sender(ctx.actor())?.id;
     let (git, tx) = (ctx.git(), ctx.tx());
-    if git
-        .resolve_ref(tx, repo, &format!("refs/heads/{}", body.base))
-        .is_err()
-    {
+    let branch = format!("refs/heads/{}", body.base);
+    let Ok(tip) = git.resolve_ref(tx, repo, &branch) else {
         return Err(ApiError::new(404, "Base does not exist"));
-    }
-    if commit_at(git, tx, repo, &body.head).is_none() {
+    };
+    let Some((head, _)) = commit_at(git, tx, repo, &body.head) else {
         return Err(ApiError::new(404, "Head does not exist"));
-    }
+    };
     let message = body
         .commit_message
         .filter(|m| !m.is_empty())
@@ -432,6 +432,16 @@ pub(crate) fn merge(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         Err(GitError::Conflict { .. }) => return Err(ApiError::conflict("Merge Conflict")),
         Err(e) => return Err(e.into()),
     };
+    let guard = Guard {
+        tx: ctx.tx(),
+        git: ctx.git(),
+        actor: ctx.actor(),
+        repo: ctx.repo()?,
+    };
+    let violations = guard.check(&branch, (Some(tip), Some(made)), Via::Merge { head })?;
+    if !violations.is_empty() {
+        return Err(refusal(409, &violations, MERGE_DOCS));
+    }
     let view = View::of(ctx)?;
     let ObjectData::Commit(commit) = view.git.object(view.tx, repo, made)?.data else {
         return Err(ApiError::internal("a merge made no commit"));

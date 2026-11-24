@@ -1,4 +1,5 @@
 mod admin;
+mod bypass;
 mod check;
 mod contract;
 mod credential;
@@ -8,6 +9,7 @@ mod requirement;
 mod sso;
 
 pub use admin::authenticate_admin;
+pub use bypass::{Bypass, ruleset_bypass};
 pub use check::repo_role;
 pub use contract::*;
 pub use credential::{

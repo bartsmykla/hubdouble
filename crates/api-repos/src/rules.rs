@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use hubdouble_admin::{Registrar, SeedCtx};
-use hubdouble_auth::{Actor, repo_role};
+use hubdouble_auth::ruleset_bypass;
 use hubdouble_model::{
-    AccountKind, ApiError, BypassActor, Enforcement, MembershipState, OrgRole, Repo, RepoRole,
-    Rule, Ruleset, RulesetSource, RulesetTarget, node_id,
+    AccountKind, ApiError, BypassActor, Enforcement, Rule, Ruleset, RulesetSource, RulesetTarget,
+    node_id,
 };
 use hubdouble_render as render;
 use hubdouble_rest::{Ctx, Reply};
-use hubdouble_store::{Accounts, Memberships, Repos, Rulesets, Teams, Tx};
+use hubdouble_store::{Accounts, Repos, Rulesets, Tx};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -36,56 +36,6 @@ fn source_name(tx: &Tx, r: &Ruleset) -> Result<String, ApiError> {
     }
 }
 
-const ROLE_IDS: [(i64, RepoRole); 5] = [
-    (1, RepoRole::Read),
-    (2, RepoRole::Maintain),
-    (3, RepoRole::Triage),
-    (4, RepoRole::Write),
-    (5, RepoRole::Admin),
-];
-
-fn bypasses(tx: &Tx, actor: &Actor, repo: &Repo, b: &BypassActor) -> bool {
-    match (b.actor_type.as_str(), actor) {
-        ("Integration", Actor::Installation { app, .. } | Actor::App { app }) => {
-            b.actor_id.is_none_or(|id| id == app.id)
-        }
-        ("OrganizationAdmin", Actor::User { user, .. }) => tx
-            .table::<Memberships>()
-            .of(repo.owner_id, user.id)
-            .is_some_and(|m| m.role == OrgRole::Admin && m.state == MembershipState::Active),
-        ("RepositoryRole", Actor::User { user, .. }) => {
-            let wanted = ROLE_IDS
-                .iter()
-                .find(|(id, _)| Some(*id) == b.actor_id)
-                .map(|(_, role)| *role);
-            wanted.is_some_and(|w| repo_role(tx, user.id, repo) >= Some(w))
-        }
-        ("Team", Actor::User { user, .. }) => b
-            .actor_id
-            .and_then(|id| tx.table::<Teams>().get(id))
-            .is_some_and(|t| t.members.iter().any(|m| m.user_id == user.id)),
-        _ => false,
-    }
-}
-
-fn can_bypass(tx: &Tx, actor: &Actor, repo: &Repo, r: &Ruleset) -> &'static str {
-    let modes: Vec<&str> = r
-        .bypass_actors
-        .iter()
-        .filter(|b| bypasses(tx, actor, repo, b))
-        .map(|b| b.bypass_mode.as_str())
-        .collect();
-    if modes.contains(&"always") {
-        "always"
-    } else if modes.contains(&"exempt") {
-        "exempt"
-    } else if modes.contains(&"pull_request") {
-        "pull_requests_only"
-    } else {
-        "never"
-    }
-}
-
 fn get_ruleset(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?;
     let tx = ctx.tx();
@@ -100,7 +50,7 @@ fn get_ruleset(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         })
         .ok_or_else(ApiError::not_found)?;
     let mut out = render::Ruleset::new(ctx.urls(), r, &source_name(tx, r)?);
-    out.current_user_can_bypass = Some(can_bypass(tx, ctx.actor(), repo, r));
+    out.current_user_can_bypass = Some(ruleset_bypass(tx, ctx.actor(), repo, r).as_str());
     Reply::json(&out)
 }
 

@@ -10,6 +10,7 @@ use hubdouble_store::Tx;
 use serde::{Deserialize, Serialize};
 
 use crate::WRITE_WORKFLOWS;
+use crate::branch_rules::{Guard, Via, refusal};
 use crate::common::{Links, kind_name, parse_oid, ref_node_id, sender, unprocessable};
 
 const DOCS: &str = "https://docs.github.com/rest/git/refs";
@@ -57,6 +58,25 @@ pub(crate) fn writable_ref(name: &str, operation: &str) -> Result<(), ApiError> 
 
 fn full_ref(name: &str) -> String {
     format!("refs/{name}")
+}
+
+fn check_rules(
+    ctx: &Ctx<'_>,
+    name: &str,
+    moves: (Option<ObjectId>, Option<ObjectId>),
+    operation: &str,
+) -> Result<(), ApiError> {
+    let guard = Guard {
+        tx: ctx.tx(),
+        git: ctx.git(),
+        actor: ctx.actor(),
+        repo: ctx.repo()?,
+    };
+    let violations = guard.check(name, moves, Via::Push)?;
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(refusal(422, &violations, &format!("{DOCS}#{operation}")))
 }
 
 pub(crate) fn get_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
@@ -110,6 +130,7 @@ pub(crate) fn create_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     }
     let base = ctx.git().resolve_ref(ctx.tx(), repo, "HEAD").ok();
     check_workflows(ctx, base, sha, "create-a-reference")?;
+    check_rules(ctx, &body.name, (None, Some(sha)), "create-a-reference")?;
     let created = write_ref(ctx, body.name, None, sha, false)?;
     Reply::json(&created)?
         .status(StatusCode::CREATED)
@@ -131,7 +152,11 @@ pub(crate) fn update_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let body: UpdateRef = ctx.body()?;
     let sha = ref_target(ctx, &body.sha)?;
     check_workflows(ctx, Some(current), sha, "update-a-reference")?;
-    Reply::json(&write_ref(ctx, name, Some(current), sha, body.force)?)
+    let updated = write_ref(ctx, name.clone(), Some(current), sha, body.force)?;
+    if current != sha {
+        check_rules(ctx, &name, (Some(current), Some(sha)), "update-a-reference")?;
+    }
+    Reply::json(&updated)
 }
 
 fn ref_target(ctx: &Ctx<'_>, sha: &str) -> Result<ObjectId, ApiError> {
@@ -280,6 +305,7 @@ pub(crate) fn delete_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     writable_ref(&name, "delete-a-reference")?;
     let current =
         exact_ref(ctx, &name).ok_or_else(|| ApiError::unprocessable("Reference does not exist"))?;
+    check_rules(ctx, &name, (Some(current), None), "delete-a-reference")?;
     let repo = ctx.repo()?.id;
     let account = sender(ctx.actor())?.id;
     let (tx, git) = ctx.tx_mut_and_git()?;

@@ -1,3 +1,4 @@
+pub mod branch_rules;
 mod common;
 mod contents;
 mod data;

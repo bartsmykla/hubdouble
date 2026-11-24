@@ -220,6 +220,66 @@ async fn required_checks_block_the_merge_state_and_other_failing_checks_make_it_
     }
 }
 
+async fn merge(client: &GoGithub) -> StatusCode {
+    client
+        .call_json(Method::PUT, &format!("{PULL}/merge"), &json!({}))
+        .await
+        .status
+}
+
+#[tokio::test]
+async fn a_check_run_and_a_status_of_one_required_name_must_both_pass() {
+    // Given a pull request into a main that requires ci, and a passing ci check run on its head
+    let rules = ruleset(&json!([required_checks(
+        false,
+        &json!([{"context": "ci"}])
+    )]));
+    let server = server(&[rules, pull_request(false)]).await;
+    let client = alice(&server);
+    let sha = head(&client).await;
+    check_run(&server, &sha, "ci", Some("success")).await;
+    assert_state(&client, "clean", "run passes").await;
+    // When a ci commit status fails on the same head
+    status(&client, &sha, "ci", "failure").await;
+    // Then both must pass, as GitHub documents, so the merge is blocked and refused
+    assert_state(&client, "blocked", "status fails").await;
+    assert_eq!(merge(&client).await, StatusCode::METHOD_NOT_ALLOWED);
+    // When the status passes too
+    status(&client, &sha, "ci", "success").await;
+    // Then the merge goes through
+    assert_state(&client, "clean", "both pass").await;
+    assert_eq!(merge(&client).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_required_check_reads_the_test_merge_commit_before_the_head() {
+    // Given a pull request into a main that requires ci, and a passing ci status on its head
+    let rules = ruleset(&json!([required_checks(
+        false,
+        &json!([{"context": "ci"}])
+    )]));
+    let server = server(&[rules, pull_request(false)]).await;
+    let client = alice(&server);
+    let sha = head(&client).await;
+    status(&client, &sha, "ci", "success").await;
+    // Then without a result on the test merge commit, the head's result counts
+    assert_state(&client, "clean", "head only").await;
+    // When ci fails on the test merge commit
+    let test_merge = client.get(PULL).await.json()["merge_commit_sha"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    status(&client, &test_merge, "ci", "failure").await;
+    // Then the test merge commit's result counts, as GitHub documents
+    assert_state(&client, "blocked", "test merge fails").await;
+    assert_eq!(merge(&client).await, StatusCode::METHOD_NOT_ALLOWED);
+    // When ci passes on the test merge commit
+    status(&client, &test_merge, "ci", "success").await;
+    // Then the merge goes through
+    assert_state(&client, "clean", "test merge passes").await;
+    assert_eq!(merge(&client).await, StatusCode::OK);
+}
+
 #[tokio::test]
 async fn without_rules_a_failing_or_running_check_makes_the_merge_state_unstable() {
     for (conclusion, want) in [
