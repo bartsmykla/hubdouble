@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use http::{Method, StatusCode};
-use hubdouble_git::{EntryMode, FileChange, Signature};
+use hubdouble_git::{Commit, EntryMode, FileChange, Object, ObjectData, ObjectId, Signature};
 use hubdouble_model::Timestamp;
 use hubdouble_testkit::fixture::{self, ALICE_ID, ALICE_TOKEN, PUBLIC_REPO_ID};
 use hubdouble_testkit::{GoGithub, Graphql, TestServer};
@@ -67,6 +67,88 @@ fn push(server: &TestServer, branch: &str, path: &str, data: &'static str, messa
             )?)
         })
         .unwrap_or_else(|e| panic!("push {branch}: {e:?}"));
+}
+
+fn tree_of(server: &TestServer, tx: &hubdouble_store::Tx, commit: ObjectId) -> ObjectId {
+    match server
+        .server
+        .services()
+        .git
+        .object(tx, PUBLIC_REPO_ID, commit)
+    {
+        Ok(Object {
+            data: ObjectData::Commit(c),
+            ..
+        }) => c.tree,
+        other => panic!("commit {commit}: {other:?}"),
+    }
+}
+
+fn merge_main_into_feature(server: &TestServer, keep_feature_tree: bool) {
+    let services = server.server.services();
+    services
+        .store
+        .update(|tx| {
+            let git = &services.git;
+            let feature = git.resolve_ref(tx, PUBLIC_REPO_ID, "refs/heads/feature")?;
+            let main = git.resolve_ref(tx, PUBLIC_REPO_ID, "refs/heads/main")?;
+            let tree = if keep_feature_tree {
+                tree_of(server, tx, feature)
+            } else {
+                let merged = git
+                    .test_merge(tx, PUBLIC_REPO_ID, ALICE_ID, feature, main)?
+                    .unwrap_or_else(|| panic!("main merges into feature"));
+                tree_of(server, tx, merged)
+            };
+            let merge = git.write_commit(
+                tx,
+                PUBLIC_REPO_ID,
+                &Commit {
+                    tree,
+                    parents: vec![feature, main],
+                    author: bob(),
+                    committer: bob(),
+                    message: "Merge main into feature".into(),
+                    gpg_signature: None,
+                },
+            )?;
+            git.update_ref(
+                tx,
+                PUBLIC_REPO_ID,
+                ALICE_ID,
+                "refs/heads/feature",
+                Some(feature),
+                Some(merge),
+                false,
+            )?;
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("merge main into feature: {e:?}"));
+}
+
+fn push_empty(server: &TestServer, message: &str) {
+    let services = server.server.services();
+    let sig = bob();
+    services
+        .store
+        .update(|tx| {
+            let parent = services
+                .git
+                .resolve_ref(tx, PUBLIC_REPO_ID, "refs/heads/feature")?;
+            Ok(services.git.commit(
+                tx,
+                PUBLIC_REPO_ID,
+                ALICE_ID,
+                "feature",
+                Some(parent),
+                &[],
+                message,
+                &sig,
+                &sig,
+                false,
+            )?)
+        })
+        .unwrap_or_else(|e| panic!("push an empty commit: {e:?}"));
 }
 
 async fn json_of(client: &GoGithub, path: &str) -> Value {
@@ -295,6 +377,64 @@ async fn a_rebase_that_does_not_apply_is_refused_and_moves_nothing() {
             StatusCode::METHOD_NOT_ALLOWED
         )
     );
+    assert_eq!(
+        json_of(&alice, &format!("{REPO}/branches/main")).await["commit"]["sha"],
+        base
+    );
+    assert_eq!(json_of(&alice, PULL).await["state"], "open");
+}
+
+#[tokio::test]
+async fn a_rebase_leaves_out_merge_commits_and_commits_that_were_empty() {
+    // Given a head that merged the moved main back in, then got an empty commit and one more
+    let (server, alice) = diverged().await;
+    let base = json_of(&alice, &format!("{REPO}/branches/main")).await["commit"]["sha"].clone();
+    merge_main_into_feature(&server, false);
+    push_empty(&server, "Nothing to see");
+    push(&server, "feature", "src/last.txt", "last\n", "Add last");
+
+    // When alice rebases it
+    let (status, merged) = merge(&alice, &json!({"merge_method": "rebase"})).await;
+
+    // Then main gains a copy of each commit that changed something, as the merge docs say
+    assert_eq!(status, StatusCode::OK, "{merged}");
+    let compared = json_of(
+        &alice,
+        &format!(
+            "{REPO}/compare/{}...{}",
+            base.as_str().unwrap_or_default(),
+            merged["sha"].as_str().unwrap_or_default()
+        ),
+    )
+    .await;
+    let messages: Vec<&Value> = compared["commits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| &c["commit"]["message"])
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            &json!("add the feature"),
+            &json!("Add more\n\nIt needs more."),
+            &json!("Add last"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_rebase_that_gives_another_tree_than_the_merge_is_refused() {
+    // Given a head whose merge of main kept only the head's files
+    let (server, alice) = diverged().await;
+    let base = json_of(&alice, &format!("{REPO}/branches/main")).await["commit"]["sha"].clone();
+    merge_main_into_feature(&server, true);
+
+    // When alice rebases it
+    let (status, refused) = merge(&alice, &json!({"merge_method": "rebase"})).await;
+
+    // Then the unsafe rebase is refused, as the merge docs say, and main stays as it was
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{refused}");
     assert_eq!(
         json_of(&alice, &format!("{REPO}/branches/main")).await["commit"]["sha"],
         base

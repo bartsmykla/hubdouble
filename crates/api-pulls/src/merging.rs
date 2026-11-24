@@ -12,6 +12,10 @@ pub(crate) fn cannot_merge() -> ApiError {
     ApiError::new(405, "Pull request cannot be merged")
 }
 
+fn cannot_rebase() -> ApiError {
+    ApiError::new(405, "This branch can't be rebased")
+}
+
 pub(crate) fn squash(
     tx: &Tx,
     git: &Git,
@@ -45,10 +49,18 @@ pub(crate) fn rebase(
     (base, head): (ObjectId, ObjectId),
 ) -> Result<ObjectId, ApiError> {
     let commits = pull_commits(tx, git, repo, (base, head))?;
+    let test_merge = git
+        .test_merge(tx, repo, merger, base, head)?
+        .ok_or_else(cannot_merge)?;
     let committer = signature(tx, merger, git.now())?;
     let mut tip = base;
     let mut tree = state::commit_node(git, tx, repo, base)?.commit.tree;
     for (id, c) in commits.iter().filter(|(_, c)| c.parents.len() < 2) {
+        if let Some(parent) = c.parents.first()
+            && state::commit_node(git, tx, repo, *parent)?.commit.tree == c.tree
+        {
+            continue;
+        }
         let stand_in = git.write_commit(
             tx,
             repo,
@@ -63,7 +75,7 @@ pub(crate) fn rebase(
         )?;
         let picked = git
             .test_merge(tx, repo, merger, stand_in, *id)?
-            .ok_or_else(cannot_merge)?;
+            .ok_or_else(cannot_rebase)?;
         tree = state::commit_node(git, tx, repo, picked)?.commit.tree;
         tip = git.write_commit(
             tx,
@@ -77,6 +89,9 @@ pub(crate) fn rebase(
                 gpg_signature: None,
             },
         )?;
+    }
+    if state::commit_node(git, tx, repo, test_merge)?.commit.tree != tree {
+        return Err(cannot_rebase());
     }
     Ok(tip)
 }
