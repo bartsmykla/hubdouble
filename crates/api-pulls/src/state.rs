@@ -161,8 +161,9 @@ pub(crate) fn ref_updated(
         .filter(|issue| issue.state == IssueState::Open)
         .cloned()
         .collect();
+    let mut file = crate::merge_state::OwnersFile::default();
     for issue in affected {
-        update_refs(tx, git, change, name, &issue)?;
+        update_refs(tx, git, change, name, &issue, &mut file)?;
     }
     Ok(())
 }
@@ -258,6 +259,7 @@ fn update_refs(
     change: &RefChange,
     name: &str,
     issue: &Arc<Issue>,
+    file: &mut crate::merge_state::OwnersFile,
 ) -> Result<(), ApiError> {
     let mut issue = Issue::clone(issue);
     let repo_id = issue.repo_id;
@@ -306,7 +308,7 @@ fn update_refs(
         false
     };
     if !closes && !moved && p.mergeable == old_mergeable {
-        return crate::merge_state::record(tx, git, &issue);
+        return crate::merge_state::record_with(tx, git, &issue, file);
     }
     if closes {
         issue.state = IssueState::Closed;

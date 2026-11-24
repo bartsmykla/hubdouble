@@ -57,19 +57,57 @@ pub fn mergeable_state(tx: &Tx, issue: &Issue) -> &'static str {
     }
 }
 
+/// The CODEOWNERS file of the last base tip read, so that a push which moves the base of many
+/// pull requests reads it once.
+#[derive(Default)]
+pub(crate) struct OwnersFile {
+    at: Option<(i64, ObjectId)>,
+    text: Option<String>,
+}
+
+impl OwnersFile {
+    fn read(
+        &mut self,
+        tx: &Tx,
+        git: &Git,
+        repo: i64,
+        base: ObjectId,
+    ) -> Result<Option<&str>, ApiError> {
+        if self.at != Some((repo, base)) {
+            self.text = codeowners::file_at(tx, git, repo, base)?.map(|(_, text)| text);
+            self.at = Some((repo, base));
+        }
+        Ok(self.text.as_deref())
+    }
+}
+
 pub(crate) fn record(tx: &mut TxMut<'_>, git: &Git, issue: &Issue) -> Result<(), ApiError> {
+    record_with(tx, git, issue, &mut OwnersFile::default())
+}
+
+pub(crate) fn record_with(
+    tx: &mut TxMut<'_>,
+    git: &Git,
+    issue: &Issue,
+    file: &mut OwnersFile,
+) -> Result<(), ApiError> {
     let Some(p) = issue.pull.as_ref() else {
         return Ok(());
     };
     let old = tx.table::<MergeStates>().get(issue.id).cloned();
     let kept = old.as_ref().map_or_default(|f| f.owners.clone());
     let facts = match issue.state {
-        IssueState::Open => MergeFacts {
-            issue_id: issue.id,
-            behind: p.mergeable == Some(true) && behind(git, tx, issue.repo_id, p)?,
-            closed: None,
-            owners: owners(git, tx, issue.repo_id, p, kept)?,
-        },
+        IssueState::Open => {
+            let base = base_tip(git, tx, p)?;
+            let head: ObjectId = p.head.sha.parse()?;
+            MergeFacts {
+                issue_id: issue.id,
+                behind: p.mergeable == Some(true)
+                    && !git.is_ancestor(tx, issue.repo_id, base, head)?,
+                closed: None,
+                owners: owners(git, tx, issue.repo_id, (base, head), file, kept)?,
+            }
+        }
         IssueState::Closed => {
             let behind = old.as_ref().is_some_and(|f| f.behind);
             MergeFacts {
@@ -97,34 +135,34 @@ fn base_tip(git: &Git, tx: &Tx, p: &Pull) -> Result<ObjectId, ApiError> {
     }
 }
 
-fn behind(git: &Git, tx: &Tx, repo: i64, p: &Pull) -> Result<bool, ApiError> {
-    let base = base_tip(git, tx, p)?;
-    let head: ObjectId = p.head.sha.parse()?;
-    Ok(!git.is_ancestor(tx, repo, base, head)?)
-}
-
-fn owners(git: &Git, tx: &Tx, repo: i64, p: &Pull, kept: Owners) -> Result<Owners, ApiError> {
-    let at = (base_tip(git, tx, p)?, p.head.sha.parse()?);
+fn owners(
+    git: &Git,
+    tx: &Tx,
+    repo: i64,
+    at: (ObjectId, ObjectId),
+    file: &mut OwnersFile,
+    kept: Owners,
+) -> Result<Owners, ApiError> {
+    let Some(text) = file.read(tx, git, repo, at.0)? else {
+        return Ok(Owners::default());
+    };
     if kept.at == Some(at) {
         return Ok(kept);
     }
+    let rules: Vec<_> = codeowners::lines(text).collect();
+    let paths = match git.changed_paths(tx, repo, at.0, at.1) {
+        Ok(paths) => paths,
+        Err(GitError::NotFound) => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
     let mut groups: Vec<Vec<String>> = Vec::new();
-    if let Some((_, text)) = codeowners::file_at(tx, git, repo, at.0)? {
-        let rules: Vec<_> = codeowners::lines(&text).collect();
-        let paths = match git.changed_paths(tx, repo, at.0, at.1) {
-            Ok(paths) => paths,
-            Err(GitError::NotFound) => Vec::new(),
-            Err(e) => return Err(e.into()),
+    for path in paths {
+        let Some(owners) = codeowners::owners_of(&rules, &path).filter(|o| !o.is_empty()) else {
+            continue;
         };
-        for path in paths {
-            let Some(owners) = codeowners::owners_of(&rules, &path).filter(|o| !o.is_empty())
-            else {
-                continue;
-            };
-            let group: Vec<String> = owners.iter().map(|(_, o)| (*o).to_owned()).collect();
-            if !groups.contains(&group) {
-                groups.push(group);
-            }
+        let group: Vec<String> = owners.iter().map(|(_, o)| (*o).to_owned()).collect();
+        if !groups.contains(&group) {
+            groups.push(group);
         }
     }
     Ok(Owners {
