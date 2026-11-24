@@ -479,6 +479,45 @@ async fn an_issue_locks_with_each_reason_and_unlocks_as_github_does() {
 }
 
 #[tokio::test]
+async fn a_pull_request_locks_through_its_issue_and_sends_pull_request() {
+    // Given pull request 1 of acme/public
+    let pull = json!({"kind": "pull_request", "repository": "acme/public", "user": "alice",
+        "title": "feature", "head": "feature", "base": "main"});
+    let server = whole_server(&[pull]).await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let lock = format!("{REPO}/issues/1/lock");
+
+    // When alice locks it as resolved, reads it, and unlocks it
+    let locked = alice
+        .call_json(Method::PUT, &lock, &json!({"lock_reason": "resolved"}))
+        .await;
+    let read = alice.get(&format!("{REPO}/pulls/1")).await.json();
+    let unlocked = alice.call(Method::DELETE, &lock).await;
+    server.admin(Method::POST, "hooks/drain", None).await;
+    let received = server.receiver.received().await;
+
+    // Then the pull request shows the lock, and pull_request carries each change
+    assert_eq!(locked.status, StatusCode::NO_CONTENT);
+    assert_eq!(unlocked.status, StatusCode::NO_CONTENT);
+    assert_eq!(read["locked"], true);
+    assert_eq!(read["active_lock_reason"], "resolved");
+    let changes: Vec<_> = received
+        .iter()
+        .filter(|d| d.header("x-github-event") == "pull_request")
+        .map(|d| d.json())
+        .filter(|p| p["action"] != "opened")
+        .map(|p| (p["action"].clone(), p["pull_request"]["locked"].clone()))
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            (json!("locked"), json!(true)),
+            (json!("unlocked"), json!(false))
+        ]
+    );
+}
+
+#[tokio::test]
 async fn a_file_comment_answers_line_and_position_1_and_an_empty_hunk_in_rest() {
     // Given a pull request from feature to main
     let pull = json!({"kind": "pull_request", "repository": "acme/public", "user": "alice",
