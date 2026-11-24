@@ -9,18 +9,25 @@ use hubdouble_rest::{Ctx, Registry, Reply};
 use hubdouble_store::{Accounts, Memberships, Teams, Tx};
 
 use crate::hierarchy::{TeamViewer, pushes};
-use crate::{MEMBERS, METADATA, PublicMemberships, TEAM_REPOSITORY, hierarchy, view};
+use crate::{
+    COLLABORATOR_PERMISSION, ORG_MEMBER, PublicMemberships, TEAM_MEMBERSHIP, TEAM_REPOSITORY,
+    TEAMS, hierarchy, view,
+};
 
 pub fn register(rest: &mut Registry) {
-    rest.handle("orgs/check-membership-for-user", MEMBERS, check_member);
+    rest.handle("orgs/check-membership-for-user", ORG_MEMBER, check_member);
     rest.handle(
         "orgs/check-public-membership-for-user",
         Requirement::public(),
         check_public_member,
     );
-    rest.handle("teams/list", MEMBERS, list_teams);
-    rest.handle("teams/get-by-name", MEMBERS, get_team);
-    rest.handle("teams/get-membership-for-user-in-org", MEMBERS, membership);
+    rest.handle("teams/list", TEAMS, list_teams);
+    rest.handle("teams/get-by-name", TEAMS, get_team);
+    rest.handle(
+        "teams/get-membership-for-user-in-org",
+        TEAM_MEMBERSHIP,
+        membership,
+    );
     rest.handle(
         "teams/check-permissions-for-repo-in-org",
         TEAM_REPOSITORY,
@@ -28,7 +35,7 @@ pub fn register(rest: &mut Registry) {
     );
     rest.handle(
         "repos/get-collaborator-permission-level",
-        METADATA,
+        COLLABORATOR_PERMISSION,
         permission,
     );
     rest.extra(
@@ -160,7 +167,7 @@ fn membership(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 fn team_repo(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     signed_in(ctx)?;
     let org = organization(ctx.tx(), ctx.param("org")?)?;
-    auth::authorize(ctx.tx(), ctx.actor(), &MEMBERS, Target::Org(org))?;
+    auth::authorize(ctx.tx(), ctx.actor(), &TEAMS, Target::Org(org))?;
     let t = team(ctx, org)?;
     let repo = ctx.repo()?;
     let role = hierarchy::repo_role(ctx.tx(), t, repo.id).ok_or_else(ApiError::not_found)?;

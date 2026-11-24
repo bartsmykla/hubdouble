@@ -31,6 +31,26 @@ const METADATA: Requirement = Requirement {
     scopes: &["repo", "public_repo"],
 };
 
+const ORG_MEMBER: Requirement = Requirement {
+    scopes: &["read:org", "repo", "user"],
+    ..MEMBERS
+};
+
+const TEAMS: Requirement = Requirement {
+    scopes: &["admin:org", "read:org", "repo", "user", "write:org"],
+    ..MEMBERS
+};
+
+const TEAM_MEMBERSHIP: Requirement = Requirement {
+    scopes: &["admin:org", "read:org", "repo", "write:org"],
+    ..MEMBERS
+};
+
+const COLLABORATOR_PERMISSION: Requirement = Requirement {
+    scopes: &[],
+    ..METADATA
+};
+
 const TEAM_REPOSITORY: Requirement = Requirement {
     any_of: MEMBERS.any_of,
     scopes: &[],

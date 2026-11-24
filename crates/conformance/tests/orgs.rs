@@ -359,7 +359,7 @@ async fn repository_checks_return_team_permissions_and_legacy_collaborator_roles
     assert_status(&insufficient, TEAM_REPO, 403).await;
     let org_only = GoGithub::enterprise(&server).with_token(ORG_ONLY);
     assert_status(&org_only, TEAM_REPO, 204).await;
-    assert_status(&org_only, BOB_PERMISSION, 403).await;
+    assert_status(&org_only, BOB_PERMISSION, 200).await;
 }
 
 #[tokio::test]

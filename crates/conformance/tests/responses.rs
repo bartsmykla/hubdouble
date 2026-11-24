@@ -263,6 +263,70 @@ async fn a_classic_token_without_scopes_reads_public_repositories_only() {
     }
 }
 
+#[tokio::test]
+async fn team_and_collaborator_reads_take_the_scopes_github_accepts() {
+    // Given a team of acme, and alice's classic tokens with no scope and with each single scope
+    let team = json!({"kind": "team", "org": "acme", "name": "Child",
+        "members": [{"login": "bob"}],
+        "repositories": [{"repository": "acme/public", "permission": "read"}]});
+    let mut builder = TestServer::builder().frame(hubdouble_api::register_all);
+    for mut entry in fixture::seed().into_iter().chain([team]) {
+        if entry["kind"] == "user" && entry["login"] == ALICE {
+            entry["tokens"] = json!([
+                {"token": ALICE_TOKEN},
+                {"token": NO_SCOPE_PAT, "scopes": []},
+                {"token": "ghp_0000000000000000000000000000000000c2", "scopes": ["user"]},
+                {"token": "ghp_0000000000000000000000000000000000c3", "scopes": ["repo"]},
+                {"token": "ghp_0000000000000000000000000000000000c4", "scopes": ["read:user"]},
+            ]);
+        }
+        builder = builder.entry(entry);
+    }
+    let server = builder.start().await;
+    let client = |token: &str| GoGithub::new(&server).with_token(token);
+    let reads = [
+        (
+            "orgs/acme/teams",
+            "admin:org, read:org, repo, user, write:org",
+        ),
+        (
+            "orgs/acme/teams/child",
+            "admin:org, read:org, repo, user, write:org",
+        ),
+        (
+            "orgs/acme/teams/child/repos/acme/public",
+            "admin:org, read:org, repo, user, write:org",
+        ),
+        (
+            "orgs/acme/teams/child/memberships/bob",
+            "admin:org, read:org, repo, write:org",
+        ),
+        ("orgs/acme/members/bob", "read:org, repo, user"),
+    ];
+
+    for (path, accepted) in reads {
+        // When the token without scopes and each token with one accepted scope read it
+        let bare = client(NO_SCOPE_PAT).get(path).await;
+
+        // Then only the scopes in GitHub's X-Accepted-OAuth-Scopes header let it through
+        assert_eq!(bare.status, StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(bare.header("x-accepted-oauth-scopes"), accepted, "{path}");
+        for (token, scope) in [
+            ("ghp_0000000000000000000000000000000000c2", "user"),
+            ("ghp_0000000000000000000000000000000000c3", "repo"),
+            ("ghp_0000000000000000000000000000000000c4", "read:user"),
+        ] {
+            let answer = client(token).get(path).await;
+            let accepts = accepted.split(", ").any(|s| s == scope);
+            assert_eq!(answer.status.is_success(), accepts, "{path} {scope}");
+        }
+    }
+    let permission = client(NO_SCOPE_PAT)
+        .get("repos/acme/public/collaborators/bob/permission")
+        .await;
+    assert_eq!(permission.status, StatusCode::OK);
+}
+
 #[test]
 fn every_fallback_leaf_of_every_registered_type_is_checked_against_its_type() {
     // Given the registry of the whole server
