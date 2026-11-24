@@ -172,3 +172,53 @@ async fn status_contexts_match_without_case_and_keep_their_spelling() {
     assert_eq!(combined["statuses"][0]["context"], "ci/build");
     assert_eq!(merged.status, StatusCode::CREATED, "{}", merged.json());
 }
+
+const NO_SCOPE_PAT: &str = "ghp_0000000000000000000000000000000000c0";
+const NO_SCOPE_OAUTH: &str = "gho_0000000000000000000000000000000000c1";
+
+#[tokio::test]
+async fn a_classic_token_without_scopes_reads_public_repositories_only() {
+    // Given carol's classic personal and OAuth App tokens without scopes
+    let pull = json!({"kind": "pull_request", "repository": "acme/public", "user": "alice",
+        "title": "feature", "head": "feature", "base": "main"});
+    let tokens: Vec<Value> = [NO_SCOPE_PAT, NO_SCOPE_OAUTH]
+        .iter()
+        .map(|t| json!({"kind": "token", "user": "carol", "token": t, "scopes": []}))
+        .collect();
+    let server = whole_server(&[vec![pull], tokens].concat()).await;
+    let anonymous = GoGithub::new(&server);
+
+    for token in [NO_SCOPE_PAT, NO_SCOPE_OAUTH] {
+        let carol = GoGithub::new(&server).with_token(token);
+
+        // When the token reads public reviews and runs, a private repository, and writes
+        let reads = [
+            "repos/acme/public/pulls/1/reviews",
+            "repos/acme/public/actions/runs",
+        ];
+        let private = carol.get("repos/acme/private/actions/runs").await;
+        let write = carol
+            .post(
+                "repos/acme/public/issues/1/comments",
+                &json!({"body": "hi"}),
+            )
+            .await;
+
+        // Then the public reads answer as for anyone, as GitHub's scope docs say
+        for path in reads {
+            assert_eq!(anonymous.get(path).await.status, StatusCode::OK, "{path}");
+            assert_eq!(
+                carol.get(path).await.status,
+                StatusCode::OK,
+                "{token} {path}"
+            );
+        }
+        assert_eq!(private.status, StatusCode::NOT_FOUND, "{token}");
+        assert_eq!(write.status, StatusCode::FORBIDDEN, "{token}");
+        assert_eq!(
+            write.header("x-accepted-oauth-scopes"),
+            "repo, public_repo",
+            "{token}"
+        );
+    }
+}

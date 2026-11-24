@@ -15,7 +15,10 @@ use hubdouble_store::TxMut;
 use serde::Serialize;
 use serde::ser::SerializeMap as _;
 
-const ACTIONS_READ: Requirement = repository(&[Grant::read("actions")]);
+const ACTIONS_READ: Requirement = Requirement {
+    scopes: &[],
+    ..repository(&[Grant::read("actions")])
+};
 const ACTIONS_WRITE: Requirement = repository(&[Grant::write("actions")]);
 
 const fn repository(any_of: &'static [Grant]) -> Requirement {
