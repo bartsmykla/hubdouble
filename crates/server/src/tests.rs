@@ -299,12 +299,12 @@ async fn graphql_paths_reach_the_graphql_endpoint() {
             b"{not json",
         )
         .await;
-        assert_eq!(a.status, StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(a.status, StatusCode::FORBIDDEN, "{path}");
         assert_eq!(a.header("x-ratelimit-resource"), "graphql", "{path}");
     }
     assert_eq!(
         get(s.addr, "/graphql", &[]).await.status,
-        StatusCode::NOT_FOUND
+        StatusCode::FORBIDDEN
     );
 }
 

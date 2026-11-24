@@ -267,7 +267,12 @@ impl Inner {
         };
         who.login = actor.login().map(str::to_owned);
         who.scopes = actor.oauth_scopes().map(|s| s.join(", "));
-        if let Some(unsupported) = unsupported_accept(r.headers) {
+        let served: &[&str] = if r.entry.operation_id == "repos/get-release-asset" {
+            &["application/octet-stream"]
+        } else {
+            &[]
+        };
+        if let Some(unsupported) = unsupported_accept(r.headers, served) {
             if matches!(actor, Actor::Anonymous) && !r.entry.authenticates {
                 let requirement = &r.entry.requirement;
                 if matches!(
@@ -354,7 +359,7 @@ impl Inner {
                         .with_docs(GRAPHQL_AUTH_DOCS),
                 );
             }
-            if let Some(unsupported) = unsupported_accept(&parts.headers) {
+            if let Some(unsupported) = unsupported_accept(&parts.headers, &[]) {
                 return Err(unsupported);
             }
             let response = hubdouble_gql::execute(
@@ -814,9 +819,13 @@ fn ranges(accept: &str) -> impl Iterator<Item = Range<'_>> + Clone {
         })
 }
 
-fn unsupported_accept(headers: &HeaderMap) -> Option<ApiError> {
+fn unsupported_accept(headers: &HeaderMap, served: &[&str]) -> Option<ApiError> {
     let accept = headers.get(header::ACCEPT)?.to_str().ok()?;
-    if ranges(accept).next().is_none() || ranges(accept).any(|r| r.kind() != Kind::Unsupported) {
+    if ranges(accept).next().is_none()
+        || ranges(accept).any(|r| {
+            r.kind() != Kind::Unsupported || served.iter().any(|m| r.media.eq_ignore_ascii_case(m))
+        })
+    {
         return None;
     }
     let mut sorted: Vec<Range<'_>> = ranges(accept).collect();

@@ -678,14 +678,13 @@ async fn an_unknown_media_type_still_answers_json_and_names_the_type_asked_for()
     let custom = alice.call_headers(Method::GET, LABELS, custom).await;
     let html = alice.call_headers(Method::GET, LABELS, html).await;
 
-    // Then GitHub serves its JSON and reports the media type it chose
+    // Then GitHub serves its JSON for a vendor type it does not know, and refuses HTML
     assert_eq!(custom.status, StatusCode::OK);
     assert_eq!(len(&custom), 1);
     assert_eq!(
         custom.header("x-github-media-type"),
         "github.v3; param=nonsense; format=json"
     );
-    assert_eq!(html.status, StatusCode::OK);
-    assert_eq!(len(&html), 1);
-    assert_eq!(html.header("x-github-media-type"), "github.v3; format=json");
+    assert_eq!(html.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(html.header("x-github-media-type"), "unknown");
 }
