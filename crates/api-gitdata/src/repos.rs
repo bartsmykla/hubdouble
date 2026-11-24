@@ -8,7 +8,7 @@ use hubdouble_git::{
 };
 use hubdouble_model::{ApiError, Repo, Timestamp};
 use hubdouble_render::{SimpleUser, Urls};
-use hubdouble_rest::{Ctx, Page, Reply};
+use hubdouble_rest::{Ctx, JSON, Page, Reply};
 use hubdouble_store::{Accounts, Tx};
 use serde::{Deserialize, Serialize};
 
@@ -348,15 +348,12 @@ pub(crate) fn list_commits(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         ctx.query()
             .get(name)
             .filter(|t| !t.is_empty())
-            .map(|t| {
-                Timestamp::parse_commit_date(t, ctx.now()).map_err(|_| {
-                    ApiError::internal("Server Error")
-                        .with_docs("https://docs.github.com/rest/commits/commits#list-commits")
-                })
-            })
+            .map(|t| Timestamp::parse_commit_date(t, ctx.now()))
             .transpose()
     };
-    let (since, until) = (bound("since")?, bound("until")?);
+    let (Ok(since), Ok(until)) = (bound("since"), bound("until")) else {
+        return Ok(Reply::raw(JSON, Vec::new()).status(StatusCode::INTERNAL_SERVER_ERROR));
+    };
     log.retain(|(_, c)| {
         since.is_none_or(|s| c.committer.time >= s) && until.is_none_or(|u| c.committer.time <= u)
     });

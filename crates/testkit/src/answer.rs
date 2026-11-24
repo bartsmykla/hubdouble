@@ -20,6 +20,31 @@ const PROSE_REDIRECTS: [u16; 3] = [301, 302, 307];
 const RAW_BY_CONTENT: [(&str, [&str; 2]); 1] =
     [("git/get-blob", ["text/plain", "application/octet-stream"])];
 
+/// An answer where live GitHub differs from its docs, and live GitHub wins (plan section 4.7).
+struct LiveEvidence {
+    operation_id: &'static str,
+    status: u16,
+    /// The read that shows the live answer, and the day it ran.
+    command: &'static str,
+    date: &'static str,
+}
+
+/// The only answers whose documented error body may be empty: each key accepts an empty body
+/// and nothing else.
+const EMPTY_BODY_ON_LIVE_GITHUB: [LiveEvidence; 1] = [LiveEvidence {
+    operation_id: "repos/list-commits",
+    status: 500,
+    command: "gh api -i 'repos/cli/cli/commits?since=garbage'",
+    date: "2026-11-24",
+}];
+
+fn live_empty_body(id: &str, status: u16) -> Option<&'static LiveEvidence> {
+    EMPTY_BODY_ON_LIVE_GITHUB
+        .iter()
+        .find(|e| e.operation_id == id && e.status == status)
+        .filter(|e| !e.command.is_empty() && !e.date.is_empty())
+}
+
 const EVERY_ANSWER: [&str; 7] = [
     "x-github-request-id",
     "x-github-media-type",
@@ -424,6 +449,9 @@ fn documented_answer(x: &Exchange<'_>, id: &str, response: &Value) -> Vec<String
     }
     let answered = header(x.headers, "content-type");
     let media = media_type(answered);
+    if x.body.is_empty() && is_json(media) && live_empty_body(id, x.status).is_some() {
+        return errors;
+    }
     let asked = header(x.request_headers, "accept");
     let accepts = |variant| {
         asked
@@ -845,6 +873,27 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn only_a_live_evidence_key_takes_an_empty_error_body() {
+        let h = github_headers();
+        let yes = |_: &str| true;
+        let empty_500 = |path| check(&exchange("GET", path, 500, &h, b""), &yes);
+        assert!(empty_500("/repos/o/r/commits").is_ok());
+        assert!(empty_500("/repos/o/r/commits/main").is_err());
+        assert!(empty_500("/repos/o/r/pulls/1").is_err());
+        assert!(check(&exchange("GET", "/repos/o/r/commits", 404, &h, b""), &yes).is_err());
+        assert!(
+            check(
+                &exchange("GET", "/repos/o/r/commits", 500, &h, b"oops"),
+                &yes
+            )
+            .is_err()
+        );
+        for e in EMPTY_BODY_ON_LIVE_GITHUB {
+            assert!(e.command.starts_with("gh api") && !e.date.is_empty());
+        }
     }
 
     #[test]

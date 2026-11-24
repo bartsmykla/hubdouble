@@ -252,8 +252,10 @@ async fn the_commit_list_filters_by_committer_date_and_by_author_or_committer() 
             .get(&format!("repos/acme/public/commits?sha=dated&{query}"))
             .await;
 
-        // Then GitHub answers 500, with the error body of the docs (docs/fidelity.md)
+        // Then GitHub answers 500 with an empty JSON body, as live cli/cli since=garbage did
+        let shape = (answer.body.len(), answer.header("content-type"));
         assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR, "{query}");
+        assert_eq!(shape, (0, "application/json; charset=utf-8"), "{query}");
     }
 }
 
