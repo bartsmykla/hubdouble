@@ -173,6 +173,46 @@ async fn status_contexts_match_without_case_and_keep_their_spelling() {
     assert_eq!(merged.status, StatusCode::CREATED, "{}", merged.json());
 }
 
+#[tokio::test]
+async fn a_sha_and_context_take_at_most_1000_statuses() {
+    // Given 999 statuses of the context ci on the tip of main
+    let seeded: Vec<Value> = (0..999)
+        .map(|_| {
+            json!({"kind": "status", "repository": "acme/public", "sha": "main",
+                "creator": "alice", "state": "pending", "context": "ci"})
+        })
+        .collect();
+    let server = whole_server(&seeded).await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let head = tip(&alice, "main").await;
+    let path = format!("{REPO}/statuses/{head}");
+
+    // When the client writes the 1000th, a 1001st spelled CI, and one of another context
+    let last = alice
+        .post(&path, &json!({"state": "success", "context": "ci"}))
+        .await;
+    let past = alice
+        .post(&path, &json!({"state": "failure", "context": "CI"}))
+        .await;
+    let other = alice
+        .post(&path, &json!({"state": "success", "context": "lint"}))
+        .await;
+    let combined = alice.get(&format!("{REPO}/commits/{head}/status")).await;
+
+    // Then the 1001st is GitHub's validation error and does not change the combined state
+    assert_eq!(last.status, StatusCode::CREATED);
+    assert_eq!(past.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        past.json(),
+        json!({"message": "Validation Failed",
+            "errors": "Validation failed: This SHA and context has reached the maximum number of statuses.",
+            "documentation_url": "https://docs.github.com/rest/commits/statuses#create-a-commit-status",
+            "status": "422"})
+    );
+    assert_eq!(other.status, StatusCode::CREATED);
+    assert_eq!(combined.json()["state"], "success");
+}
+
 const NO_SCOPE_PAT: &str = "ghp_0000000000000000000000000000000000c0";
 const NO_SCOPE_OAUTH: &str = "gho_0000000000000000000000000000000000c1";
 

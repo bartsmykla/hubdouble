@@ -13,6 +13,7 @@ use crate::view::{self, View, latest_statuses, no_commit, statuses_on};
 use crate::{events, window};
 
 const MAX_DESCRIPTION: usize = 140;
+const MAX_PER_CONTEXT: usize = 1000;
 const CREATE_DOCS: &str = "https://docs.github.com/rest/commits/statuses#create-a-commit-status";
 
 fn status_error(field: &str, message: &str) -> ApiError {
@@ -85,6 +86,25 @@ pub fn insert(
     let sha = view::commit(tx, git, repo.id, reference)
         .ok_or_else(|| no_commit(reference))?
         .to_string();
+    let key = context.to_lowercase();
+    let same_context = tx
+        .table::<Statuses>()
+        .in_repo(repo.id)
+        .filter(|s| {
+            s.sha == sha
+                && s.context
+                    .chars()
+                    .flat_map(char::to_lowercase)
+                    .eq(key.chars())
+        })
+        .count();
+    if same_context >= MAX_PER_CONTEXT {
+        return Err(ApiError::unprocessable("Validation Failed")
+            .with_errors_text(
+                "Validation failed: This SHA and context has reached the maximum number of statuses.",
+            )
+            .with_docs(CREATE_DOCS));
+    }
     let id = id.unwrap_or_else(|| tx.next_id());
     let status = tx.table_mut::<Statuses>().insert(Status {
         id,
