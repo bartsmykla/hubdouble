@@ -22,6 +22,7 @@ pub(crate) struct MergeJob {
     issue_id: i64,
     reads: u32,
     sender: i64,
+    generation: u64,
 }
 
 impl Entity for MergeJob {
@@ -56,8 +57,15 @@ pub(crate) fn register(r: &mut Registrar<'_>) {
     );
 }
 
+fn job(tx: &Tx, issue_id: i64) -> Option<&MergeJob> {
+    tx.table::<MergeJobs>()
+        .get(issue_id)
+        .map(AsRef::as_ref)
+        .filter(|job| job.reads > 0)
+}
+
 pub(crate) fn pending(tx: &Tx, issue_id: i64) -> bool {
-    tx.table::<MergeJobs>().get(issue_id).is_some()
+    job(tx, issue_id).is_some()
 }
 
 pub(crate) fn start(
@@ -70,31 +78,37 @@ pub(crate) fn start(
         .table::<MergeReads>()
         .get(issue.repo_id)
         .map_or(DEFAULT_READS, |r| r.reads);
-    if reads == 0 {
-        return settle(tx, git, issue.id, false, sender);
-    }
+    let generation = tx
+        .table::<MergeJobs>()
+        .get(issue.id)
+        .map_or(0, |job| job.generation + 1);
     tx.table_mut::<MergeJobs>().replace(MergeJob {
         issue_id: issue.id,
         reads,
         sender,
+        generation,
     })?;
+    if reads == 0 {
+        return settle(tx, git, issue.id, false, sender);
+    }
     Ok(())
 }
 
 pub(crate) fn read(jobs: &ReadJobs, tx: &Tx, issue: &Issue) {
-    if pending(tx, issue.id) {
-        jobs.ask(counted, issue.id);
+    if let Some(job) = job(tx, issue.id) {
+        jobs.ask(counted, issue.id, job.generation);
     }
 }
 
-fn counted(tx: &mut TxMut<'_>, git: &Git, issue_id: i64) -> Result<(), ApiError> {
-    let Some(job) = tx.table::<MergeJobs>().get(issue_id).cloned() else {
+fn counted(tx: &mut TxMut<'_>, git: &Git, issue_id: i64, generation: u64) -> Result<(), ApiError> {
+    let Some(job) = job(tx, issue_id).filter(|job| job.generation == generation) else {
         return Ok(());
     };
+    let job = job.clone();
     if job.reads > 1 {
         tx.table_mut::<MergeJobs>().replace(MergeJob {
             reads: job.reads - 1,
-            ..*job
+            ..job
         })?;
         return Ok(());
     }
@@ -108,7 +122,10 @@ pub(crate) fn settle(
     live_base: bool,
     sender: i64,
 ) -> Result<(), ApiError> {
-    tx.table_mut::<MergeJobs>().remove(issue_id);
+    if let Some(job) = job(tx, issue_id).cloned() {
+        tx.table_mut::<MergeJobs>()
+            .replace(MergeJob { reads: 0, ..job })?;
+    }
     let Some(issue) = tx.table::<Issues>().get(issue_id) else {
         return Ok(());
     };
@@ -187,10 +204,7 @@ fn settle_named(
         .ok_or_else(ApiError::not_found)?;
     let issue = state::numbered(tx, repo, number)?;
     let id = issue.id;
-    let sender = tx
-        .table::<MergeJobs>()
-        .get(id)
-        .map_or(issue.user_id, |job| job.sender);
+    let sender = job(tx, id).map_or(issue.user_id, |job| job.sender);
     settle(tx, git, id, !pending(tx, id), sender)?;
     let issue = tx
         .table::<Issues>()

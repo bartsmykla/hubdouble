@@ -34,13 +34,13 @@ fn record(tx: &mut TxMut<'_>, _: &Git, change: &RefChange) -> Result<(), ApiErro
 }
 
 #[derive(Clone, Default)]
-struct Ran(Vec<i64>);
+struct Ran(Vec<(i64, u64)>);
 
 impl Table for Ran {}
 
 #[expect(clippy::unnecessary_wraps, reason = "a read job returns a Result")]
-fn mark(tx: &mut TxMut<'_>, _: &Git, id: i64) -> Result<(), ApiError> {
-    tx.table_mut::<Ran>().get_mut().0.push(id);
+fn mark(tx: &mut TxMut<'_>, _: &Git, id: i64, generation: u64) -> Result<(), ApiError> {
+    tx.table_mut::<Ran>().get_mut().0.push((id, generation));
     Ok(())
 }
 
@@ -1351,18 +1351,19 @@ fn read_jobs_run_once_per_subject_and_only_for_the_request_that_asked() {
     // Given two requests whose reads ask for jobs, and a third that fails after its read asked
     let fx = fixture();
     let first = ReadJobs::default();
-    first.ask(mark, 7);
-    first.ask(mark, 7);
-    first.ask(mark, 3);
+    first.ask(mark, 7, 1);
+    first.ask(mark, 7, 1);
+    first.ask(mark, 7, 2);
+    first.ask(mark, 3, 1);
     let second = ReadJobs::default();
-    second.ask(mark, 7);
+    second.ask(mark, 7, 1);
     let failed = ReadJobs::default();
-    failed.ask(mark, 9);
+    failed.ask(mark, 9, 1);
     drop(failed);
     // When the two requests run their jobs, the second first
     second.run(&fx.git, &fx.store).unwrap();
     first.run(&fx.git, &fx.store).unwrap();
-    // Then each request ran its own jobs once per subject, and the failed request's job never ran
+    // Then each request ran its own jobs once per subject and generation, with the generation its read saw, and the failed request's job never ran
     let ran = fx.store.view(|tx| Ok(tx.table::<Ran>().0.clone()));
-    assert_eq!(ran, Ok(vec![7, 3, 7]));
+    assert_eq!(ran, Ok(vec![(7, 1), (3, 1), (7, 1), (7, 2)]));
 }

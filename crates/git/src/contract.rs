@@ -407,22 +407,24 @@ pub struct SignatureNode {
 
 pub type RefSubscriber = fn(&mut TxMut<'_>, &Git, &RefChange) -> Result<(), ApiError>;
 
-/// Work a read asks for on one subject ID, as a GitHub read starts a background job.
-pub type ReadJob = fn(&mut TxMut<'_>, &Git, i64) -> Result<(), ApiError>;
+/// Work a read asks for on one subject ID and the generation of the subject that the read saw,
+/// as a GitHub read starts a background job. The store lock is released between the read and
+/// the job, so the job checks that the generation is still the subject's.
+pub type ReadJob = fn(&mut TxMut<'_>, &Git, i64, u64) -> Result<(), ApiError>;
 
 /// The jobs that the reads of one request ask for. The request runs them with
 /// [`ReadJobs::run`] after its reads and before it answers. A request that fails drops them
 /// without a run.
 #[derive(Default)]
 pub struct ReadJobs {
-    jobs: Mutex<Vec<(ReadJob, i64)>>,
+    jobs: Mutex<Vec<(ReadJob, i64, u64)>>,
 }
 
 impl ReadJobs {
-    /// Asks for `job` on `id`. A run takes a job once per subject, however many reads of the
-    /// request asked for it.
-    pub fn ask(&self, job: ReadJob, id: i64) {
-        self.jobs.lock().push((job, id));
+    /// Asks for `job` on `id` as it was at `generation`. A run takes a job once per subject and
+    /// generation, however many reads of the request asked for it.
+    pub fn ask(&self, job: ReadJob, id: i64, generation: u64) {
+        self.jobs.lock().push((job, id, generation));
     }
 
     /// Runs the asked jobs in one write of `store`, and takes no lock when there are none.
@@ -435,11 +437,11 @@ impl ReadJobs {
         if jobs.is_empty() {
             return Ok(());
         }
-        jobs.sort_by_key(|&(_, id)| id);
-        jobs.dedup_by(|a, b| a.1 == b.1 && std::ptr::fn_addr_eq(a.0, b.0));
+        jobs.sort_by_key(|&(_, id, generation)| (id, generation));
+        jobs.dedup_by(|a, b| a.1 == b.1 && a.2 == b.2 && std::ptr::fn_addr_eq(a.0, b.0));
         store.update(|tx| {
-            for (job, id) in &jobs {
-                job(tx, git, *id)?;
+            for (job, id, generation) in &jobs {
+                job(tx, git, *id, *generation)?;
             }
             Ok(())
         })

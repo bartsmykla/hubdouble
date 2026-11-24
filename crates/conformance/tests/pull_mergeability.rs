@@ -246,6 +246,43 @@ async fn parallel_reads_from_many_clients_each_count_once() {
 }
 
 #[tokio::test]
+async fn a_read_of_an_older_head_does_not_count_for_the_computation_of_a_newer_push() {
+    // Given a pending computation after a head push
+    let server = server(&[pull_request()]).await;
+    let client = alice(&server);
+    let node = client.settled_pull(PULL).await["node_id"].clone();
+    let head = push(&server, "feature", "src/next.txt", "next\n");
+    // When one request reads mergeable of that head and then pushes the head again before its read job runs
+    let answer = Graphql::new(client.clone())
+        .query(
+            "mutation($id: ID!, $commit: CreateCommitOnBranchInput!) {\
+             read: convertPullRequestToDraft(input: {pullRequestId: $id}) {pullRequest {mergeable headRefOid}}\
+             push: createCommitOnBranch(input: $commit) {commit {oid}}}",
+            &json!({"id": node, "commit": {
+                "branch": {"repositoryNameWithOwner": "acme/public", "branchName": "feature"},
+                "expectedHeadOid": head,
+                "message": {"headline": "push again"},
+                "fileChanges": {"additions": [{"path": "src/next.txt", "contents": "YWdhaW4K"}]}
+            }}),
+        )
+        .await
+        .json();
+    assert_eq!(answer.get("errors"), None, "{answer}");
+    assert_eq!(
+        answer["data"]["read"]["pullRequest"]["mergeable"],
+        "UNKNOWN"
+    );
+    assert_eq!(
+        answer["data"]["read"]["pullRequest"]["headRefOid"],
+        json!(head)
+    );
+    // Then the newer push still takes its two reads, and the third read answers its computed mergeability
+    assert_eq!(conflicted(&client).await, (false, 3));
+    let pull = client.get(PULL).await.json();
+    assert_eq!(pull["head"]["sha"], answer["data"]["push"]["commit"]["oid"]);
+}
+
+#[tokio::test]
 async fn a_new_pull_request_answers_null_mergeability_until_it_is_computed() {
     // Given a branch ahead of main
     let server = server(&[]).await;
