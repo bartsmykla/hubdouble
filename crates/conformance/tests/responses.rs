@@ -88,6 +88,127 @@ async fn graphql_ignores_the_rest_api_version_and_answers_the_v4_media_type() {
     );
 }
 
+fn accepting(value: &'static str) -> HeaderMap {
+    headers(&[("accept", value)])
+}
+
+fn unsupported(answer: &hubdouble_testkit::Answer, ranges: &str) {
+    assert_eq!(
+        answer.status,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "{ranges}"
+    );
+    assert_eq!(answer.header("x-github-media-type"), "unknown");
+    assert_eq!(
+        answer.json(),
+        json!({"message": format!("Unsupported 'Accept' header: '{ranges}'. Must accept 'application/json'."),
+            "documentation_url": "https://docs.github.com/v3/media", "status": "415"})
+    );
+}
+
+#[tokio::test]
+async fn an_accept_header_without_json_answers_github_415() {
+    // Given an anonymous caller, alice, and a token that GitHub does not know
+    let server = whole_server(&[]).await;
+    let anonymous = GoGithub::new(&server);
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let stranger = GoGithub::new(&server).with_token("ghp_000000000000000000000000000000000bad");
+    let get = |client: &GoGithub, path: &'static str, accept: &'static str| {
+        let client = client.clone();
+        async move {
+            client
+                .call_headers(Method::GET, path, accepting(accept))
+                .await
+        }
+    };
+
+    // When each reads with Accept headers that the live API refused or served on 2026-11-24
+    let html = get(&anonymous, REPO, "text/html").await;
+    let ordered = get(&anonymous, REPO, "text/html;q=0.5, image/png").await;
+    let joined = get(&alice, REPO, "text/html,application/xhtml+xml").await;
+    let missing = get(&anonymous, "repos/acme/absent", "text/html").await;
+    let bad_token = get(&stranger, REPO, "text/html").await;
+    let user = get(&anonymous, "user", "text/html").await;
+    let write = anonymous
+        .call_headers(
+            Method::POST,
+            &format!("{REPO}/issues"),
+            accepting("text/html"),
+        )
+        .await;
+    let graphql = Graphql::new(alice.clone())
+        .query_headers("{ viewer { login } }", &json!({}), accepting("text/html"))
+        .await;
+    let served = [
+        ("text/*", "github.v3"),
+        ("application/*", "github.v3"),
+        ("text/html, */*", "unknown, github.v3"),
+        ("application/json, text/html", "github.v3"),
+        (
+            "text/html, application/vnd.github.raw",
+            "unknown, github.v3; param=raw",
+        ),
+    ];
+
+    // Then only a header without a range GitHub serves is refused, after credentials and sign-in
+    unsupported(&html, "text/html");
+    unsupported(&ordered, "image/png, text/html;q=0.5");
+    unsupported(&joined, "text/html, application/xhtml+xml");
+    unsupported(&missing, "text/html");
+    unsupported(&graphql, "text/html");
+    assert_eq!(bad_token.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(user.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(write.status, StatusCode::UNAUTHORIZED);
+    for (accept, media) in served {
+        let answer = get(&anonymous, REPO, accept).await;
+        assert_eq!(answer.status, StatusCode::OK, "{accept}");
+        assert_eq!(answer.header("x-github-media-type"), media, "{accept}");
+    }
+}
+
+#[tokio::test]
+async fn anonymous_graphql_answers_github_rate_limit_403() {
+    // Given an anonymous caller of the GraphQL endpoint
+    let server = whole_server(&[]).await;
+    let anonymous = GoGithub::new(&server);
+    let body = br#"{"query":"{ viewer { login } }"}"#.to_vec();
+
+    // When it posts a query, posts a body that is not JSON with an HTML Accept, and reads it
+    let posted = anonymous.call_bytes(Method::POST, "graphql", body).await;
+    let broken = anonymous
+        .call_json_headers(
+            Method::POST,
+            "graphql",
+            b"nope".to_vec(),
+            accepting("text/html"),
+        )
+        .await;
+    let read = anonymous.call(Method::GET, "graphql").await;
+
+    // Then each is GitHub's anonymous GraphQL limit of 0, with its body and headers
+    for answer in [&posted, &broken, &read] {
+        assert_eq!(answer.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            answer.json(),
+            json!({"message": "API rate limit exceeded for 127.0.0.1. (But here's the good news: Authenticated requests get a higher rate limit. Check out the documentation for more details.)",
+                "documentation_url": "https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"})
+        );
+        assert_eq!(
+            answer.header("x-github-media-type"),
+            "github.v3; format=json"
+        );
+        for name in [
+            "x-ratelimit-limit",
+            "x-ratelimit-remaining",
+            "x-ratelimit-used",
+        ] {
+            assert_eq!(answer.header(name), "0", "{name}");
+        }
+        assert_eq!(answer.header("x-ratelimit-resource"), "graphql");
+        assert_ne!(answer.header("x-ratelimit-reset"), "");
+    }
+}
+
 #[tokio::test]
 async fn a_commit_status_is_validated_as_github_validates_a_status() {
     // Given

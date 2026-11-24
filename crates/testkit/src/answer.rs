@@ -13,7 +13,7 @@ use crate::validate::{OPENAPI, openapi_schema, resolve};
 
 const MANY: [&str; 6] = ["ref", "path", "branch", "basehead", "tag", "tree_sha"];
 
-const PROSE_STATUSES: [u16; 7] = [304, 400, 401, 403, 404, 422, 429];
+const PROSE_STATUSES: [u16; 8] = [304, 400, 401, 403, 404, 415, 422, 429];
 
 const PROSE_REDIRECTS: [u16; 3] = [301, 302, 307];
 
@@ -235,7 +235,9 @@ pub fn api_path(path: &str) -> &str {
 ///   `422` for a request that fails validation
 ///   (<https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api>); and
 ///   `401` for invalid credentials
-///   (<https://docs.github.com/en/rest/authentication/authenticating-to-the-rest-api>).
+///   (<https://docs.github.com/en/rest/authentication/authenticating-to-the-rest-api>). Live
+///   GitHub also answers `415` to an `Accept` header without a range it serves (GET reads of
+///   2026-11-24, `github/rest-api-description` issue 4427).
 /// - Every error body has `message`, `documentation_url` and `status` as text, and on a `422`
 ///   each of `errors` has `resource`, `code`, and `field` unless the code is `custom` (plan
 ///   section 4.7, the troubleshooting page's "Validation failed").

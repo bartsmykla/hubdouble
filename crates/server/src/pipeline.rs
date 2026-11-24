@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 use std::hash::{BuildHasher as _, Hash as _, Hasher as _};
+use std::net::IpAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,7 +14,7 @@ use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hubdouble_admin::{Admin, Fault, FaultQuery, LogEntry, Services};
 use hubdouble_auth::{Actor, Target};
 use hubdouble_git::ReadJobs;
-use hubdouble_model::{Account, AccountKind, ApiError, FieldError, Repo};
+use hubdouble_model::{Account, AccountKind, ApiError, FieldError, Repo, Scope};
 use hubdouble_render::Urls;
 use hubdouble_rest::{Access, Ctx, Entry, Params, Parts, Query, Reply};
 use hubdouble_store::{Accounts, RepoRedirects, Repos, Tx};
@@ -31,6 +32,9 @@ const ARCHIVED_WRITES: [&str; 7] = [
     "activity/unstar-repo-for-authenticated-user",
 ];
 const RATE_LIMIT: u32 = 5000;
+const MEDIA_DOCS: &str = "https://docs.github.com/v3/media";
+const RATE_LIMIT_DOCS: &str =
+    "https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting";
 const GRAPHQL_AUTH_DOCS: &str =
     "https://docs.github.com/graphql/guides/forming-calls-with-graphql#authenticating-with-graphql";
 
@@ -79,7 +83,7 @@ impl Inner {
         }
     }
 
-    pub(crate) async fn handle(&self, req: Request<Incoming>) -> HttpResponse {
+    pub(crate) async fn handle(&self, req: Request<Incoming>, peer: IpAddr) -> HttpResponse {
         let path = req.uri().path();
         if path == "/healthz" || path == "/readyz" {
             return plain(StatusCode::OK, "ok");
@@ -106,6 +110,10 @@ impl Inner {
         } else {
             &self.root_urls
         };
+        let graphql_read = parts.method == Method::GET && api_path == "/graphql";
+        if (graphql || graphql_read) && self.anonymous(&parts.headers) {
+            return self.graphql_rate_limited(&parts, peer);
+        }
         let resource = if graphql { "graphql" } else { "core" };
         let version = if graphql {
             ""
@@ -166,6 +174,7 @@ impl Inner {
             return self.finish(error_call(parts, operation_id, "core", version, e));
         };
         let query = Query::parse(parts.uri.query().unwrap_or(""));
+        let read = (parts.method == Method::GET || parts.method == Method::HEAD) && !entry.writes;
         let request = RestRequest {
             entry,
             method: &parts.method,
@@ -178,7 +187,6 @@ impl Inner {
             urls,
         };
         let mut who = Who::default();
-        let read = (parts.method == Method::GET || parts.method == Method::HEAD) && !entry.writes;
         let store = &self.services.store;
         let result = catch_unwind(AssertUnwindSafe(|| {
             let jobs = ReadJobs::default();
@@ -259,6 +267,20 @@ impl Inner {
         };
         who.login = actor.login().map(str::to_owned);
         who.scopes = actor.oauth_scopes().map(|s| s.join(", "));
+        if let Some(unsupported) = unsupported_accept(r.headers) {
+            if matches!(actor, Actor::Anonymous) && !r.entry.authenticates {
+                let requirement = &r.entry.requirement;
+                if matches!(
+                    requirement.scope,
+                    Scope::User | Scope::App | Scope::Installation
+                ) {
+                    hubdouble_auth::authorize(tx, &actor, requirement, Target::None)?;
+                } else if *r.method != Method::GET && *r.method != Method::HEAD {
+                    return Err(ApiError::new(401, "Requires authentication"));
+                }
+            }
+            return Err(unsupported);
+        }
         let resolved = resolve_target(tx, r.params)?;
         let (target, repo) = match &resolved {
             Resolved::Moved(repo) if hubdouble_auth::can_see(tx, &actor, repo) => {
@@ -332,6 +354,9 @@ impl Inner {
                         .with_docs(GRAPHQL_AUTH_DOCS),
                 );
             }
+            if let Some(unsupported) = unsupported_accept(&parts.headers) {
+                return Err(unsupported);
+            }
             let response = hubdouble_gql::execute(
                 &self.gql,
                 &services.store,
@@ -356,6 +381,51 @@ impl Inner {
             who,
             parts,
         })
+    }
+
+    fn anonymous(&self, headers: &HeaderMap) -> bool {
+        let services = &self.services;
+        services
+            .store
+            .view(|tx| hubdouble_auth::authenticate(tx, services.clock.as_ref(), headers))
+            .is_ok_and(|actor| matches!(actor, Actor::Anonymous))
+    }
+
+    fn graphql_rate_limited(&self, parts: &RequestParts, peer: IpAddr) -> HttpResponse {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            message: String,
+            documentation_url: &'a str,
+        }
+        let body = Body {
+            message: format!(
+                "API rate limit exceeded for {}. (But here's the good news: Authenticated \
+                 requests get a higher rate limit. Check out the documentation for more \
+                 details.)",
+                peer.to_canonical()
+            ),
+            documentation_url: RATE_LIMIT_DOCS,
+        };
+        let mut reply = Reply::raw(
+            hubdouble_rest::JSON,
+            serde_json::to_vec(&body).unwrap_or_default(),
+        )
+        .status(StatusCode::FORBIDDEN);
+        self.common_headers(&mut reply.headers, &HeaderMap::new(), "graphql", None);
+        set(
+            &mut reply.headers,
+            "x-github-media-type",
+            "github.v3; format=json",
+        );
+        for name in [
+            "x-ratelimit-limit",
+            "x-ratelimit-remaining",
+            "x-ratelimit-used",
+        ] {
+            set(&mut reply.headers, name, "0");
+        }
+        self.record(parts, "graphql", None, reply.status);
+        to_response(reply, false)
     }
 
     async fn fault(&self, parts: &RequestParts, operation: &str) -> Option<Fault> {
@@ -689,21 +759,114 @@ fn api_version(headers: &HeaderMap) -> Result<&'static str, ApiError> {
         })
 }
 
-pub(crate) fn media_type(accept: Option<&str>, default: &str) -> String {
-    let mut ranges = accept
-        .unwrap_or("")
-        .split(',')
-        .filter_map(|r| r.split(';').next())
-        .map(str::trim);
-    let range = ranges
-        .clone()
-        .find_map(|r| r.strip_prefix("application/vnd.github"));
-    let Some(range) = range else {
-        if ranges.any(|r| r == "application/json") {
-            return format!("github.{default}");
+#[derive(Clone, Copy)]
+struct Range<'a> {
+    text: &'a str,
+    media: &'a str,
+    q: f32,
+}
+
+#[derive(PartialEq)]
+enum Kind<'a> {
+    Vendor(&'a str),
+    Json,
+    Any,
+    Unsupported,
+}
+
+impl<'a> Range<'a> {
+    fn kind(self) -> Kind<'a> {
+        const VENDOR: &str = "application/vnd.github";
+        let media = self.media;
+        if let Some(rest) = media
+            .get(..VENDOR.len())
+            .filter(|p| p.eq_ignore_ascii_case(VENDOR))
+            .and_then(|_| media.get(VENDOR.len()..))
+        {
+            Kind::Vendor(rest)
+        } else if ["application/json", "text/*", "application/*"]
+            .iter()
+            .any(|m| media.eq_ignore_ascii_case(m))
+        {
+            Kind::Json
+        } else if media == "*/*" {
+            Kind::Any
+        } else {
+            Kind::Unsupported
         }
+    }
+}
+
+fn ranges(accept: &str) -> impl Iterator<Item = Range<'_>> + Clone {
+    accept
+        .split(',')
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(|text| {
+            let mut params = text.split(';');
+            let media = params.next().unwrap_or_default().trim();
+            let q = params
+                .filter_map(|p| p.split_once('='))
+                .find(|(name, _)| name.trim().eq_ignore_ascii_case("q"))
+                .and_then(|(_, value)| value.trim().parse().ok())
+                .unwrap_or(1.0);
+            Range { text, media, q }
+        })
+}
+
+fn unsupported_accept(headers: &HeaderMap) -> Option<ApiError> {
+    let accept = headers.get(header::ACCEPT)?.to_str().ok()?;
+    if ranges(accept).next().is_none() || ranges(accept).any(|r| r.kind() != Kind::Unsupported) {
+        return None;
+    }
+    let mut sorted: Vec<Range<'_>> = ranges(accept).collect();
+    sorted.sort_by(|a, b| b.q.total_cmp(&a.q));
+    let names: Vec<&str> = sorted.iter().map(|r| r.text).collect();
+    Some(
+        ApiError::new(
+            415,
+            format!(
+                "Unsupported 'Accept' header: '{}'. Must accept 'application/json'.",
+                names.join(", ")
+            ),
+        )
+        .with_docs(MEDIA_DOCS),
+    )
+}
+
+pub(crate) fn media_type(accept: Option<&str>, default: &str) -> String {
+    let accept = accept.unwrap_or("");
+    let first = ranges(accept).fold(None, |best: Option<Range<'_>>, r| match best {
+        Some(b) if b.q >= r.q => Some(b),
+        _ => Some(r),
+    });
+    let Some(first) = first else {
         return format!("github.{default}; format=json");
     };
+    let vendor = ranges(accept).find_map(|r| match r.kind() {
+        Kind::Vendor(rest) => Some(rest),
+        _ => None,
+    });
+    let media = match vendor {
+        Some(range) => vendor_media(range, default),
+        None if ranges(accept).any(|r| r.kind() == Kind::Json) => format!("github.{default}"),
+        None if ranges(accept).any(|r| r.kind() == Kind::Any) => {
+            if ranges(accept).nth(1).is_some() {
+                format!("github.{default}")
+            } else {
+                format!("github.{default}; format=json")
+            }
+        }
+        None => return "unknown".to_owned(),
+    };
+    if first.kind() == Kind::Unsupported {
+        format!("unknown, {media}")
+    } else {
+        media
+    }
+}
+
+fn vendor_media(range: &str, default: &str) -> String {
     let (names, format) = match range.split_once('+') {
         Some((n, f)) => (n, Some(f)),
         None => (range, None),
@@ -817,7 +980,39 @@ mod unit {
             (
                 Some("text/html, application/vnd.github.v3.diff"),
                 "v3",
-                "github.v3; param=diff",
+                "unknown, github.v3; param=diff",
+            ),
+            (
+                Some("*/*, application/vnd.github.raw"),
+                "v3",
+                "github.v3; param=raw",
+            ),
+            (Some("text/*"), "v3", "github.v3"),
+            (Some("APPLICATION/JSON"), "v3", "github.v3"),
+            (Some("*/*;q=0.8"), "v3", "github.v3; format=json"),
+            (Some("text/html, */*"), "v3", "unknown, github.v3"),
+            (Some("application/json, text/html"), "v3", "github.v3"),
+            (
+                Some("text/html, image/png, application/json"),
+                "v3",
+                "unknown, github.v3",
+            ),
+            (
+                Some("application/vnd.github.v3+json;q=0.5, text/html"),
+                "v3",
+                "unknown, github.v3; format=json",
+            ),
+            (
+                Some("text/html;q=0.5, */*;q=0.5"),
+                "v3",
+                "unknown, github.v3",
+            ),
+            (Some("application/json;q=0"), "v3", "github.v3"),
+            (Some("text/html"), "v3", "unknown"),
+            (
+                Some("text/html, application/json"),
+                "v4",
+                "unknown, github.v4",
             ),
             (Some("application/json"), "v4", "github.v4"),
             (

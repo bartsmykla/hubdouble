@@ -148,11 +148,11 @@ impl Server {
         loop {
             tokio::select! {
                 accepted = listener.accept() => {
-                    let Ok((stream, _)) = accepted else { continue };
+                    let Ok((stream, peer)) = accepted else { continue };
                     let inner = self.inner.clone();
                     let service = hyper::service::service_fn(move |req| {
                         let inner = inner.clone();
-                        async move { Ok::<_, Infallible>(inner.handle(req).await) }
+                        async move { Ok::<_, Infallible>(inner.handle(req, peer.ip()).await) }
                     });
                     let conn = graceful.watch(builder.serve_connection(TokioIo::new(stream), service).into_owned());
                     tokio::spawn(async move {
