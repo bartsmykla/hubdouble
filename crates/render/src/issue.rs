@@ -611,14 +611,20 @@ impl ReviewComment {
             c.id
         );
         let pull = url!("{}/repos/{full_name}/pulls/{number}", urls.api);
+        let file = c.subject_type == m::SubjectType::File;
+        let first = |at: Option<i64>| if file { Some(1) } else { at };
         ReviewComment {
             pull_request_review_id: c.review_id,
             id: c.id,
             node_id: c.node_id.clone(),
-            diff_hunk: c.diff_hunk.clone(),
+            diff_hunk: if file {
+                String::new()
+            } else {
+                c.diff_hunk.clone()
+            },
             path: c.path.clone(),
-            position: c.position,
-            original_position: c.original_position,
+            position: first(c.position),
+            original_position: first(c.original_position),
             commit_id: c.commit_id.clone(),
             original_commit_id: c.original_commit_id.clone(),
             in_reply_to_id: c.in_reply_to_id,
@@ -639,8 +645,8 @@ impl ReviewComment {
             start_line: c.start_line,
             original_start_line: c.original_start_line,
             start_side: c.start_side.map(m::Side::as_str),
-            line: c.line,
-            original_line: c.original_line,
+            line: first(c.line),
+            original_line: first(c.original_line),
             side: c.side.map(m::Side::as_str),
             subject_type: c.subject_type.as_str(),
         }

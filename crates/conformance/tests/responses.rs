@@ -264,6 +264,45 @@ async fn a_classic_token_without_scopes_reads_public_repositories_only() {
 }
 
 #[tokio::test]
+async fn a_file_comment_answers_line_and_position_1_and_an_empty_hunk_in_rest() {
+    // Given a pull request from feature to main
+    let pull = json!({"kind": "pull_request", "repository": "acme/public", "user": "alice",
+        "title": "feature", "head": "feature", "base": "main"});
+    let server = whole_server(&[pull]).await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let files = alice.get(&format!("{REPO}/pulls/1/files")).await.json();
+    let path = files[0]["filename"].as_str().unwrap().to_owned();
+
+    // When the client writes a review with a comment on the whole file and reads it back
+    let review = alice
+        .post(
+            &format!("{REPO}/pulls/1/reviews"),
+            &json!({"event": "COMMENT", "comments": [
+                {"path": path, "subject_type": "file", "body": "file"}]}),
+        )
+        .await;
+    let listed = alice.get(&format!("{REPO}/pulls/1/comments")).await.json();
+    let id = listed[0]["id"].as_i64().unwrap();
+    let single = alice
+        .get(&format!("{REPO}/pulls/comments/{id}"))
+        .await
+        .json();
+
+    // Then REST answers the fields live GitHub answers for a file comment
+    assert_eq!(review.status, StatusCode::OK, "{}", review.json());
+    for comment in [&listed[0], &single] {
+        assert_eq!(comment["subject_type"], "file");
+        for field in ["line", "original_line", "position", "original_position"] {
+            assert_eq!(comment[field], 1, "{field}");
+        }
+        assert_eq!(comment["diff_hunk"], "");
+        assert_eq!(comment["side"], "RIGHT");
+        assert!(comment["start_line"].is_null());
+        assert!(comment["start_side"].is_null());
+    }
+}
+
+#[tokio::test]
 async fn team_and_collaborator_reads_take_the_scopes_github_accepts() {
     // Given a team of acme, and alice's classic tokens with no scope and with each single scope
     let team = json!({"kind": "team", "org": "acme", "name": "Child",

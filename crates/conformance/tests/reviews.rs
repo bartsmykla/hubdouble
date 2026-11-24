@@ -100,7 +100,12 @@ async fn pending_reviews_publish_file_and_line_comments_with_the_review() {
     assert_eq!(comments[0]["line"], 3);
     assert_eq!(comments[0]["start_line"], 1);
     assert_eq!(comments[1]["subject_type"], "file");
-    assert!(comments[1].get("line").is_none());
+    for field in ["line", "original_line", "position", "original_position"] {
+        assert_eq!(comments[1][field], 1, "{field}");
+    }
+    assert_eq!(comments[1]["diff_hunk"], "");
+    assert_eq!(comments[1]["side"], "RIGHT");
+    assert!(comments[1]["start_line"].is_null());
     assert_eq!(comments[1]["pull_request_review_id"], id);
 
     let vars = json!({"thread": thread});
