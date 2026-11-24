@@ -4,16 +4,17 @@ use http::StatusCode;
 use http::header::{ETAG, LINK};
 use hubdouble_git::{
     Commit, EntryMode, FileDiff, FileStatus, Git, GitError, ObjectData, ObjectId, ObjectKind,
+    Signature,
 };
-use hubdouble_model::{ApiError, Repo};
+use hubdouble_model::{ApiError, Repo, Timestamp};
 use hubdouble_render::{SimpleUser, Urls};
 use hubdouble_rest::{Ctx, Page, Reply};
-use hubdouble_store::{Rulesets, Tx};
+use hubdouble_store::{Accounts, Rulesets, Tx};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    GitPerson, Links, ObjectLink, ParentLink, Verification, accepted_media, commit_at,
-    object_node_id, sender, unprocessable, user_of,
+    GitPerson, Links, ObjectLink, ParentLink, Verification, accepted_media, account_by_email,
+    commit_at, object_node_id, sender, unprocessable, user_of,
 };
 
 pub(crate) use compare::compare;
@@ -339,6 +340,43 @@ pub(crate) fn list_commits(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .filter(|p| !p.is_empty())
     {
         log.retain(|(id, c)| touches(view.git, view.tx, view.repo.id, *id, c, path));
+    }
+    let bound = |name| {
+        ctx.query()
+            .get(name)
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                Timestamp::parse_date_time(t, ctx.now()).map_err(|_| {
+                    ApiError::internal("Server Error")
+                        .with_docs("https://docs.github.com/rest/commits/commits#list-commits")
+                })
+            })
+            .transpose()
+    };
+    let (since, until) = (bound("since")?, bound("until")?);
+    log.retain(|(_, c)| {
+        since.is_none_or(|s| c.committer.time >= s) && until.is_none_or(|u| c.committer.time <= u)
+    });
+    for (name, signature) in [
+        (
+            "author",
+            (|c: &Commit| &c.author) as fn(&Commit) -> &Signature,
+        ),
+        ("committer", |c: &Commit| &c.committer),
+    ] {
+        if let Some(who) = ctx.query().get(name) {
+            let account = (!who.contains('@'))
+                .then(|| view.tx.table::<Accounts>().by_login(who))
+                .flatten()
+                .map(|a| a.id);
+            log.retain(|(_, c)| {
+                let email = &signature(c).email;
+                match account {
+                    Some(id) => account_by_email(view.tx, email).is_some_and(|a| a.id == id),
+                    None => who.contains('@') && email.eq_ignore_ascii_case(who),
+                }
+            });
+        }
     }
     let page = ctx.page_params()?;
     let rendered: Vec<_> = slice(&log, page)

@@ -82,6 +82,22 @@ async fn get_with(client: &GoGithub, path: &str, headers: &[(&'static str, &str)
 }
 
 fn commit_on(s: &TestServer, repo: i64, sender: i64, branch: &str, path: &str) -> ObjectId {
+    commit_as(
+        s,
+        (repo, sender),
+        branch,
+        path,
+        [Signature::seed(), Signature::seed()],
+    )
+}
+
+fn commit_as(
+    s: &TestServer,
+    (repo, sender): (i64, i64),
+    branch: &str,
+    path: &str,
+    [author, committer]: [Signature; 2],
+) -> ObjectId {
     let services = s.server.services();
     let git = &services.git;
     services
@@ -108,12 +124,111 @@ fn commit_on(s: &TestServer, repo: i64, sender: i64, branch: &str, path: &str) -
                 Some(parent),
                 &[change],
                 &format!("write {path}"),
-                &Signature::seed(),
-                &Signature::seed(),
+                &author,
+                &committer,
                 false,
             )?)
         })
         .unwrap()
+}
+
+fn person(name: &str, email: &str, time: &str) -> Signature {
+    Signature {
+        name: name.to_owned(),
+        email: email.to_owned(),
+        time: Timestamp::parse(time).unwrap(),
+        offset_minutes: 0,
+    }
+}
+
+#[tokio::test]
+async fn the_commit_list_filters_by_committer_date_and_by_author_or_committer() {
+    // Given three commits on dated, committed at 2026-11-18T17:16:26Z, :27Z and :28Z
+    let s = server().await;
+    let client = alice(&s);
+    let at = |second: u8| format!("2026-11-18T17:16:{second}Z");
+    let alice_at = |second| person("Alice", "alice@example.com", &at(second));
+    let first = commit_as(
+        &s,
+        (PUBLIC_REPO_ID, ALICE_ID),
+        "dated",
+        "one.txt",
+        [alice_at(10), person("Carol", "carol@example.org", &at(26))],
+    );
+    let second = commit_as(
+        &s,
+        (PUBLIC_REPO_ID, ALICE_ID),
+        "dated",
+        "two.txt",
+        [
+            person("Bob", "1002+bob@users.noreply.github.com", &at(10)),
+            alice_at(27),
+        ],
+    );
+    let third = commit_as(
+        &s,
+        (PUBLIC_REPO_ID, ALICE_ID),
+        "dated",
+        "three.txt",
+        [
+            person("Nobody", "nobody@example.org", &at(10)),
+            alice_at(28),
+        ],
+    );
+    let [first, second, third] = [first, second, third].map(|c| c.to_string());
+    let list = "repos/acme/public/commits?sha=dated&since=2026-11-18T00:00:00Z";
+
+    // When the list reads each since, until, author and committer that live cli/cli read,
+    // 2026-11-24
+    for (query, expected) in [
+        ("", vec![&third, &second, &first]),
+        ("&since=2026-11-18T17:16:27Z", vec![&third, &second]),
+        (
+            "&since=2026-11-18T17:16:26.5Z",
+            vec![&third, &second, &first],
+        ),
+        ("&since=2026-11-18%2017:16:27", vec![&third, &second]),
+        (
+            "&since=18%20Nov%202026%2009:16:27%20PST",
+            vec![&third, &second],
+        ),
+        ("&until=2026-11-18T17:16:27Z", vec![&second, &first]),
+        ("&until=2026-11-18T17:16:27.9Z", vec![&second, &first]),
+        ("&until=", vec![&third, &second, &first]),
+        ("&author=alice", vec![&first]),
+        ("&author=ALICE", vec![&first]),
+        ("&author=bob", vec![&second]),
+        ("&author=1002%2Bbob@users.noreply.github.com", vec![&second]),
+        ("&author=ALICE@EXAMPLE.COM", vec![&first]),
+        ("&author=nobody@example.org", vec![&third]),
+        ("&author=Nobody", vec![]),
+        ("&author=absent", vec![]),
+        ("&author=", vec![]),
+        ("&committer=alice", vec![&third, &second]),
+        ("&committer=carol@example.org", vec![&first]),
+    ] {
+        let answer = client.get(&format!("{list}{query}")).await;
+
+        // Then GitHub keeps the commits it names, newest first
+        assert_eq!(answer.status, StatusCode::OK, "{query}");
+        let listed = shas("repos/list-commits", &answer);
+        assert_eq!(listed.iter().collect::<Vec<_>>(), expected, "{query}");
+    }
+
+    // When the list reads a since or until that Ruby's DateTime.parse cannot read
+    for query in [
+        "since=garbage",
+        "until=1763486193",
+        "since=2026-11-31",
+        "until=25:00",
+    ] {
+        let answer = client
+            .get(&format!("repos/acme/public/commits?sha=dated&{query}"))
+            .await;
+
+        // Then GitHub answers 500, with the error body of the docs (docs/fidelity.md)
+        assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR, "{query}");
+    }
 }
 
 fn shas(operation_id: &str, a: &Answer) -> Vec<String> {
