@@ -8,6 +8,8 @@ mod view;
 
 use std::collections::BTreeSet;
 
+pub use hierarchy::TeamViewer;
+
 use hubdouble_admin::Registrar;
 use hubdouble_model::{Grant, Requirement, Scope};
 use hubdouble_store::Table;

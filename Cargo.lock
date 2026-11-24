@@ -2448,6 +2448,7 @@ dependencies = [
  "hubdouble-admin",
  "hubdouble-api-checks",
  "hubdouble-api-issues",
+ "hubdouble-api-orgs",
  "hubdouble-api-pulls",
  "hubdouble-auth",
  "hubdouble-git",

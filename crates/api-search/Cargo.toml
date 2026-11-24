@@ -12,6 +12,7 @@ publish.workspace = true
 hubdouble-admin.workspace = true
 hubdouble-api-checks.workspace = true
 hubdouble-api-issues.workspace = true
+hubdouble-api-orgs.workspace = true
 hubdouble-api-pulls.workspace = true
 hubdouble-auth.workspace = true
 hubdouble-git.workspace = true

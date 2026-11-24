@@ -3,6 +3,7 @@ use std::sync::{Arc, LazyLock};
 
 use rust_stemmers::{Algorithm, Stemmer};
 
+use hubdouble_api_orgs::TeamViewer;
 use hubdouble_auth::{Actor, Target, authorize};
 use hubdouble_git::{Git, ObjectId};
 use hubdouble_gql::{Args, Conn, Ctx, ErrorType, GqlError, Obj, Resolved, connection};
@@ -183,13 +184,13 @@ fn filter(env: &Env<'_>, f: &Filter<'_>, repo: &Repo, i: &Issue) -> bool {
         Filter::Base(b) => pull.is_some_and(|p| starts_with_ignore_case(&p.base.ref_name, b)),
         Filter::Person(person, login) => involves(env, *person, login, i),
         Filter::Team(name) => {
-            team_id(tx, name).is_some() && {
+            team_id(env, name).is_some() && {
                 let handle = format!("@{name}");
                 texts(tx, i).any(|t| mentions(t, &handle))
             }
         }
         Filter::TeamReviewRequested(name) => pull
-            .zip(team_id(tx, name))
+            .zip(team_id(env, name))
             .is_some_and(|(p, id)| p.requested_teams.contains(&id)),
         Filter::Label(group) => {
             let labels = tx.table::<Labels>();
@@ -288,10 +289,14 @@ fn account<'t>(env: &Env<'t>, login: &str) -> Option<&'t Arc<Account>> {
     }
 }
 
-fn team_id(tx: &Tx, name: &str) -> Option<i64> {
+fn team_id(env: &Env<'_>, name: &str) -> Option<i64> {
     let (org, slug) = name.split_once('/')?;
-    let org = tx.table::<Accounts>().by_login(org)?;
-    tx.table::<Teams>().by_slug(org.id, slug).map(|t| t.id)
+    let org = env.tx.table::<Accounts>().by_login(org)?;
+    env.tx
+        .table::<Teams>()
+        .by_slug(org.id, slug)
+        .filter(|t| TeamViewer::new(env.tx, env.actor, org.id).can_see(t))
+        .map(|t| t.id)
 }
 
 fn on_requested_team(tx: &Tx, p: &Pull, user: i64) -> bool {
@@ -359,7 +364,11 @@ fn reviewed(tx: &Tx, review: Review, i: &Issue, p: &Pull) -> bool {
 
 fn comments(tx: &Tx, i: &Issue) -> i64 {
     let n = tx.table::<IssueComments>().children(i.id).count()
-        + tx.table::<ReviewComments>().children(i.id).count();
+        + tx.table::<ReviewComments>().children(i.id).count()
+        + tx.table::<Reviews>()
+            .children(i.id)
+            .filter(|r| r.state != ReviewState::Pending && !r.body.is_empty())
+            .count();
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 

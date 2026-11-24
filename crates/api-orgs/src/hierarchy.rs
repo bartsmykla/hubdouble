@@ -46,6 +46,7 @@ pub enum TeamViewer {
 }
 
 impl TeamViewer {
+    #[must_use]
     pub fn new(tx: &Tx, actor: &Actor, org_id: i64) -> Self {
         match actor {
             Actor::Installation { installation, .. } if installation.account_id == org_id => {
@@ -60,6 +61,7 @@ impl TeamViewer {
         }
     }
 
+    #[must_use]
     pub fn can_see(self, team: &Team) -> bool {
         match self {
             Self::Admin => true,
