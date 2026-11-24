@@ -273,6 +273,23 @@ A team member must be an active member of the org. Put a parent team before its 
   base: main
 ```
 
+A seeded pull request has its mergeability and test merge computed when it loads. One that the API opens, reopens, moves to another base, or gets a new head answers `mergeable: null` until reads complete the computation, as the [`mergeability`](#mergeability) kind sets.
+
+## `mergeability`
+
+Sets how many reads of a pull request in a repository answer `mergeable: null` after its mergeability goes stale. A read is `GET /repos/{owner}/{repo}/pulls/{pull_number}` or a GraphQL read of `PullRequest.mergeable` or `mergeStateStatus`. The read after the last of them answers the computed value.
+
+| Field | Type | Required | Default |
+| --- | --- | --- | --- |
+| `repository` (alias `repo`) | `owner/repo` string | Yes | None |
+| `reads` | Integer, `0` or more | Yes | `2` for a repository without this entry. `0` computes the test merge in the change itself, so no read answers `null` |
+
+```yaml
+- kind: mergeability
+  repository: workshop/demo
+  reads: 0
+```
+
 ## `review`
 
 | Field | Type | Required | Default |

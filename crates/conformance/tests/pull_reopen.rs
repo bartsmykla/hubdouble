@@ -191,7 +191,7 @@ async fn every_reopen_takes_the_live_branches_and_sends_the_same_webhook() {
         let outcome = reopen(&client, via, 1).await;
         // Then it is open on the new tips, not mergeable, with no merge commit
         assert!(matches!(outcome, Outcome::Reopened), "{via:?}");
-        let pull = client.get(PULL).await.json();
+        let pull = client.settled_pull(PULL).await;
         assert_eq!(pull["state"], "open", "{via:?}");
         assert_eq!(pull["closed_at"], Value::Null, "{via:?}");
         assert_eq!(pull["head"]["sha"], json!(head), "{via:?}");
@@ -222,7 +222,8 @@ async fn every_reopen_takes_the_live_branches_and_sends_the_same_webhook() {
         assert_eq!(reopened[0]["number"], 1, "{via:?}");
         assert_eq!(reopened[0]["sender"]["login"], "alice", "{via:?}");
         assert_eq!(reopened[0]["pull_request"]["head"]["sha"], json!(head));
-        assert_eq!(reopened[0]["pull_request"]["mergeable"], false);
+        assert_eq!(reopened[0]["pull_request"]["mergeable"], Value::Null);
+        assert_eq!(reopened[0]["pull_request"]["mergeable_state"], "unknown");
         assert!(
             all.iter().all(|d| d.header("x-github-event") != "issues"),
             "{via:?}"

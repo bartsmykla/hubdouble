@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::timeline::{self, StateKind};
-use crate::{CONTENTS_WRITE, events, read, render, reopen, state};
+use crate::{CONTENTS_WRITE, events, mergeability, read, render, reopen, state};
 
 #[derive(Deserialize)]
 struct Create {
@@ -70,7 +70,7 @@ pub(crate) fn seed(ctx: &mut SeedCtx<'_>, value: Value) -> Result<(), ApiError> 
         }
         tx.table_mut::<Counters>().bump(Sequence::Id, id);
     }
-    open(
+    let opened = open(
         tx,
         ctx.git,
         &repo,
@@ -79,7 +79,7 @@ pub(crate) fn seed(ctx: &mut SeedCtx<'_>, value: Value) -> Result<(), ApiError> 
         (sender, ctx.clock.now()),
         id,
     )?;
-    Ok(())
+    mergeability::settle(tx, ctx.git, opened.id, false)
 }
 
 pub(crate) fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
@@ -175,7 +175,7 @@ fn open(
     }
     let issue_id = tx.next_id();
     let pull_id = id.unwrap_or_else(|| tx.next_id());
-    let mut issue = Issue {
+    let issue = Issue {
         id: issue_id,
         node_id: node_id::entity(node_id::ISSUE, issue_id),
         repo_id: base.id,
@@ -217,12 +217,15 @@ fn open(
             requested_teams: Vec::new(),
         }),
     };
-    let p = issue.pull.as_mut().ok_or_else(ApiError::not_found)?;
-    state::test_merge(git, tx, (base.id, sender), p, (base_oid, head_oid))?;
     let issue = tx.table_mut::<Issues>().insert(issue)?;
     state::sync_refs(tx, git, &issue)?;
     events::emit(tx, git, &issue, sender, "opened", json!({}))?;
-    Ok(issue)
+    mergeability::start(tx, git, &issue)?;
+    let id = issue.id;
+    tx.table::<Issues>()
+        .get(id)
+        .cloned()
+        .ok_or_else(ApiError::not_found)
 }
 
 fn ensure_unique(
@@ -324,11 +327,13 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     }
     if edited.rebased {
         timeline::record(tx, &issue, who, StateKind::BaseRefChanged)?;
+        mergeability::start(tx, git, &issue)?;
     }
-    match edited.refusal {
-        Some(refusal) => kept(&refusal),
-        None => Reply::json(&render::detail(ctx.git(), ctx.tx(), ctx.urls(), &issue)?),
+    if let Some(refusal) = edited.refusal {
+        return kept(&refusal);
     }
+    let issue = read::issue(ctx)?;
+    Reply::json(&render::detail(ctx.git(), ctx.tx(), ctx.urls(), issue)?)
 }
 
 /// GitHub's error answer for a refusal that keeps the writes made before it, so the handler
@@ -470,7 +475,7 @@ fn retarget(
     issue: &mut Issue,
     name: String,
 ) -> Result<Result<Value, ApiError>, ApiError> {
-    let (id, repo, author) = (issue.id, issue.repo_id, issue.user_id);
+    let (id, repo) = (issue.id, issue.repo_id);
     let open = issue.state == IssueState::Open;
     let p = state::pull_mut(issue)?;
     let refused = |message: String| {
@@ -517,7 +522,7 @@ fn retarget(
     p.base.ref_name = name;
     p.base.sha = base.to_string();
     p.head.sha = head.to_string();
-    state::test_merge(git, tx, (repo, author), p, (base, head))?;
+    p.mergeable = None;
     Ok(Ok(from))
 }
 

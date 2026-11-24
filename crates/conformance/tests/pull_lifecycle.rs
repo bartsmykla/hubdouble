@@ -458,7 +458,7 @@ async fn an_open_pull_request_names_a_signed_test_merge_commit_at_its_merge_ref(
 }
 
 #[tokio::test]
-async fn a_base_push_gives_every_open_pull_request_on_it_its_own_test_merge() {
+async fn a_base_push_keeps_each_published_snapshot_until_a_later_computation() {
     // Given three open pull requests into main, the third changing the README
     let mut entries = fixture::seed();
     for entry in &mut entries {
@@ -484,18 +484,58 @@ async fn a_base_push_gives_every_open_pull_request_on_it_its_own_test_merge() {
     }
     let server = builder.start().await;
     let client = alice(&server);
+    let snapshot = |pull: &Value| {
+        json!([
+            pull["base"]["sha"],
+            pull["merge_commit_sha"],
+            pull["mergeable"],
+            pull["rebaseable"]
+        ])
+    };
+    let mut before = Vec::new();
+    for number in 1..=3 {
+        let pull = client
+            .settled_pull(&format!("repos/acme/public/pulls/{number}"))
+            .await;
+        assert_eq!(pull["mergeable"], true, "pull request {number}");
+        before.push(snapshot(&pull));
+    }
 
     // When main changes the README
     let base = push(&server, "main", "README.md", "# main\n");
 
-    // Then each clean pull request names its own test merge of the new base tip and its head
+    // Then every read keeps the base, test merge and mergeability each had, as live sharkdp/bat 4148 and cli/cli 14781 do
+    for number in 1..=3 {
+        let path = format!("repos/acme/public/pulls/{number}");
+        for read in 0..3 {
+            let pull = client.get(&path).await.json();
+            assert_eq!(snapshot(&pull), before[number - 1], "{number} read {read}");
+        }
+        let merge_ref = format!("repos/acme/public/git/ref/pull/{number}/merge");
+        assert_eq!(
+            ref_target(&client, &merge_ref).await.map(Value::from),
+            Some(before[number - 1][1].clone())
+        );
+    }
+
+    // When a later computation runs for each, as GitHub's does at an unpublished time
     let mut merges = Vec::new();
+    for number in 1..=3 {
+        let path = format!("repos/acme/public/pulls/{number}/mergeability");
+        let settled = server.admin(Method::POST, &path, None).await;
+        assert_eq!(settled.status, StatusCode::OK, "{}", settled.json());
+        merges.push(settled.json());
+    }
+
+    // Then each clean pull request names a test merge of the new base tip and its head, and keeps base.sha, as live cli/cli 14781 and 14846 do
     for (number, head) in [(1, "one"), (2, "two")] {
         let pull = client
             .get(&format!("repos/acme/public/pulls/{number}"))
             .await
             .json();
+        assert_eq!(snapshot(&pull), snapshot(&merges[number - 1]));
         assert_eq!(pull["mergeable"], true, "pull request {number}");
+        assert_eq!(pull["base"]["sha"], before[number - 1][0]);
         let sha = pull["merge_commit_sha"]
             .as_str()
             .unwrap_or_default()
@@ -506,10 +546,8 @@ async fn a_base_push_gives_every_open_pull_request_on_it_its_own_test_merge() {
             "pull request {number}"
         );
         let merge_ref = format!("repos/acme/public/git/ref/pull/{number}/merge");
-        assert_eq!(ref_target(&client, &merge_ref).await, Some(sha.clone()));
-        merges.push(sha);
+        assert_eq!(ref_target(&client, &merge_ref).await, Some(sha));
     }
-    assert_ne!(merges[0], merges[1]);
     // Then the pull request with a conflict has no test merge
     let clash = client.get("repos/acme/public/pulls/3").await.json();
     assert_eq!(clash["mergeable"], false);
@@ -517,38 +555,28 @@ async fn a_base_push_gives_every_open_pull_request_on_it_its_own_test_merge() {
 }
 
 #[tokio::test]
-async fn the_test_merge_follows_the_head_and_the_base_and_stays_behind_on_a_conflict() {
-    // Given an open pull request from feature into main
+async fn a_head_push_merges_on_the_live_base_and_a_conflict_keeps_the_merge_ref() {
+    // Given an open pull request from feature into main, whose base then moves
     let server = server(&[pull_request("feature", "main")]).await;
     let client = alice(&server);
+    let base = push(&server, "main", "docs/notes.md", "notes\n");
     // When the head moves
     let head = push(&server, "feature", "src/second.txt", "second\n");
-    // Then a new test merge has the new head as its second parent
-    let after_head = merge_commit_sha(&client).await;
-    let sha = after_head.as_str().unwrap_or_default().to_owned();
-    assert_eq!(
-        parents(&client, &sha).await,
-        [json!(tip(&server, "main")), json!(head)]
-    );
-    assert_eq!(ref_target(&client, HEAD_REF).await, Some(head.to_string()));
-    // When the base moves
-    let base = push(&server, "main", "docs/notes.md", "notes\n");
-    // Then a new test merge has the new base tip as its first parent
-    let after_base = merge_commit_sha(&client).await;
-    let sha = after_base.as_str().unwrap_or_default().to_owned();
-    assert_ne!(after_base, after_head);
-    assert_eq!(parents(&client, &sha).await, [json!(base), json!(head)]);
-    assert_eq!(ref_target(&client, MERGE_REF).await, Some(sha.clone()));
-    // When the base changes a file and the head then changes the same file differently
-    push(&server, "main", "README.md", "# from main\n");
-    let sha = merge_commit_sha(&client)
-        .await
+    // Then the pull request takes the live base tip, and its test merge has that tip and the new head as parents
+    let pull = client.settled_pull(PULL).await;
+    assert_eq!(pull["base"]["sha"], json!(base));
+    let sha = pull["merge_commit_sha"]
         .as_str()
         .unwrap_or_default()
         .to_owned();
+    assert_eq!(parents(&client, &sha).await, [json!(base), json!(head)]);
+    assert_eq!(ref_target(&client, MERGE_REF).await, Some(sha.clone()));
+    assert_eq!(ref_target(&client, HEAD_REF).await, Some(head.to_string()));
+    // When the base changes a file and the head then changes the same file differently
+    push(&server, "main", "README.md", "# from main\n");
     let head = push(&server, "feature", "README.md", "# from the feature\n");
     // Then merge_commit_sha is null while the merge ref keeps the last test merge
-    let pull = client.get(PULL).await.json();
+    let pull = client.settled_pull(PULL).await;
     assert_eq!(pull["mergeable"], false);
     assert_eq!(pull["merge_commit_sha"], Value::Null);
     assert_eq!(ref_target(&client, MERGE_REF).await, Some(sha));
@@ -1253,7 +1281,7 @@ async fn an_unknown_state_on_a_pull_request_edit_is_ignored_and_the_rest_is_writ
 }
 
 async fn mergeability(client: &GoGithub) -> Value {
-    let pull = client.get(PULL).await.json();
+    let pull = client.settled_pull(PULL).await;
     json!([
         pull["mergeable"],
         pull["mergeable_state"],

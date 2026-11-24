@@ -7,6 +7,7 @@ mod change;
 mod events;
 mod graphql;
 mod merge_state;
+mod mergeability;
 mod read;
 mod render;
 mod reopen;
@@ -44,6 +45,7 @@ pub fn register(r: &mut Registrar<'_>) {
     r.store.register_table::<state::PullBases>();
     r.store.register_table::<StateEvents>();
     register_tables(r.store);
+    mergeability::register(r);
     r.rest.handle("pulls/list", READ, read::list);
     r.rest.handle("pulls/create", WRITE, change::create);
     r.rest.handle("pulls/get", GET, read::get);

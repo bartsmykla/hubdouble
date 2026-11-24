@@ -8,7 +8,7 @@ use hubdouble_rest::{Ctx, Page, Reply};
 use hubdouble_store::{IssueComments, Issues};
 use serde::Serialize;
 
-use crate::{render, state};
+use crate::{mergeability, render, state};
 
 pub(crate) fn issue<'a>(ctx: &'a Ctx<'_>) -> Result<&'a Arc<Issue>, ApiError> {
     state::numbered(ctx.tx(), ctx.repo()?.id, ctx.param_i64("pull_number")?)
@@ -16,7 +16,9 @@ pub(crate) fn issue<'a>(ctx: &'a Ctx<'_>) -> Result<&'a Arc<Issue>, ApiError> {
 
 pub(crate) fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let issue = issue(ctx)?;
-    Reply::json(&render::detail(ctx.git(), ctx.tx(), ctx.urls(), issue)?)
+    let reply = Reply::json(&render::detail(ctx.git(), ctx.tx(), ctx.urls(), issue)?)?;
+    mergeability::read(ctx.git(), ctx.tx(), issue);
+    Ok(reply)
 }
 
 pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {

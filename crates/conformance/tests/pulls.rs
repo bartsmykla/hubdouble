@@ -465,8 +465,8 @@ async fn ref_updates_synchronize_and_merge_in_the_same_store_transaction() {
             )?)
         })
         .unwrap();
-    let open = client.get(NUM).await.json();
-    let merge = services
+    let open = client.settled_pull(NUM).await;
+    services
         .store
         .update(|tx| {
             Ok(services.git.merge(
@@ -483,7 +483,7 @@ async fn ref_updates_synchronize_and_merge_in_the_same_store_transaction() {
     assert_eq!(open["head"]["sha"], json!(new));
     assert_eq!(open["mergeable"], true);
     let closed = client.get(NUM).await.json();
-    assert_eq!(closed["base"]["sha"], json!(merge.commit));
+    assert_eq!(closed["base"]["sha"], open["base"]["sha"]);
     assert_eq!(closed["merged"], true);
     let payloads = hooks(&server, &["opened", "synchronize", "closed"]).await;
     assert_eq!(payloads[1]["before"], json!(old));

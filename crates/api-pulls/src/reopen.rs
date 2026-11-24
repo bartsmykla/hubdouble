@@ -4,7 +4,7 @@ use hubdouble_store::{Tx, TxMut};
 use serde_json::json;
 
 use crate::timeline::{self, StateKind};
-use crate::{change, events, state};
+use crate::{change, events, mergeability, state};
 
 /// Reopens a closed pull request the way GitHub does for `PATCH .../pulls/{n}`,
 /// `PATCH .../issues/{n}` and `reopenPullRequest` alike.
@@ -13,9 +13,9 @@ use crate::{change, events, state};
 /// head repository counts as a deleted head branch), another open pull request from the same
 /// head into the same base, and a head branch whose tip no longer descends from the pull
 /// request's head, each with GitHub's `422` and a `custom` error on `state`. Otherwise it opens
-/// `issue` and takes `head.sha`, `base.sha`, `mergeable` and the test merge commit in
-/// `merge_commit_sha` from the live branches. It does not
-/// store `issue`: the caller stores it and then sends [`reopened`].
+/// `issue`, takes `head.sha` and `base.sha` from the live branches and sets `mergeable` to
+/// `null` until [`reopened`] starts the computation of the test merge. It does not store
+/// `issue`: the caller stores it and then sends [`reopened`].
 ///
 /// # Errors
 ///
@@ -61,7 +61,7 @@ pub fn reopen(tx: &Tx, git: &Git, issue: &mut Issue) -> Result<(), ApiError> {
     }
     p.base.sha = base.to_string();
     p.head.sha = head.to_string();
-    state::test_merge(git, tx, (repo_id, issue.user_id), p, (base, head))?;
+    p.mergeable = None;
     issue.state = IssueState::Open;
     issue.state_reason = None;
     issue.closed_at = None;
@@ -70,8 +70,9 @@ pub fn reopen(tx: &Tx, git: &Git, issue: &mut Issue) -> Result<(), ApiError> {
 }
 
 /// Records the `reopened` issue event, at `issue.updated_at`, by `sender` (through the App
-/// `via_app` when an installation acted), and sends the `pull_request` `reopened` webhook, for
-/// `issue` as [`reopen`] and the store left it.
+/// `via_app` when an installation acted), sends the `pull_request` `reopened` webhook, for
+/// `issue` as [`reopen`] and the store left it, and then starts the computation of its test
+/// merge.
 ///
 /// # Errors
 ///
@@ -85,7 +86,8 @@ pub fn reopened(
 ) -> Result<(), ApiError> {
     state::sync_refs(tx, git, issue)?;
     timeline::record(tx, issue, (sender, via_app), StateKind::Reopened)?;
-    events::emit(tx, git, issue, sender, "reopened", json!({}))
+    events::emit(tx, git, issue, sender, "reopened", json!({}))?;
+    mergeability::start(tx, git, issue)
 }
 
 fn tip(git: &Git, tx: &Tx, side: &PullRef) -> Result<Option<ObjectId>, ApiError> {

@@ -78,7 +78,10 @@ pub(crate) fn record(tx: &mut TxMut<'_>, git: &Git, issue: &Issue) -> Result<(),
 }
 
 fn behind(git: &Git, tx: &Tx, repo: i64, p: &Pull) -> Result<bool, ApiError> {
-    let base: ObjectId = p.base.sha.parse()?;
+    let base: ObjectId = match crate::state::live_tip(git, tx, &p.base)? {
+        Some(tip) => tip,
+        None => p.base.sha.parse()?,
+    };
     let head: ObjectId = p.head.sha.parse()?;
     Ok(!git.is_ancestor(tx, repo, base, head)?)
 }

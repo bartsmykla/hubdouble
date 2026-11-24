@@ -111,7 +111,7 @@ async fn check_run(server: &TestServer, sha: &str, name: &str, conclusion: Optio
 }
 
 async fn state(client: &GoGithub) -> (Value, Value) {
-    let pull = client.get(PULL).await.json();
+    let pull = client.settled_pull(PULL).await;
     let answer = Graphql::new(client.clone())
         .query(
             "query($id: ID!) {node(id: $id) {... on PullRequest {mergeStateStatus}}}",

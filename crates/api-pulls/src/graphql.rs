@@ -10,7 +10,9 @@ use hubdouble_store::{Issues, Labels, Repos};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{CONTENTS_WRITE, READ, WRITE, change, events, merge_state, render, state};
+use crate::{
+    CONTENTS_WRITE, READ, WRITE, change, events, merge_state, mergeability, render, state,
+};
 
 macro_rules! fields {
     ($r:ident, $($field:literal => |$ctx:ident, $issue:ident, $p:ident| $value:expr),* $(,)?) => {
@@ -58,8 +60,14 @@ pub(crate) fn register(r: &mut Registry) {
         "headRefOid" => |_cx, _issue, p| &p.head.sha,
         "updatedAt" => |_cx, issue, _p| issue.updated_at,
         "mergedAt" => |_cx, _issue, p| p.merged_at,
-        "mergeable" => |_cx, _issue, p| match p.mergeable { Some(true) => "MERGEABLE", Some(false) => "CONFLICTING", None => "UNKNOWN" },
-        "mergeStateStatus" => |cx, issue, _p| crate::mergeable_state(cx.tx, issue).to_ascii_uppercase(),
+        "mergeable" => |cx, issue, p| {
+            mergeability::read(cx.git, cx.tx, issue);
+            match p.mergeable { Some(true) => "MERGEABLE", Some(false) => "CONFLICTING", None => "UNKNOWN" }
+        },
+        "mergeStateStatus" => |cx, issue, _p| {
+            mergeability::read(cx.git, cx.tx, issue);
+            crate::mergeable_state(cx.tx, issue).to_ascii_uppercase()
+        },
         "authorAssociation" => |cx, issue, _p| association(cx, issue)?,
         "reviewDecision" => |cx, issue, p| merge_state::review_decision(cx.tx, issue, p),
         "url" => |cx, issue, _p| format!("{}/{}/pull/{}", cx.urls.web, render::full_name(cx.tx, issue.repo_id)?, issue.number),

@@ -1,0 +1,239 @@
+use std::sync::Arc;
+
+use http::{Method, StatusCode};
+use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
+use hubdouble_testkit::fixture::{ALICE_ID, ALICE_TOKEN, PUBLIC_REPO_ID, WEBHOOK_SECRET};
+use hubdouble_testkit::validate::webhook_payload;
+use hubdouble_testkit::{GoGithub, Graphql, TestServer};
+use serde_json::{Value, json};
+
+const PULL: &str = "repos/acme/public/pulls/1";
+
+async fn server(extra: &[Value]) -> TestServer {
+    let mut builder = TestServer::builder()
+        .fixture()
+        .register(hubdouble_api_gitdata::register)
+        .register(hubdouble_api_repos::register)
+        .register(hubdouble_api_pulls::register)
+        .register(hubdouble_api_issues::register);
+    for entry in extra {
+        builder = builder.entry(entry.clone());
+    }
+    builder.start().await
+}
+
+fn pull_request() -> Value {
+    json!({"kind": "pull_request", "repository": "acme/public", "user": "alice",
+        "title": "feature into main", "head": "feature", "base": "main"})
+}
+
+fn alice(server: &TestServer) -> GoGithub {
+    GoGithub::enterprise(server).with_token(ALICE_TOKEN)
+}
+
+fn tip(server: &TestServer, branch: &str) -> ObjectId {
+    let services = server.server.services();
+    services
+        .store
+        .view(|tx| {
+            Ok(services
+                .git
+                .resolve_ref(tx, PUBLIC_REPO_ID, &format!("refs/heads/{branch}"))?)
+        })
+        .unwrap_or_else(|e| panic!("read {branch}: {e:?}"))
+}
+
+fn push(server: &TestServer, branch: &str, path: &str, text: &str) -> ObjectId {
+    let services = server.server.services();
+    let parent = tip(server, branch);
+    let sig = Signature::seed();
+    services
+        .store
+        .update(|tx| {
+            Ok(services.git.commit(
+                tx,
+                PUBLIC_REPO_ID,
+                ALICE_ID,
+                branch,
+                Some(parent),
+                &[FileChange::Write {
+                    path: path.into(),
+                    data: Arc::from(text.as_bytes()),
+                    mode: EntryMode::File,
+                }],
+                &format!("change {path}"),
+                &sig,
+                &sig,
+                false,
+            )?)
+        })
+        .unwrap_or_else(|e| panic!("push {branch}: {e:?}"))
+}
+
+fn pending(pull: &Value) -> Value {
+    json!([
+        pull["mergeable"],
+        pull["mergeable_state"],
+        pull["rebaseable"]
+    ])
+}
+
+async fn conflicted(client: &GoGithub) -> (bool, usize) {
+    for reads in 1..=10 {
+        let pull = client.get(PULL).await.json();
+        assert_eq!(pull["state"], "open");
+        if let Some(mergeable) = pull["mergeable"].as_bool() {
+            return (!mergeable, reads);
+        }
+    }
+    panic!("mergeable is still null after 10 reads");
+}
+
+async fn graphql_state(client: &GoGithub, node: &Value) -> Value {
+    let answer = Graphql::new(client.clone())
+        .query(
+            "query($id: ID!) {node(id: $id) {... on PullRequest {mergeable mergeStateStatus baseRefOid}}}",
+            &json!({"id": node}),
+        )
+        .await
+        .json();
+    assert_eq!(answer.get("errors"), None, "{answer}");
+    answer["data"]["node"].clone()
+}
+
+#[tokio::test]
+async fn the_client_merge_check_retries_a_null_mergeable_to_its_answer() {
+    // Given an open pull request whose base and head then change README.md differently
+    let server = server(&[pull_request()]).await;
+    let client = alice(&server);
+    let old = client.settled_pull(PULL).await;
+    let base = push(&server, "main", "README.md", "# from main\n");
+    let head = push(&server, "feature", "README.md", "# from the feature\n");
+    // When the first two reads come right after the push
+    let first = client.get(PULL).await.json();
+    let second = client.get(PULL).await.json();
+    // Then both answer null, unknown and null, with the new head on the live base and the last test merge, as live rust-lang/rust 166365 did
+    for read in [&first, &second] {
+        assert_eq!(pending(read), json!([null, "unknown", null]));
+        assert_eq!(read["head"]["sha"], json!(head));
+        assert_eq!(read["base"]["sha"], json!(base));
+        assert_eq!(read["merge_commit_sha"], old["merge_commit_sha"]);
+    }
+    // When the client's merge check reads until mergeable is not null
+    let (conflict, reads) = conflicted(&client).await;
+    // Then its next read answers that the pull request no longer merges
+    assert_eq!((conflict, reads), (true, 1));
+    let pull = client.get(PULL).await.json();
+    assert_eq!(pending(&pull), json!([false, "dirty", false]));
+    assert_eq!(pull["merge_commit_sha"], Value::Null);
+    // When the head moves again to a clean change and the client checks from the first read
+    push(&server, "feature", "README.md", "# from main\n");
+    let (conflict, reads) = conflicted(&client).await;
+    // Then it retries past two null answers and learns that the pull request merges
+    assert_eq!((conflict, reads), (false, 3));
+}
+
+#[tokio::test]
+async fn a_head_push_gives_null_mergeability_to_its_webhook_and_graphql_while_pending() {
+    // Given an open pull request with a computed test merge
+    let server = server(&[pull_request()]).await;
+    let client = alice(&server);
+    let old = client.settled_pull(PULL).await;
+    // When its head moves
+    let head = push(&server, "feature", "src/next.txt", "next\n");
+    // Then GraphQL answers UNKNOWN for mergeable and mergeStateStatus on the live base
+    let node = graphql_state(&client, &old["node_id"]).await;
+    assert_eq!(
+        node,
+        json!({"mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN",
+            "baseRefOid": tip(&server, "main")})
+    );
+    // Then the synchronize webhook carries null, unknown and null with the last test merge
+    let drained = server.admin(Method::POST, "hooks/drain", None).await;
+    assert_eq!(drained.status, StatusCode::NO_CONTENT);
+    let all = server.receiver.received().await;
+    let sync: Vec<_> = all
+        .iter()
+        .filter(|d| d.header("x-github-event") == "pull_request")
+        .map(|d| {
+            assert!(d.signed_with(WEBHOOK_SECRET));
+            d.json()
+        })
+        .filter(|p| p["action"] == "synchronize")
+        .collect();
+    assert_eq!(sync.len(), 1);
+    webhook_payload("pull_request", Some("synchronize"), &sync[0])
+        .unwrap_or_else(|errors| panic!("{errors:?}"));
+    let payload = &sync[0]["pull_request"];
+    assert_eq!(pending(payload), json!([null, "unknown", null]));
+    assert_eq!(payload["head"]["sha"], json!(head));
+    assert_eq!(payload["merge_commit_sha"], old["merge_commit_sha"]);
+    // When the computation ends
+    let pull = client.settled_pull(PULL).await;
+    // Then GraphQL answers from the new test merge
+    assert_eq!(pull["mergeable"], true);
+    let node = graphql_state(&client, &old["node_id"]).await;
+    assert_eq!(node["mergeable"], "MERGEABLE");
+    assert_eq!(node["mergeStateStatus"], "CLEAN");
+}
+
+#[tokio::test]
+async fn the_reads_a_computation_takes_come_from_the_seed_and_the_admin_api() {
+    // Given a repository whose seed computes mergeability before any read
+    let reads = |n: u32| json!({"kind": "mergeability", "repository": "acme/public", "reads": n});
+    let server = server(&[reads(0), pull_request()]).await;
+    let client = alice(&server);
+    // When the head moves
+    push(&server, "feature", "src/next.txt", "next\n");
+    // Then the first read answers the computed mergeability
+    assert_eq!(conflicted(&client).await, (false, 1));
+    // When the admin API sets four reads and the head moves again
+    let mut body = reads(4);
+    body.as_object_mut().map(|o| o.remove("kind"));
+    let set = server
+        .admin(Method::POST, "mergeability", Some(&body))
+        .await;
+    assert_eq!(set.status, StatusCode::CREATED, "{}", set.json());
+    push(&server, "feature", "src/next.txt", "again\n");
+    // Then four reads answer null before the fifth answers
+    assert_eq!(conflicted(&client).await, (false, 5));
+    // When the head moves once more and the admin settles the computation
+    push(&server, "feature", "src/next.txt", "once more\n");
+    let settled = server
+        .admin(Method::POST, "repos/acme/public/pulls/1/mergeability", None)
+        .await;
+    // Then the admin answer and the first read both carry the computed mergeability
+    assert_eq!(settled.status, StatusCode::OK, "{}", settled.json());
+    assert_eq!(settled.json()["mergeable"], true);
+    assert_eq!(conflicted(&client).await, (false, 1));
+}
+
+#[tokio::test]
+async fn a_new_pull_request_answers_null_mergeability_until_it_is_computed() {
+    // Given a branch ahead of main
+    let server = server(&[]).await;
+    let client = alice(&server);
+    // When a pull request is opened from it
+    let created = client
+        .post(
+            "repos/acme/public/pulls",
+            &json!({"title": "feature", "head": "feature", "base": "main"}),
+        )
+        .await;
+    // Then the answer has no mergeability and no test merge yet, as GitHub's opened payload has
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.json());
+    let created = created.json();
+    assert_eq!(pending(&created), json!([null, "unknown", null]));
+    assert_eq!(created["merge_commit_sha"], Value::Null);
+    let number = created["number"].as_i64().unwrap_or_default();
+    let merge_ref = format!("repos/acme/public/git/ref/pull/{number}/merge");
+    assert_eq!(client.get(&merge_ref).await.status, StatusCode::NOT_FOUND);
+    // When reads go on until it is computed
+    let pull = client
+        .settled_pull(&format!("repos/acme/public/pulls/{number}"))
+        .await;
+    // Then it merges, and the merge ref names its test merge
+    assert_eq!(pending(&pull), json!([true, "clean", true]));
+    let merge = client.get(&merge_ref).await.json();
+    assert_eq!(merge["object"]["sha"], pull["merge_commit_sha"]);
+}

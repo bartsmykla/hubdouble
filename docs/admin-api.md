@@ -14,6 +14,7 @@ Use `POST /_hubdouble/{kind}` with one JSON object. Use the fields for that kind
 | `app`, `installation`, `token`, `oauth` | [App](seed.md#app), [installation](seed.md#installation), [token](seed.md#token), or [OAuth](seed.md#oauth) fields |
 | `org_membership`, `team` | [Membership](seed.md#org_membership) or [team](seed.md#team) fields |
 | `pull_request`, `review`, `review_thread` | [Pull request](seed.md#pull_request), [review](seed.md#review), or [thread](seed.md#review_thread) fields |
+| `mergeability` | [Mergeability](seed.md#mergeability) fields. A second request for the same repository replaces its `reads` |
 | `check_run`, `status` | [Check run](seed.md#check_run) or [commit status](seed.md#status) fields |
 | `actions`, `actions_secret`, `actions_variable` | [Actions policy](seed.md#actions) or [secret and variable](seed.md#actions_secret-and-actions_variable) fields |
 | `release`, `ruleset` | [Release](seed.md#release) or [ruleset](seed.md#ruleset) fields |
@@ -65,6 +66,7 @@ The App routes accept a numeric App ID in place of the slug. App and user reads 
 | --- | --- | --- |
 | `PATCH /_hubdouble/repos/{owner}/{repo}` | Optional `sender`, `name`, `owner`, `description`, `homepage`, `default_branch`, `topics`, `archived`, `visibility`, and `private`. | `200` with the updated repository object. |
 | `DELETE /_hubdouble/repos/{owner}/{repo}` | Optional `sender` | `204`. Removes the repository. |
+| `POST /_hubdouble/repos/{owner}/{repo}/pulls/{pull_number}/mergeability` | No body | `200` with the pull request object. Completes a pending mergeability computation at once against the base the pull request shows. On a pull request without one, computes the test merge against the live base tip and keeps `base.sha`, as GitHub's later computation after a base push does. A closed pull request does not change. |
 | `PATCH /_hubdouble/releases/{release_id}` | Optional `sender`, `tag_name`, `target_commitish`, `name`, `body`, `draft`, and `prerelease`. | `200` with the updated release object. |
 | `GET /_hubdouble/org/{org}/members/{login}` | None | `200` with the membership object, including `url`, `organization_url`, `organization`, `user`, `role`, and `state`. |
 | `PUT /_hubdouble/org/{org}/members/{login}` | Optional `sender`, `role` (`member` or `admin`), `state` (`active` or `pending`), and `public` (boolean). A new membership defaults to `member`, `active`, and private. | `204`. Creates or updates the membership. |

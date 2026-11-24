@@ -316,6 +316,25 @@ impl GoGithub {
     pub async fn post(&self, path: &str, body: &Value) -> Answer {
         self.call_json(Method::POST, path, body).await
     }
+
+    /// The pull request at `path` once GitHub has computed its mergeability: it reads again
+    /// while an open pull request answers `mergeable: null`, as the client's merge check does,
+    /// and returns the first other answer.
+    ///
+    /// # Panics
+    ///
+    /// When a read is not `200`, or `mergeable` is still `null` after 10 reads.
+    pub async fn settled_pull(&self, path: &str) -> Value {
+        for _ in 0..10 {
+            let answer = self.get(path).await;
+            assert_eq!(answer.status, http::StatusCode::OK, "{path}");
+            let pull = answer.json();
+            if !pull["mergeable"].is_null() || pull["state"] != "open" {
+                return pull;
+            }
+        }
+        panic!("{path} still answers mergeable null after 10 reads");
+    }
 }
 
 fn escape(s: &str, keep_slash: bool) -> String {

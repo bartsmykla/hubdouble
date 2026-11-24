@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use hubdouble_git::{Comparison, Git, GitError, ObjectId, RefChange};
@@ -91,46 +89,6 @@ fn set_merge(p: &mut Pull, merge: Option<ObjectId>) {
     p.merge_commit_sha = merge.map(|id| id.to_string());
 }
 
-type TestMerges = HashMap<i64, (ObjectId, ObjectId, Result<Option<ObjectId>, GitError>)>;
-
-fn test_merges(git: &Git, tx: &Tx, issues: &[Arc<Issue>]) -> Result<TestMerges, GitError> {
-    let threads = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
-    if threads < 2 || issues.len() < 2 {
-        return Ok(TestMerges::new());
-    }
-    let mut jobs = Vec::with_capacity(issues.len());
-    for issue in issues {
-        let Some(p) = &issue.pull else { continue };
-        if let (Some(base), Some(head)) = (live_tip(git, tx, &p.base)?, live_tip(git, tx, &p.head)?)
-        {
-            jobs.push((issue.id, issue.repo_id, issue.user_id, base, head));
-        }
-    }
-    let size = jobs.len().div_ceil(threads).max(1);
-    Ok(std::thread::scope(|s| {
-        let parts: Vec<_> = jobs
-            .chunks(size)
-            .map(|part| {
-                s.spawn(move || {
-                    part.iter()
-                        .filter(|&&(_, repo, _, base, head)| {
-                            matches!(git.is_ancestor(tx, repo, head, base), Ok(false))
-                        })
-                        .map(|&(id, repo, author, base, head)| {
-                            let merge = git.test_merge(tx, repo, author, base, head);
-                            (id, (base, head, merge))
-                        })
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        parts
-            .into_iter()
-            .flat_map(|part| part.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-            .collect()
-    }))
-}
-
 /// Points `refs/pull/{n}/head` at the pull request's head and, while it is open,
 /// `refs/pull/{n}/merge` at its test merge commit, as GitHub keeps them. A pull request with
 /// a conflict keeps its last merge ref, and a closed one loses it. Call it after the store
@@ -194,9 +152,8 @@ pub(crate) fn ref_updated(
         .filter(|issue| issue.state == IssueState::Open)
         .cloned()
         .collect();
-    let merges = test_merges(git, tx, &affected)?;
     for issue in affected {
-        update_refs(tx, git, change, name, &issue, &merges)?;
+        update_refs(tx, git, change, name, &issue)?;
     }
     Ok(())
 }
@@ -291,10 +248,9 @@ fn update_refs(
     git: &Git,
     change: &RefChange,
     name: &str,
-    issue: &Issue,
-    merges: &TestMerges,
+    issue: &Arc<Issue>,
 ) -> Result<(), ApiError> {
-    let mut issue = issue.clone();
+    let mut issue = Issue::clone(issue);
     let repo_id = issue.repo_id;
     let Some(p) = issue.pull.as_mut() else {
         return Ok(());
@@ -302,18 +258,15 @@ fn update_refs(
     let head_changed = p.head.repo_id == Some(change.repo_id) && p.head.ref_name == name;
     let base_changed = repo_id == change.repo_id && p.base.ref_name == name;
     let old_base = p.base.sha.parse()?;
+    let old_mergeable = p.mergeable;
     let moved = head_changed && change.new.is_some_and(|id| p.head.sha != id.to_string());
-    if let Some(id) = change.new {
-        if head_changed {
-            p.head.sha = id.to_string();
-        }
-        if base_changed {
-            p.base.sha = id.to_string();
-        }
+    if let Some(id) = change.new.filter(|_| moved) {
+        p.head.sha = id.to_string();
     }
     let base = live_tip(git, tx, &p.base)?;
     let head = live_tip(git, tx, &p.head)?;
     let now = git.now();
+    let mut stale = false;
     let closes = if let (Some(base), Some(head)) = (base, head) {
         let reaches = git.is_ancestor(tx, repo_id, head, base)?;
         if reaches {
@@ -333,18 +286,19 @@ fn update_refs(
                 issue_id: issue.id,
                 oid: comparison_base,
             })?;
-        } else {
-            let merge = match merges.get(&issue.id) {
-                Some((b, h, merge)) if (*b, *h) == (base, head) => merge.clone()?,
-                _ => git.test_merge(tx, repo_id, issue.user_id, base, head)?,
-            };
-            set_merge(p, merge);
+        } else if moved {
+            p.base.sha = base.to_string();
+            p.mergeable = None;
+            stale = true;
         }
         reaches
     } else {
         p.mergeable = None;
         false
     };
+    if !closes && !moved && p.mergeable == old_mergeable {
+        return crate::merge_state::record(tx, git, &issue);
+    }
     if closes {
         issue.state = IssueState::Closed;
         issue.closed_at = Some(now);
@@ -367,6 +321,9 @@ fn update_refs(
             serde_json::json!({"before": before, "after": after}),
         )?;
     }
+    if stale {
+        crate::mergeability::start(tx, git, &issue)?;
+    }
     if closes {
         events::emit(
             tx,
@@ -380,7 +337,7 @@ fn update_refs(
     Ok(())
 }
 
-fn live_tip(git: &Git, tx: &Tx, r: &PullRef) -> Result<Option<ObjectId>, GitError> {
+pub(crate) fn live_tip(git: &Git, tx: &Tx, r: &PullRef) -> Result<Option<ObjectId>, GitError> {
     let Some(repo) = r.repo_id else {
         return Ok(None);
     };
