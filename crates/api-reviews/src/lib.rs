@@ -8,6 +8,7 @@ mod graphql;
 mod reviewers;
 mod reviews;
 mod seed;
+mod stale;
 mod view;
 
 const READ: Requirement = Requirement {
@@ -26,6 +27,7 @@ pub fn register(r: &mut Registrar<'_>) {
     reviewers::register(r.rest);
     graphql::register(r.gql);
     r.git.on_ref_update(anchors::ref_changed);
+    r.git.on_ref_update(stale::ref_changed);
     seed::register(r.admin);
 }
 

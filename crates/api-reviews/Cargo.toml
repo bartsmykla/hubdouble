@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 http.workspace = true
 hubdouble-admin.workspace = true
+hubdouble-api-gitdata.workspace = true
 hubdouble-api-pulls.workspace = true
 hubdouble-auth.workspace = true
 hubdouble-git.workspace = true

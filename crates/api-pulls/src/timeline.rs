@@ -7,13 +7,25 @@ use hubdouble_store::{Entity, Rows, TxMut};
 pub enum StateKind {
     Closed,
     Reopened,
-    Renamed { from: String, to: String },
+    Renamed {
+        from: String,
+        to: String,
+    },
     BaseRefChanged,
     AutomaticBaseChangeSucceeded,
     AutomaticBaseChangeFailed,
     HeadRefDeleted,
     HeadRefRestored,
     BaseRefDeleted,
+    /// A review dismissed: `state` is the review's state before, in lowercase, `message` the
+    /// dismissal message (`None` for a stale approval), and `commit` the head that made the
+    /// approval stale (`None` for a dismissal through the API).
+    ReviewDismissed {
+        review_id: i64,
+        state: &'static str,
+        message: Option<String>,
+        commit: Option<String>,
+    },
 }
 
 impl StateKind {
@@ -30,6 +42,7 @@ impl StateKind {
             StateKind::HeadRefDeleted => "head_ref_deleted",
             StateKind::HeadRefRestored => "head_ref_restored",
             StateKind::BaseRefDeleted => "base_ref_deleted",
+            StateKind::ReviewDismissed { .. } => "review_dismissed",
         }
     }
 
@@ -44,8 +57,24 @@ impl StateKind {
             StateKind::HeadRefDeleted => "HRDE",
             StateKind::HeadRefRestored => "HRRE",
             StateKind::BaseRefDeleted => "BRDE",
+            StateKind::ReviewDismissed { .. } => "RDE",
         }
     }
+}
+
+/// Records the `review_dismissed` issue event of a dismissal by `actor` at `at`.
+///
+/// # Errors
+///
+/// A store error.
+pub fn review_dismissed(
+    tx: &mut TxMut<'_>,
+    issue: &Issue,
+    actor: (i64, Option<i64>),
+    kind: StateKind,
+    at: Timestamp,
+) -> Result<(), ApiError> {
+    record_at(tx, issue, actor, kind, at)
 }
 
 /// An issue event that T5 records for a pull request: a `reopened` one from any path, and the

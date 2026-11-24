@@ -20,7 +20,7 @@ pub use change::kept;
 pub use merge_state::mergeable_state;
 pub use reopen::{reopen, reopened};
 pub use state::sync_refs;
-pub use timeline::{StateEvent, StateEvents, StateKind};
+pub use timeline::{StateEvent, StateEvents, StateKind, review_dismissed};
 
 const fn repo_requirement(grants: &'static [Grant]) -> Requirement {
     Requirement {
@@ -39,6 +39,7 @@ const CONTENTS_WRITE: Requirement = repo_requirement(&[Grant::write("contents")]
 /// serves another track's routes without [`register`].
 pub fn register_tables(b: &mut StoreBuilder) {
     b.register_table::<merge_state::MergeStates>()
+        .register_table::<reviewing::LastPushes>()
         .register_table::<association::Contributors>();
 }
 

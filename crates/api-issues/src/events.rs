@@ -12,15 +12,33 @@ use crate::shared::{full_name, integration, user};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum What {
     Closed(Option<StateReason>),
-    CommitClosed { repo_id: i64, sha: ObjectId },
+    CommitClosed {
+        repo_id: i64,
+        sha: ObjectId,
+    },
     Reopened,
-    Labeled { name: String, color: String },
-    Unlabeled { name: String, color: String },
+    Labeled {
+        name: String,
+        color: String,
+    },
+    Unlabeled {
+        name: String,
+        color: String,
+    },
     Assigned(i64),
     Unassigned(i64),
-    Renamed { from: String, to: String },
+    Renamed {
+        from: String,
+        to: String,
+    },
     Merged(Option<String>),
     PullRef(&'static str),
+    ReviewDismissed {
+        review_id: i64,
+        state: &'static str,
+        message: Option<String>,
+        commit: Option<String>,
+    },
 }
 
 impl What {
@@ -35,6 +53,7 @@ impl What {
             What::Renamed { .. } => "renamed",
             What::Merged(_) => "merged",
             What::PullRef(name) => name,
+            What::ReviewDismissed { .. } => "review_dismissed",
         }
     }
 
@@ -49,6 +68,7 @@ impl What {
             What::Renamed { .. } => "RTE",
             What::Merged(_) => "ME",
             What::PullRef(_) => "",
+            What::ReviewDismissed { .. } => "RDE",
         }
     }
 
@@ -170,6 +190,17 @@ fn pull_event(e: &Arc<StateEvent>) -> IssueEvent {
                 from: from.clone(),
                 to: to.clone(),
             },
+            StateKind::ReviewDismissed {
+                review_id,
+                state,
+                message,
+                commit,
+            } => What::ReviewDismissed {
+                review_id: *review_id,
+                state,
+                message: message.clone(),
+                commit: commit.clone(),
+            },
             other => What::PullRef(other.name()),
         },
         created_at: e.created_at,
@@ -254,6 +285,20 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             }
             What::Reopened => vec![("state_reason", json!("reopened"))],
             What::Merged(_) | What::PullRef(_) => vec![],
+            What::ReviewDismissed {
+                review_id,
+                state,
+                message,
+                commit,
+            } => vec![(
+                "dismissed_review",
+                json!({
+                    "state": state,
+                    "review_id": review_id,
+                    "dismissal_message": message,
+                    "dismissal_commit_id": commit,
+                }),
+            )],
         };
         for (k, value) in extra {
             v[k] = value;

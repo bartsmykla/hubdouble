@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use http::{Method, StatusCode};
-use hubdouble_testkit::fixture::{self, ALICE_TOKEN, BOB_TOKEN};
-use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer};
+use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
+use hubdouble_testkit::fixture::{self, ALICE_ID, ALICE_TOKEN, BOB_ID, BOB_TOKEN, PUBLIC_REPO_ID};
+use hubdouble_testkit::{Answer, Delivery, GoGithub, Graphql, TestServer};
 use serde_json::{Value, json};
 
 const REPO: &str = "repos/acme/public";
@@ -11,6 +14,9 @@ const PULL_MERGE_DOCS: &str = "https://docs.github.com/rest/pulls/pulls#merge-a-
 async fn server(extra: &[Value]) -> TestServer {
     let mut entries = fixture::seed();
     for entry in &mut entries {
+        if entry["kind"] == "app" {
+            entry["events"] = json!(["pull_request_review"]);
+        }
         if entry["kind"] == "repository" && entry["name"] == fixture::PUBLIC_REPO {
             entry["collaborators"] = json!([{"login": "bob", "permission": "write"}]);
         }
@@ -102,6 +108,40 @@ async fn merge_feature(client: &GoGithub) -> Answer {
             &json!({"base": "main", "head": "feature"}),
         )
         .await
+}
+
+fn commit(server: &TestServer, sender: i64, branch: &str, path: Option<&str>) -> ObjectId {
+    let services = server.server.services();
+    let sig = Signature::seed();
+    let changes: Vec<_> = path
+        .map(|path| FileChange::Write {
+            path: path.into(),
+            data: Arc::from(&b"change\n"[..]),
+            mode: EntryMode::File,
+        })
+        .into_iter()
+        .collect();
+    services
+        .store
+        .update(|tx| {
+            let parent =
+                services
+                    .git
+                    .resolve_ref(tx, PUBLIC_REPO_ID, &format!("refs/heads/{branch}"))?;
+            Ok(services.git.commit(
+                tx,
+                PUBLIC_REPO_ID,
+                sender,
+                branch,
+                Some(parent),
+                &changes,
+                "change",
+                &sig,
+                &sig,
+                false,
+            )?)
+        })
+        .unwrap_or_else(|e| panic!("commit to {branch}: {e:?}"))
 }
 
 #[tokio::test]
@@ -334,12 +374,12 @@ async fn bypass_actors_skip_their_ruleset_by_mode() {
     let server = server(&[ruleset("~DEFAULT_BRANCH", &admins("always"), &rules)]).await;
     // When bob, who can only write, merges
     let answer = merge_feature(&client(&server, BOB_TOKEN)).await;
-    // Then the rule holds for him
+    // Then the rule holds for bob
     let update = ["Cannot update this protected ref."];
     assert_refused(&answer, 409, Some(MERGE_DOCS), &update, "bob");
     // When alice, an admin, merges
     let answer = merge_feature(&client(&server, ALICE_TOKEN)).await;
-    // Then she bypasses it
+    // Then the admin bypasses it
     assert_eq!(answer.status, StatusCode::CREATED, "{}", answer.json());
 
     // Given the same rule that admins bypass only for pull requests
@@ -354,7 +394,7 @@ async fn bypass_actors_skip_their_ruleset_by_mode() {
     let answer = alice
         .call_json(Method::PUT, &format!("{PULL}/merge"), &json!({}))
         .await;
-    // Then she bypasses it
+    // Then the admin bypasses it
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.json());
 }
 
@@ -380,6 +420,27 @@ async fn approve(server: &TestServer) {
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.json());
 }
 
+async fn decision(client: &GoGithub) -> (Value, Value) {
+    let pull = client.get(PULL).await.json();
+    let answer = Graphql::new(client.clone())
+        .query(
+            "query($id: ID!) {node(id: $id) {... on PullRequest {reviewDecision}}}",
+            &json!({"id": pull["node_id"]}),
+        )
+        .await
+        .json();
+    (
+        pull["mergeable_state"].clone(),
+        answer["data"]["node"]["reviewDecision"].clone(),
+    )
+}
+
+async fn deliveries(server: &TestServer) -> Vec<Delivery> {
+    let drained = server.admin(Method::POST, "hooks/drain", None).await;
+    assert_eq!(drained.status, StatusCode::NO_CONTENT);
+    server.receiver.received().await
+}
+
 #[tokio::test]
 async fn a_pull_request_merge_refuses_missing_reviews_and_checks_with_405() {
     // Given a main that needs one approval and the ci check
@@ -403,4 +464,100 @@ async fn a_pull_request_merge_refuses_missing_reviews_and_checks_with_405() {
     // Then the merge goes through
     let answer = merge_pull(&alice).await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.json());
+}
+
+#[tokio::test]
+async fn a_push_that_changes_the_diff_dismisses_stale_approvals() {
+    // Given a main that dismisses stale approvals, and bob's approval of the pull request
+    let server = server_with_pull(&[on_main(&json!([reviews_rule(1, true, false)]))]).await;
+    let alice = client(&server, ALICE_TOKEN);
+    approve(&server).await;
+    let approved = alice.get(&format!("{PULL}/reviews")).await.json()[0].clone();
+    assert_eq!(decision(&alice).await, (json!("clean"), json!("APPROVED")));
+    deliveries(&server).await;
+    // When alice pushes a commit with the same tree
+    commit(&server, ALICE_ID, "feature", None);
+    // Then the diff is the same and the approval stays
+    assert_eq!(decision(&alice).await, (json!("clean"), json!("APPROVED")));
+    // When alice pushes a commit that changes a file
+    let head = commit(&server, ALICE_ID, "feature", Some("more.txt")).to_string();
+    // Then the approval is dismissed and keeps its commit and time
+    let review = alice.get(&format!("{PULL}/reviews")).await.json()[0].clone();
+    assert_eq!(review["state"], "DISMISSED");
+    assert_eq!(review["commit_id"], approved["commit_id"]);
+    assert_eq!(review["submitted_at"], approved["submitted_at"]);
+    assert_eq!(
+        decision(&alice).await,
+        (json!("blocked"), json!("REVIEW_REQUIRED"))
+    );
+    // Then the issue events record the dismissal by the pusher, as live GitHub does
+    let events = alice.get(&format!("{REPO}/issues/1/events")).await.json();
+    let event = events
+        .as_array()
+        .and_then(|all| all.iter().find(|e| e["event"] == "review_dismissed"))
+        .cloned()
+        .unwrap_or_else(|| panic!("no review_dismissed event: {events}"));
+    assert_eq!(event["actor"]["login"], "alice");
+    assert_eq!(event["commit_id"], Value::Null);
+    assert_eq!(event["commit_url"], Value::Null);
+    assert_eq!(event["performed_via_github_app"], Value::Null);
+    assert!(
+        event["node_id"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("RDE_")),
+        "{event}"
+    );
+    assert_eq!(
+        event["dismissed_review"],
+        json!({"state": "approved", "review_id": approved["id"], "dismissal_message": null,
+               "dismissal_commit_id": head})
+    );
+    // Then a pull_request_review webhook tells of the dismissal
+    let hooks: Vec<_> = deliveries(&server)
+        .await
+        .iter()
+        .filter(|d| d.header("x-github-event") == "pull_request_review")
+        .map(Delivery::json)
+        .collect();
+    assert_eq!(hooks.len(), 1, "{hooks:?}");
+    assert_eq!(hooks[0]["action"], "dismissed");
+    assert_eq!(hooks[0]["review"]["state"], "dismissed");
+    assert_eq!(hooks[0]["review"]["id"], approved["id"]);
+    assert_eq!(hooks[0]["sender"]["login"], "alice");
+}
+
+#[tokio::test]
+async fn the_last_push_needs_an_approval_from_someone_else() {
+    // Given a main that needs the last push approved, and bob's approval
+    let server = server_with_pull(&[on_main(&json!([reviews_rule(1, false, true)]))]).await;
+    let alice = client(&server, ALICE_TOKEN);
+    approve(&server).await;
+    assert_eq!(decision(&alice).await, (json!("clean"), json!("APPROVED")));
+    // When alice pushes a change
+    commit(&server, ALICE_ID, "feature", Some("more.txt"));
+    // Then the push waits for a new approval
+    assert_eq!(
+        decision(&alice).await,
+        (json!("blocked"), json!("REVIEW_REQUIRED"))
+    );
+    let reapproval = ["Waiting on 1 reapproval from someone other than the last pusher."];
+    assert_refused(
+        &merge_pull(&alice).await,
+        405,
+        Some(PULL_MERGE_DOCS),
+        &reapproval,
+        "alice",
+    );
+    // When bob approves again
+    approve(&server).await;
+    // Then the merge state is clean
+    assert_eq!(decision(&alice).await, (json!("clean"), json!("APPROVED")));
+    // When bob pushes and then approves that push
+    commit(&server, BOB_ID, "feature", Some("bob.txt"));
+    approve(&server).await;
+    // Then the last pusher's own approval does not count
+    assert_eq!(
+        decision(&alice).await,
+        (json!("blocked"), json!("REVIEW_REQUIRED"))
+    );
 }

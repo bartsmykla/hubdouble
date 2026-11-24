@@ -310,6 +310,9 @@ fn update_refs(
     }
     tx.table_mut::<Issues>().replace(issue.clone())?;
     sync_refs(tx, git, &issue)?;
+    if moved {
+        crate::reviewing::pushed(tx, git, &issue, change)?;
+    }
     if moved && let Some(after) = change.new {
         let before = change.old.unwrap_or(ObjectId::NULL);
         events::emit(

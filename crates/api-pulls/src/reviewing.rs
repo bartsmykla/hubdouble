@@ -1,20 +1,78 @@
 use std::collections::BTreeMap;
 
-use hubdouble_api_gitdata::branch_rules::{self, Via, flag, parameter};
+use hubdouble_api_gitdata::branch_rules::{self, Via, diff_state, flag, parameter};
 use hubdouble_auth::Actor;
-use hubdouble_git::{Git, ObjectId};
-use hubdouble_model::{ApiError, Issue, Pull, Repo, RepoRole, ReviewState, Rule};
-use hubdouble_store::{Repos, ReviewThreads, Reviews, Tx};
+use hubdouble_git::{Git, ObjectId, RefChange};
+use hubdouble_model::{ApiError, Issue, Pull, Repo, RepoRole, ReviewState, Rule, Timestamp};
+use hubdouble_store::{Counters, Entity, Repos, ReviewThreads, Reviews, Rows, Sequence, Tx, TxMut};
 use serde_json::Value;
+
+pub(crate) type LastPushes = Rows<LastPush>;
+
+#[derive(Clone)]
+pub(crate) struct LastPush {
+    issue_id: i64,
+    pusher: i64,
+    at: (Timestamp, i64),
+}
+
+impl Entity for LastPush {
+    fn id(&self) -> i64 {
+        self.issue_id
+    }
+}
+
+fn last_push(tx: &Tx, issue: &Issue) -> (i64, (Timestamp, i64)) {
+    tx.table::<LastPushes>()
+        .get(issue.id)
+        .map_or((issue.user_id, (issue.created_at, 0)), |p| (p.pusher, p.at))
+}
 
 fn base_repo<'t>(tx: &'t Tx, p: &Pull) -> Option<&'t Repo> {
     tx.table::<Repos>().get(p.base.repo_id?).map(AsRef::as_ref)
 }
 
+fn requires_last_push(rules: &[&Rule]) -> bool {
+    rules
+        .iter()
+        .any(|r| r.rule_type == "pull_request" && flag(r, "require_last_push_approval"))
+}
+
+pub(crate) fn pushed(
+    tx: &mut TxMut<'_>,
+    git: &Git,
+    issue: &Issue,
+    change: &RefChange,
+) -> Result<(), ApiError> {
+    let (Some(p), Some(new)) = (issue.pull.as_ref(), change.new) else {
+        return Ok(());
+    };
+    let Some(repo) = base_repo(tx, p) else {
+        return Ok(());
+    };
+    let tracked = requires_last_push(&branch_rules::rules(tx, None, repo, &p.base.ref_name, true));
+    if tracked && let Some(old) = change.old {
+        let base: ObjectId = p.base.sha.parse()?;
+        let repo = issue.repo_id;
+        if diff_state(tx, git, repo, base, old)? == diff_state(tx, git, repo, base, new)? {
+            return Ok(());
+        }
+    }
+    let at = (git.now(), tx.table::<Counters>().current(Sequence::Id));
+    tx.table_mut::<LastPushes>().replace(LastPush {
+        issue_id: issue.id,
+        pusher: change.sender,
+        at,
+    })?;
+    Ok(())
+}
+
 #[derive(Default)]
 struct Asks {
     approvals: usize,
+    last_push: bool,
     threads: bool,
+    any: bool,
 }
 
 impl Asks {
@@ -26,8 +84,10 @@ impl Asks {
                 .and_then(|n| usize::try_from(n).ok())
                 .unwrap_or(0);
             asks.approvals = asks.approvals.max(count);
+            asks.last_push |= flag(rule, "require_last_push_approval");
             asks.threads |= flag(rule, "required_review_thread_resolution");
         }
+        asks.any = asks.approvals > 0 || asks.last_push;
         asks
     }
 }
@@ -35,6 +95,7 @@ impl Asks {
 struct Tally {
     approvals: usize,
     changes: usize,
+    approved_since_push: bool,
 }
 
 fn tally(tx: &Tx, issue: &Issue, repo: &Repo) -> Tally {
@@ -52,23 +113,36 @@ fn tally(tx: &Tx, issue: &Issue, repo: &Repo) -> Tally {
             *last = key;
         }
     }
-    let count = |state| reviewers.values().filter(|entry| entry.2 == state).count();
+    let (pusher, pushed_at) = last_push(tx, issue);
+    let approved = || {
+        reviewers
+            .iter()
+            .filter(|(_, entry)| entry.2 == ReviewState::Approved)
+    };
     Tally {
-        approvals: count(ReviewState::Approved),
-        changes: count(ReviewState::ChangesRequested),
+        approvals: approved().count(),
+        changes: reviewers
+            .values()
+            .filter(|entry| entry.2 == ReviewState::ChangesRequested)
+            .count(),
+        approved_since_push: approved().any(|(&user, entry)| {
+            user != pusher && entry.0.is_some_and(|at| (at, entry.1) > pushed_at)
+        }),
     }
 }
 
 pub(crate) fn review_decision(tx: &Tx, issue: &Issue, p: &Pull) -> Option<&'static str> {
     let repo = base_repo(tx, p)?;
     let asks = Asks::of(&branch_rules::rules(tx, None, repo, &p.base.ref_name, true));
-    if asks.approvals == 0 {
+    if !asks.any {
         return None;
     }
     let tally = tally(tx, issue, repo);
     Some(if tally.changes > 0 {
         "CHANGES_REQUESTED"
-    } else if tally.approvals >= asks.approvals {
+    } else if tally.approvals >= asks.approvals.max(1)
+        && (!asks.last_push || tally.approved_since_push)
+    {
         "APPROVED"
     } else {
         "REVIEW_REQUIRED"
@@ -89,7 +163,7 @@ pub(crate) fn blocks(tx: &Tx, issue: &Issue, p: &Pull, rules: &[&Rule]) -> Vec<S
     };
     let mut out = Vec::new();
     let asks = Asks::of(rules);
-    if asks.approvals > 0 {
+    if asks.any {
         let tally = tally(tx, issue, repo);
         if tally.changes > 0 {
             out.push(format!(
@@ -109,6 +183,8 @@ pub(crate) fn blocks(tx: &Tx, issue: &Issue, p: &Pull, rules: &[&Rule]) -> Vec<S
             out.push(format!(
                 "At least {wanted} required by reviewers with write access."
             ));
+        } else if asks.last_push && !tally.approved_since_push {
+            out.push("Waiting on 1 reapproval from someone other than the last pusher.".to_owned());
         }
     }
     if asks.threads
