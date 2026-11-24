@@ -98,9 +98,18 @@ fn set_merge(p: &mut Pull, merge: Option<ObjectId>) {
 ///
 /// A git error while it moves the refs.
 pub fn sync_refs(tx: &mut TxMut<'_>, git: &Git, issue: &Issue) -> Result<(), ApiError> {
+    sync_refs_by(tx, git, issue, issue.user_id)
+}
+
+pub(crate) fn sync_refs_by(
+    tx: &mut TxMut<'_>,
+    git: &Git,
+    issue: &Issue,
+    sender: i64,
+) -> Result<(), ApiError> {
     crate::merge_state::record(tx, git, issue)?;
     let p = pull(issue)?;
-    let (repo, sender) = (issue.repo_id, issue.user_id);
+    let repo = issue.repo_id;
     let head = format!("refs/pull/{}/head", issue.number);
     set_ref(tx, git, (repo, sender), &head, Some(p.head.sha.parse()?))?;
     let merge = match (issue.state, &p.merge_commit_sha) {
@@ -325,7 +334,7 @@ fn update_refs(
         )?;
     }
     if stale {
-        crate::mergeability::start(tx, git, &issue)?;
+        crate::mergeability::start(tx, git, &issue, change.sender)?;
     }
     if closes {
         events::emit(

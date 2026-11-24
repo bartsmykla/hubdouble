@@ -21,6 +21,7 @@ pub(crate) type MergeJobs = Rows<MergeJob>;
 pub(crate) struct MergeJob {
     issue_id: i64,
     reads: u32,
+    sender: i64,
 }
 
 impl Entity for MergeJob {
@@ -59,17 +60,23 @@ pub(crate) fn pending(tx: &Tx, issue_id: i64) -> bool {
     tx.table::<MergeJobs>().get(issue_id).is_some()
 }
 
-pub(crate) fn start(tx: &mut TxMut<'_>, git: &Git, issue: &Issue) -> Result<(), ApiError> {
+pub(crate) fn start(
+    tx: &mut TxMut<'_>,
+    git: &Git,
+    issue: &Issue,
+    sender: i64,
+) -> Result<(), ApiError> {
     let reads = tx
         .table::<MergeReads>()
         .get(issue.repo_id)
         .map_or(DEFAULT_READS, |r| r.reads);
     if reads == 0 {
-        return settle(tx, git, issue.id, false);
+        return settle(tx, git, issue.id, false, sender);
     }
     tx.table_mut::<MergeJobs>().replace(MergeJob {
         issue_id: issue.id,
         reads,
+        sender,
     })?;
     Ok(())
 }
@@ -86,12 +93,12 @@ fn counted(tx: &mut TxMut<'_>, git: &Git, issue_id: i64) -> Result<(), ApiError>
     };
     if job.reads > 1 {
         tx.table_mut::<MergeJobs>().replace(MergeJob {
-            issue_id,
             reads: job.reads - 1,
+            ..*job
         })?;
         return Ok(());
     }
-    settle(tx, git, issue_id, false)
+    settle(tx, git, issue_id, false, job.sender)
 }
 
 pub(crate) fn settle(
@@ -99,6 +106,7 @@ pub(crate) fn settle(
     git: &Git,
     issue_id: i64,
     live_base: bool,
+    sender: i64,
 ) -> Result<(), ApiError> {
     tx.table_mut::<MergeJobs>().remove(issue_id);
     let Some(issue) = tx.table::<Issues>().get(issue_id) else {
@@ -120,7 +128,7 @@ pub(crate) fn settle(
     let head = p.head.sha.parse()?;
     state::test_merge(git, tx, (repo, author), p, (base, head))?;
     tx.table_mut::<Issues>().replace(issue.clone())?;
-    state::sync_refs(tx, git, &issue)
+    state::sync_refs_by(tx, git, &issue, sender)
 }
 
 #[derive(Deserialize)]
@@ -177,8 +185,13 @@ fn settle_named(
         .get("pull_number")
         .and_then(|n| n.parse().ok())
         .ok_or_else(ApiError::not_found)?;
-    let id = state::numbered(tx, repo, number)?.id;
-    settle(tx, git, id, !pending(tx, id))?;
+    let issue = state::numbered(tx, repo, number)?;
+    let id = issue.id;
+    let sender = tx
+        .table::<MergeJobs>()
+        .get(id)
+        .map_or(issue.user_id, |job| job.sender);
+    settle(tx, git, id, !pending(tx, id), sender)?;
     let issue = tx
         .table::<Issues>()
         .get(id)

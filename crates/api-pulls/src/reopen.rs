@@ -87,7 +87,7 @@ pub fn reopened(
     state::sync_refs(tx, git, issue)?;
     timeline::record(tx, issue, (sender, via_app), StateKind::Reopened)?;
     events::emit(tx, git, issue, sender, "reopened", json!({}))?;
-    mergeability::start(tx, git, issue)
+    mergeability::start(tx, git, issue, sender)
 }
 
 fn tip(git: &Git, tx: &Tx, side: &PullRef) -> Result<Option<ObjectId>, ApiError> {

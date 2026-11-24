@@ -82,7 +82,7 @@ pub(crate) fn seed(ctx: &mut SeedCtx<'_>, value: Value) -> Result<(), ApiError> 
         (sender, ctx.clock.now()),
         id,
     )?;
-    mergeability::settle(tx, ctx.git, opened.id, false)
+    mergeability::settle(tx, ctx.git, opened.id, false, sender)
 }
 
 pub(crate) fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
@@ -223,7 +223,7 @@ fn open(
     let issue = tx.table_mut::<Issues>().insert(issue)?;
     state::sync_refs(tx, git, &issue)?;
     events::emit(tx, git, &issue, sender, "opened", json!({}))?;
-    mergeability::start(tx, git, &issue)?;
+    mergeability::start(tx, git, &issue, sender)?;
     let id = issue.id;
     tx.table::<Issues>()
         .get(id)
@@ -330,7 +330,7 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     }
     if edited.rebased {
         timeline::record(tx, &issue, who, StateKind::BaseRefChanged)?;
-        mergeability::start(tx, git, &issue)?;
+        mergeability::start(tx, git, &issue, author)?;
     }
     if let Some(refusal) = edited.refusal {
         return kept(&refusal);
@@ -673,6 +673,7 @@ fn delete_head(
     git.update_ref(tx, head_repo, who.0, &name, Some(tip), None, true)?;
     for (dependent, from) in retargeted {
         timeline::record(tx, &dependent, who, StateKind::BaseRefChanged)?;
+        mergeability::start(tx, git, &dependent, who.0)?;
         events::emit(
             tx,
             git,
