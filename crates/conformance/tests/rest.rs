@@ -93,6 +93,127 @@ async fn pages_hold_30_by_default_at_most_100_and_link_prev_next_last_first() {
     assert!(links(&past_the_end).iter().all(|(rel, _)| rel != "next"));
 }
 
+const SIZED_BY_RUBY_INTEGER: [(&str, usize); 57] = [
+    ("010", 8),
+    ("0x10", 16),
+    ("0X10", 16),
+    ("0b11", 3),
+    ("0B11", 3),
+    ("0o7", 7),
+    ("0O7", 7),
+    ("0d12", 12),
+    ("0D12", 12),
+    ("1_0", 10),
+    ("0_10", 8),
+    ("0_0_7", 7),
+    ("00_1", 1),
+    ("0x1_0", 16),
+    ("%2B5", 5),
+    ("%205", 5),
+    ("5%20", 5),
+    ("%0A5", 5),
+    ("%095", 5),
+    ("%0B5", 5),
+    ("%0C5", 5),
+    ("%0D5", 5),
+    ("5%0A", 5),
+    ("%2B0x10", 16),
+    ("0x00000000000000000000000000000005", 5),
+    ("99999999999999999999", 100),
+    ("0x7fffffffffffffff", 100),
+    ("1__0", 30),
+    ("_10", 30),
+    ("10_", 30),
+    ("0_", 30),
+    ("0__1", 30),
+    ("0x_10", 30),
+    ("0o_7", 30),
+    ("0x1__0", 30),
+    ("0x", 30),
+    ("0d", 30),
+    ("08", 30),
+    ("0o8", 30),
+    ("0b2", 30),
+    ("5.0", 30),
+    ("5x", 30),
+    ("1e1", 30),
+    ("-5", 30),
+    ("-0", 30),
+    ("0", 30),
+    ("0x0", 30),
+    ("-99999999999999999999", 30),
+    ("%2B%2B5", 30),
+    ("%2B-5", 30),
+    ("-%205", 30),
+    ("1%20%200", 30),
+    ("%20%20", 30),
+    ("5%00", 30),
+    ("%E3%80%805", 30),
+    ("5%C2%A0", 30),
+    ("", 30),
+];
+
+const PAGED_BY_RUBY_INTEGER: [(&str, usize); 15] = [
+    ("010", 8),
+    ("1_0", 10),
+    ("0x10", 16),
+    ("0b11", 3),
+    ("%2B3", 3),
+    ("%203", 3),
+    ("3%0A", 3),
+    ("-5", 1),
+    ("0", 1),
+    ("-0", 1),
+    ("3.0", 1),
+    ("3x", 1),
+    ("1__0", 1),
+    ("08", 1),
+    ("-99999999999999999999", 1),
+];
+
+#[tokio::test]
+async fn page_and_per_page_read_as_ruby_integer() {
+    // Given a repository with 130 labels
+    let (_server, alice) = repo_with_labels(130).await;
+
+    // When the labels are listed with each per_page and each page that live cli/cli pulls read
+    // Then each value reads as Ruby's Integer(), and one that Ruby refuses is the default
+    // (gh api "repos/cli/cli/pulls?state=all&per_page=...", 2026-11-24)
+    for (value, size) in SIZED_BY_RUBY_INTEGER {
+        let answer = alice.get(&format!("{LABELS}?per_page={value}")).await;
+        assert_eq!(answer.status, StatusCode::OK, "per_page={value}");
+        assert_eq!(len(&answer), size, "per_page={value}");
+    }
+    for (value, page) in PAGED_BY_RUBY_INTEGER {
+        let answer = alice
+            .get(&format!("{LABELS}?per_page=1&page={value}"))
+            .await;
+        let expected = alice.get(&format!("{LABELS}?per_page=1&page={page}")).await;
+        assert_eq!(answer.json(), expected.json(), "page={value}");
+    }
+
+    // When a page passes i64::MAX by Ruby's reading
+    // Then GitHub refuses it, and the largest page is an empty list
+    for value in [
+        "99999999999999999999",
+        "9223372036854775808",
+        "0x8000000000000000",
+    ] {
+        let answer = alice
+            .get(&format!("{LABELS}?per_page=1&page={value}"))
+            .await;
+        refused(
+            &answer,
+            "https://docs.github.com/rest/guides/using-pagination-in-the-rest-api",
+        );
+    }
+    let largest = alice
+        .get(&format!("{LABELS}?per_page=1&page=9223372036854775807"))
+        .await;
+    assert_eq!(largest.status, StatusCode::OK);
+    assert_eq!(len(&largest), 0);
+}
+
 fn next_link(client: &GoGithub, answer: &Answer) -> Option<String> {
     answer
         .header("link")

@@ -12,7 +12,7 @@ use hubdouble_store::{Tx, TxMut};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::params::{Params, Query};
+use crate::params::{Params, Query, ruby_integer};
 use crate::reply::Reply;
 
 const OVERFLOW_DOCS: &str = "https://docs.github.com/rest/guides/using-pagination-in-the-rest-api";
@@ -229,11 +229,9 @@ impl<'a> Ctx<'a> {
     }
 
     fn sized_per_page(&self, default: usize, most: usize) -> usize {
-        match self.p.query.get("per_page").map(str::parse::<u128>) {
-            Some(Ok(0)) | None => default,
-            Some(Ok(n)) => usize::try_from(n).map_or(most, |n| n.min(most)),
-            Some(Err(e)) if *e.kind() == std::num::IntErrorKind::PosOverflow => most,
-            Some(Err(_)) => default,
+        match self.p.query.get("per_page").and_then(ruby_integer) {
+            Some(n) if n > 0 => usize::try_from(n).map_or(most, |n| n.min(most)),
+            _ => default,
         }
     }
 
@@ -270,11 +268,13 @@ impl<'a> Ctx<'a> {
         default: usize,
         most: usize,
     ) -> Result<Page, ApiError> {
-        let page = match self.p.query.get("page").map(str::parse::<u128>) {
-            Some(Ok(n)) => n.max(1),
-            Some(Err(e)) if *e.kind() == std::num::IntErrorKind::PosOverflow => u128::MAX,
-            Some(Err(_)) | None => 1,
-        };
+        let page = self
+            .p
+            .query
+            .get("page")
+            .and_then(ruby_integer)
+            .and_then(|n| u128::try_from(n).ok())
+            .map_or(1, |n| n.max(1));
         let per_page = self.sized_per_page(default, most);
         let past = |l: &PageLimit| {
             let width = u128::try_from(per_page + l.lookahead).unwrap_or(u128::MAX);
