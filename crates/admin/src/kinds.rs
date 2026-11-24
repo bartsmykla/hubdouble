@@ -10,7 +10,7 @@ use hubdouble_model::{
     Webhook,
 };
 use hubdouble_store::{
-    Accounts, Apps, Counters, Installations, Memberships, Repos, Tokens, Tx, TxMut,
+    Accounts, Apps, Counters, Installations, Memberships, RepoRedirects, Repos, Tokens, Tx, TxMut,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -403,6 +403,10 @@ pub(crate) fn apply_repository(
         Some(login) => user(&ctx.tx, login)?.id,
         None => owner,
     };
+    ctx.tx
+        .table_mut::<RepoRedirects>()
+        .get_mut()
+        .claim(&s.owner, &s.name);
     let id = write_repository(ctx, vcs, owner, s)?;
     announce_created(&mut ctx.tx, id, sender);
     Ok(())

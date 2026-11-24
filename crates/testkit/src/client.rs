@@ -105,7 +105,7 @@ fn checked(
 
 fn case(x: &Exchange<'_>, c: &Checked, services: Option<&Services>) -> Case {
     match x.status {
-        304 => Case::Other,
+        301 | 304 | 307 => Case::Other,
         200..=399 => Case::Success,
         403 if x.headers.contains_key("x-accepted-github-permissions") => Case::MissingPermission,
         422 => Case::Invalid,

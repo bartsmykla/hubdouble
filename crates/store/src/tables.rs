@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use hubdouble_model::{
@@ -9,7 +10,7 @@ use hubdouble_model::{
 use crate::blobs::Blobs;
 use crate::counters::Counters;
 use crate::rows::{Entity, Rows};
-use crate::store::StoreBuilder;
+use crate::store::{StoreBuilder, Table};
 
 pub type Accounts = Rows<Account>;
 pub type Memberships = Rows<Membership>;
@@ -60,7 +61,38 @@ pub(crate) fn register_frozen(b: &mut StoreBuilder) {
         .register_table::<WorkflowRuns>()
         .register_table::<WorkflowJobs>()
         .register_table::<Rulesets>()
-        .register_table::<Deliveries>();
+        .register_table::<Deliveries>()
+        .register_table::<RepoRedirects>();
+}
+
+/// The old `owner/name` of each renamed or moved repository, which GitHub keeps to redirect
+/// until a repository takes that name again. Matched case-insensitively.
+#[derive(Clone, Default)]
+pub struct RepoRedirects {
+    names: HashMap<String, i64>,
+}
+
+impl Table for RepoRedirects {}
+
+impl RepoRedirects {
+    #[must_use]
+    pub fn get(&self, owner: &str, name: &str) -> Option<i64> {
+        self.names.get(&full_name(owner, name)).copied()
+    }
+
+    /// Records that `repo_id` was `owner/name`.
+    pub fn moved(&mut self, owner: &str, name: &str, repo_id: i64) {
+        self.names.insert(full_name(owner, name), repo_id);
+    }
+
+    /// Drops the redirect of `owner/name`, as a repository now has that name.
+    pub fn claim(&mut self, owner: &str, name: &str) {
+        self.names.remove(&full_name(owner, name));
+    }
+}
+
+fn full_name(owner: &str, name: &str) -> String {
+    format!("{owner}/{name}").to_ascii_lowercase()
 }
 
 fn pair(a: i64, b: &str) -> String {

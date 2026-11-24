@@ -16,7 +16,7 @@ use hubdouble_git::ReadJobs;
 use hubdouble_model::{Account, AccountKind, ApiError, FieldError, Repo};
 use hubdouble_render::Urls;
 use hubdouble_rest::{Access, Ctx, Entry, Params, Parts, Query, Reply};
-use hubdouble_store::{Accounts, Repos, Tx};
+use hubdouble_store::{Accounts, RepoRedirects, Repos, Tx};
 use hyper::body::Incoming;
 use serde::{Deserialize, Serialize};
 
@@ -164,7 +164,9 @@ impl Inner {
         let query = Query::parse(parts.uri.query().unwrap_or(""));
         let request = RestRequest {
             entry,
+            method: &parts.method,
             api_path,
+            raw_query: parts.uri.query(),
             params: &route.params,
             query: &query,
             headers: &parts.headers,
@@ -255,6 +257,10 @@ impl Inner {
         who.scopes = actor.oauth_scopes().map(|s| s.join(", "));
         let resolved = resolve_target(tx, r.params)?;
         let (target, repo) = match &resolved {
+            Resolved::Moved(repo) if hubdouble_auth::can_see(tx, &actor, repo) => {
+                return moved(r, &resolved);
+            }
+            Resolved::Moved(_) => return Err(ApiError::not_found()),
             Resolved::Repo(repo) => (Target::Repo(repo), Some(repo)),
             Resolved::Org(org) => (Target::Org(org), None),
             Resolved::None => (Target::None, None),
@@ -466,7 +472,9 @@ impl Inner {
 
 struct RestRequest<'r> {
     entry: &'r Entry,
+    method: &'r Method,
     api_path: &'r str,
+    raw_query: Option<&'r str>,
     params: &'r Params,
     query: &'r Query,
     headers: &'r HeaderMap,
@@ -559,17 +567,26 @@ pub(crate) fn error_reply(e: &ApiError) -> Reply {
 enum Resolved {
     None,
     Repo(Arc<Repo>),
+    Moved(Arc<Repo>),
     Org(Arc<Account>),
 }
 
 fn resolve_target(tx: &Tx, params: &Params) -> Result<Resolved, ApiError> {
     let accounts = tx.table::<Accounts>();
     if let (Some(owner), Some(name)) = (params.get("owner"), params.get("repo")) {
-        let repo = accounts
+        let repos = tx.table::<Repos>();
+        if let Some(repo) = accounts
             .by_login(owner)
-            .and_then(|o| tx.table::<Repos>().by_name(o.id, name))
+            .and_then(|o| repos.by_name(o.id, name))
+        {
+            return Ok(Resolved::Repo(repo.clone()));
+        }
+        let moved = tx
+            .table::<RepoRedirects>()
+            .get(owner, name)
+            .and_then(|id| repos.get(id))
             .ok_or_else(ApiError::not_found)?;
-        return Ok(Resolved::Repo(repo.clone()));
+        return Ok(Resolved::Moved(moved.clone()));
     }
     if let Some(id) = params.get("repository_id") {
         let repo = id
@@ -586,6 +603,34 @@ fn resolve_target(tx: &Tx, params: &Params) -> Result<Resolved, ApiError> {
     Ok(Resolved::None)
 }
 
+#[derive(Serialize)]
+struct Redirect<'a> {
+    message: &'a str,
+    url: &'a str,
+    documentation_url: &'a str,
+}
+
+fn moved(r: &RestRequest<'_>, resolved: &Resolved) -> Result<Reply, ApiError> {
+    let path = link_path(r.api_path, resolved).ok_or_else(ApiError::not_found)?;
+    let mut url = format!("{}{path}", r.urls.api);
+    if let Some(query) = r.raw_query {
+        url = format!("{url}?{query}");
+    }
+    let (status, message) = if *r.method == Method::GET || *r.method == Method::HEAD {
+        (StatusCode::MOVED_PERMANENTLY, "Moved Permanently")
+    } else {
+        (StatusCode::TEMPORARY_REDIRECT, "Temporary Redirect")
+    };
+    let mut reply = Reply::json(&Redirect {
+        message,
+        url: &url,
+        documentation_url: "https://docs.github.com/rest/guides/best-practices-for-using-the-rest-api#follow-redirects",
+    })?;
+    reply.status = status;
+    reply.headers.extend(Reply::redirect(&url)?.headers);
+    Ok(reply)
+}
+
 enum Alias {
     Repo,
     Org,
@@ -593,7 +638,7 @@ enum Alias {
 
 fn link_path(api_path: &str, resolved: &Resolved) -> Option<String> {
     let (prefix, skip, alias, id) = match resolved {
-        Resolved::Repo(repo) => ("/repos/", 2, "/repositories/", repo.id),
+        Resolved::Repo(repo) | Resolved::Moved(repo) => ("/repos/", 2, "/repositories/", repo.id),
         Resolved::Org(org) => ("/orgs/", 1, "/organizations/", org.id),
         Resolved::None => return None,
     };

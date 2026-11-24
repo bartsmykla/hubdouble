@@ -15,6 +15,8 @@ const MANY: [&str; 6] = ["ref", "path", "branch", "basehead", "tag", "tree_sha"]
 
 const PROSE_STATUSES: [u16; 7] = [304, 400, 401, 403, 404, 422, 429];
 
+const PROSE_REDIRECTS: [u16; 3] = [301, 302, 307];
+
 const RAW_BY_CONTENT: [(&str, [&str; 2]); 1] =
     [("git/get-blob", ["text/plain", "application/octet-stream"])];
 
@@ -364,6 +366,7 @@ fn check_operation(
                 errors.extend(error_body(x, op.id));
             }
         }
+        None if PROSE_REDIRECTS.contains(&x.status) => errors.extend(redirect(x, op.id)),
         None => errors.push(format!(
             "{}: {} is neither documented for the operation nor by the docs prose",
             op.id, x.status
@@ -521,6 +524,30 @@ fn error_body_with(x: &Exchange<'_>, id: &str, schema_checked: bool) -> Vec<Stri
                 }
             }
         }
+    }
+    errors
+}
+
+fn redirect(x: &Exchange<'_>, id: &str) -> Vec<String> {
+    let s = x.status;
+    let location = header(x.headers, "location");
+    let mut errors = Vec::new();
+    if location.is_empty() {
+        errors.push(format!("{id} {s}: a redirect without Location"));
+    }
+    if x.method == "HEAD" {
+        return errors;
+    }
+    match obj(x) {
+        Ok(body) => {
+            for missing in has(&body, &["message", "documentation_url"]) {
+                errors.push(format!("{id} {s}: {missing}"));
+            }
+            if body.get("url").and_then(Value::as_str) != Some(location) {
+                errors.push(format!("{id} {s}: the body's url is not the Location"));
+            }
+        }
+        Err(e) => errors.extend(e),
     }
     errors
 }

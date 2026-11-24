@@ -1,6 +1,7 @@
 use hubdouble_admin::Registrar;
 use hubdouble_gql::{Args, Ctx, ErrorType, GqlError, Obj, Resolved, Target};
 use hubdouble_model::{Repo, node_id};
+use hubdouble_store::RepoRedirects;
 use serde_json::Value;
 
 pub(crate) fn register(r: &mut Registrar<'_>) {
@@ -27,10 +28,20 @@ fn required(args: &Args, name: &str) -> Result<String, GqlError> {
 fn repository(ctx: &Ctx<'_>, _: &Obj, args: &Args) -> Result<Resolved, GqlError> {
     let owner = required(args, "owner")?;
     let name = required(args, "name")?;
-    ctx.load(Target::Repo {
+    let found = ctx.load(Target::Repo {
         owner: &owner,
         name: &name,
-    })
+    });
+    let moved = match &found {
+        Err(_) if args.get("followRenames")?.unwrap_or(true) => {
+            ctx.tx.table::<RepoRedirects>().get(&owner, &name)
+        }
+        _ => None,
+    };
+    match moved {
+        Some(id) => ctx.load(Target::RepoId(id)).or(found),
+        None => found,
+    }
 }
 
 fn id(_: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {

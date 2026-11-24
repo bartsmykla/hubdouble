@@ -11,7 +11,7 @@ use hubdouble_model::{
 };
 use hubdouble_render::Urls;
 use hubdouble_rest::Params;
-use hubdouble_store::{Accounts, Apps, Installations, Repos, Tokens, Tx, TxMut};
+use hubdouble_store::{Accounts, Apps, Installations, RepoRedirects, Repos, Tokens, Tx, TxMut};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -336,6 +336,17 @@ fn rename_target(
         let old_login = std::mem::replace(&mut account.login, input.login);
         account.updated_at = now;
         tx.table_mut::<Accounts>().replace(account.clone())?;
+        let names: Vec<_> = tx
+            .table::<Repos>()
+            .children(account.id)
+            .map(|r| (r.id, r.name.clone()))
+            .collect();
+        let mut redirects = tx.table_mut::<RepoRedirects>();
+        let redirects = redirects.get_mut();
+        for (id, name) in names {
+            redirects.moved(&old_login, &name, id);
+            redirects.claim(&account.login, &name);
+        }
         let affected: Vec<_> = tx
             .table::<Installations>()
             .iter()

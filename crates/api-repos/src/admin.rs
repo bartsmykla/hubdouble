@@ -10,7 +10,7 @@ use hubdouble_git::{Git, ObjectId};
 use hubdouble_model::{AccountKind, ApiError, Release, Repo, Visibility};
 use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
 use hubdouble_rest::Params;
-use hubdouble_store::{Accounts, Releases, Repos, Tx, TxMut};
+use hubdouble_store::{Accounts, Releases, RepoRedirects, Repos, Tx, TxMut};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -243,6 +243,13 @@ fn edit_repo(
     }
     new.updated_at = services.clock.now();
     tx.table_mut::<Repos>().replace(new.clone())?;
+    if renamed.is_some() || transferred.is_some() {
+        let owner = crate::owner(tx, &new)?.login.clone();
+        let mut redirects = tx.table_mut::<RepoRedirects>();
+        let redirects = redirects.get_mut();
+        redirects.moved(&previous_owner.login, &old.name, old.id);
+        redirects.claim(&owner, &new.name);
+    }
     if let Some(target) = branch_target.filter(|_| refresh_workflows) {
         hubdouble_api_actions::refresh_default_branch(tx, &services.git, &old, target)?;
     }
