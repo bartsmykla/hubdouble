@@ -290,8 +290,13 @@ fn new_post<'a>(ctx: &Ctx<'_>, issue: &'a Issue) -> Result<Post<'a>, ApiError> {
     })
 }
 
+pub(crate) fn refuse_locked(ctx: &Ctx<'_>, issue: &Issue) -> Result<(), ApiError> {
+    hubdouble_auth::refuse_locked(ctx.tx(), ctx.actor(), ctx.repo()?, issue.locked)
+}
+
 fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let issue = view::pull(ctx)?;
+    refuse_locked(ctx, &issue)?;
     let request: Create = ctx.body()?;
     if let Some(parent) = request.in_reply_to {
         return reply(ctx, &issue, parent, request.body);
@@ -336,6 +341,7 @@ struct Body {
 
 fn create_reply(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let issue = view::pull(ctx)?;
+    refuse_locked(ctx, &issue)?;
     let parent = ctx.param_i64("comment_id")?;
     let Body { body } = ctx.body()?;
     reply(ctx, &issue, parent, body)

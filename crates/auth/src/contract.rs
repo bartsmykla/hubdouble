@@ -64,6 +64,33 @@ pub enum Target<'a> {
     Org(&'a Arc<Account>),
 }
 
+/// GitHub's REST refusal, `403`, of a write to an archived repository.
+pub const ARCHIVED_REST: &str = "Repository was archived so is read-only.";
+/// GitHub's GraphQL refusal, `UNPROCESSABLE`, of a mutation on an archived repository.
+pub const ARCHIVED_GRAPHQL: &str = "Repository was archived so is read-only";
+
+/// Refuses a comment on a locked conversation, `403` as GitHub answers it, unless `actor` is a
+/// user with write access to `repo`. An installation token is refused whatever it holds.
+///
+/// # Errors
+///
+/// The `403` refusal.
+pub fn refuse_locked(tx: &Tx, actor: &Actor, repo: &Repo, locked: bool) -> Result<(), ApiError> {
+    let writer = match actor {
+        Actor::User { user, .. } => {
+            crate::repo_role(tx, user.id, repo) >= Some(hubdouble_model::RepoRole::Write)
+        }
+        _ => false,
+    };
+    if !locked || writer {
+        return Ok(());
+    }
+    Err(
+        ApiError::new(403, "Unable to create comment because issue is locked.")
+            .with_docs("https://docs.github.com/articles/locking-conversations/"),
+    )
+}
+
 /// Resolves the actor of a request.
 ///
 /// # Errors

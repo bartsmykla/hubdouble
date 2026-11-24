@@ -50,6 +50,7 @@ struct Op {
     path: String,
     category: String,
     subcategory: String,
+    docs: String,
 }
 
 #[derive(Default)]
@@ -96,6 +97,10 @@ fn operations(bundle: &serde_json::Value) -> Result<Vec<Op>, Box<dyn Error>> {
                 path: path.clone(),
                 category: text("category"),
                 subcategory: text("subcategory"),
+                docs: op["externalDocs"]["url"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
             });
         }
     }
@@ -150,13 +155,14 @@ fn render(ops: &[Op], nodes: &[Node]) -> Result<String, Box<dyn Error>> {
     for op in ops {
         writeln!(
             out,
-            "    Operation {{ id: {:?}, method: Method::{}, path: {:?}, params: &{:?}, category: {:?}, subcategory: {:?} }},",
+            "    Operation {{ id: {:?}, method: Method::{}, path: {:?}, params: &{:?}, category: {:?}, subcategory: {:?}, docs: {:?} }},",
             op.id,
             METHODS[op.method].1,
             op.path,
             params(&op.path),
             op.category,
-            op.subcategory
+            op.subcategory,
+            op.docs
         )?;
     }
     writeln!(out, "];")?;

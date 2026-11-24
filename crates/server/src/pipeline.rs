@@ -21,6 +21,15 @@ use hyper::body::Incoming;
 use serde::{Deserialize, Serialize};
 
 const VERSIONS: [&str; 2] = ["2022-11-28", "2026-03-10"];
+const ARCHIVED_WRITES: [&str; 7] = [
+    "repos/update",
+    "repos/delete",
+    "repos/create-fork",
+    "activity/set-repo-subscription",
+    "activity/delete-repo-subscription",
+    "activity/star-repo-for-authenticated-user",
+    "activity/unstar-repo-for-authenticated-user",
+];
 const RATE_LIMIT: u32 = 5000;
 const GRAPHQL_AUTH_DOCS: &str =
     "https://docs.github.com/graphql/guides/forming-calls-with-graphql#authenticating-with-graphql";
@@ -245,6 +254,13 @@ impl Inner {
             Resolved::None => (Target::None, None),
         };
         hubdouble_auth::authorize(tx, &actor, &r.entry.requirement, target)?;
+        if let (Access::Write(_), Some(repo)) = (&access, repo)
+            && repo.archived
+            && !ARCHIVED_WRITES.contains(&r.entry.operation_id)
+        {
+            return Err(ApiError::new(403, hubdouble_auth::ARCHIVED_REST)
+                .with_docs(r.entry.documentation_url));
+        }
         let link_path = link_path(r.api_path, &resolved);
         let mut ctx = Ctx::new(Parts {
             operation_id: r.entry.operation_id,

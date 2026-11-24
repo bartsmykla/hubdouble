@@ -31,6 +31,8 @@ pub fn register(r: &mut Registrar<'_>) {
     rest.handle("issues/create", ISSUES_WRITE, issues::create);
     rest.handle("issues/get", ISSUES_READ, issues::get);
     rest.handle("issues/update", WRITE, issues::update);
+    rest.handle("issues/lock", WRITE, issues::lock);
+    rest.handle("issues/unlock", WRITE, issues::unlock);
     rest.handle("issues/list-events", READ, events::list);
     rest.handle("issues/add-labels", WRITE, issues::add_labels);
     rest.handle("issues/list-labels-for-repo", READ, labels::list);

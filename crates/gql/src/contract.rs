@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use hubdouble_auth::{Actor, Target as AuthTarget};
 use hubdouble_git::{Git, ReadJobs};
-use hubdouble_model::{ApiError, Clock, Repo, Requirement};
+use hubdouble_model::{Access, ApiError, Clock, Repo, Requirement};
 use hubdouble_render::Urls;
 use hubdouble_store::{Store, Tx, TxMut};
 use serde::de::DeserializeOwned;
@@ -212,10 +212,18 @@ impl MutCtx<'_> {
     ///
     /// # Errors
     ///
-    /// `NOT_FOUND` for a repository the actor cannot see, `FORBIDDEN` for a missing permission.
+    /// `NOT_FOUND` for a repository the actor cannot see, `FORBIDDEN` for a missing permission,
+    /// `UNPROCESSABLE` for a write requirement on an archived repository.
     pub fn authorize(&self, req: &Requirement, repo: &Arc<Repo>) -> Result<(), GqlError> {
         hubdouble_auth::authorize(&self.tx, self.actor, req, AuthTarget::Repo(repo))
-            .map_err(GqlError::from)
+            .map_err(GqlError::from)?;
+        if repo.archived && req.any_of.iter().any(|g| g.access != Access::Read) {
+            return Err(GqlError::new(
+                ErrorType::Unprocessable,
+                hubdouble_auth::ARCHIVED_GRAPHQL,
+            ));
+        }
+        Ok(())
     }
 }
 

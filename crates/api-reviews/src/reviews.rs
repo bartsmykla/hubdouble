@@ -138,6 +138,9 @@ pub fn no_pending(tx: &hubdouble_store::Tx, issue: &Issue, sender: i64) -> Resul
 fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let issue = view::pull(ctx)?;
     let request: Create = ctx.body()?;
+    if !request.body.is_empty() || !request.comments.is_empty() {
+        comments::refuse_locked(ctx, &issue)?;
+    }
     let sender = view::author(ctx.actor())?;
     let app = view::app(ctx.actor());
     let now = ctx.now();
@@ -191,6 +194,9 @@ fn submit(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let issue = view::pull(ctx)?;
     let review = find(ctx, &issue)?;
     let request: Submit = ctx.body()?;
+    if request.body.as_deref().is_some_and(|b| !b.is_empty()) {
+        comments::refuse_locked(ctx, &issue)?;
+    }
     let state = event_state(&request.event)?;
     let now = ctx.now();
     let review = publish(ctx.tx_mut()?, &issue, &review, state, request.body, now)?;

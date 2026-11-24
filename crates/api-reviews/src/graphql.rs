@@ -444,7 +444,8 @@ fn add_thread(ctx: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, GqlError> {
             "A pull request or review is required",
         ));
     };
-    writable(ctx, issue.repo_id)?;
+    let repo = writable(ctx, issue.repo_id)?;
+    hubdouble_auth::refuse_locked(&ctx.tx, ctx.actor, &repo, issue.locked)?;
     let now = ctx.clock.now();
     let commit_id = review.as_ref().and_then(|r| r.commit_id.as_deref());
     let sha = anchors::commit(&ctx.tx, ctx.git, &issue, commit_id)?;

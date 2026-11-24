@@ -19,6 +19,8 @@ pub struct Entry {
     /// A `GET` that changes state, so the server runs it in a write transaction. See
     /// [`Registry::extra_writing`].
     pub writes: bool,
+    /// The operation's page in GitHub's docs, empty for a route outside the `OpenAPI` bundle.
+    pub documentation_url: &'static str,
 }
 
 enum Segment {
@@ -101,6 +103,7 @@ impl Registry {
             handler: h,
             authenticates: false,
             writes: false,
+            documentation_url: OPERATIONS[i].docs,
         });
     }
 
@@ -192,6 +195,7 @@ impl Registry {
             handler: h,
             authenticates: false,
             writes: false,
+            documentation_url: "",
         };
         self.extras.push(Extra {
             method: m,

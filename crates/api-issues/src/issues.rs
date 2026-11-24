@@ -50,6 +50,52 @@ fn issue_by_number(tx: &Tx, repo: &Repo, number: i64) -> Result<Arc<Issue>, ApiE
         .ok_or_else(ApiError::not_found)
 }
 
+#[derive(Deserialize)]
+struct Lock {
+    lock_reason: Option<String>,
+}
+
+const LOCK_REASONS: [&str; 4] = ["off-topic", "too heated", "resolved", "spam"];
+
+pub(crate) fn lock(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    let reason = if ctx.raw_body().is_empty() {
+        None
+    } else {
+        ctx.body::<Lock>()?.lock_reason
+    };
+    if let Some(r) = reason.as_deref()
+        && !LOCK_REASONS.contains(&r)
+    {
+        return Err(invalid_value("Issue", "lock_reason", r));
+    }
+    set_lock(ctx, reason, true)
+}
+
+pub(crate) fn unlock(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
+    set_lock(ctx, None, false)
+}
+
+fn set_lock(ctx: &mut Ctx<'_>, reason: Option<String>, locked: bool) -> Result<Reply, ApiError> {
+    let repo = ctx.repo()?.clone();
+    let number = ctx.param_i64("issue_number")?;
+    let who = who(ctx, &repo)?;
+    if !who.can(RepoRole::Write) {
+        return Err(ApiError::forbidden("Must have push access to repository."));
+    }
+    let tx = ctx.tx_mut()?;
+    let old = issue_by_number(tx, &repo, number)?;
+    if old.locked == locked && old.active_lock_reason == reason {
+        return Ok(Reply::empty());
+    }
+    let mut issue = Issue::clone(&old);
+    issue.locked = locked;
+    issue.active_lock_reason = reason;
+    tx.table_mut::<Issues>().replace(issue.clone())?;
+    let action = if locked { "locked" } else { "unlocked" };
+    emit_issue(tx, &repo, &issue, action, who.account.id, Vec::new())?;
+    Ok(Reply::empty())
+}
+
 fn assignee_ids(tx: &Tx, repo: &Repo, logins: &[String]) -> Result<Vec<i64>, ApiError> {
     let mut ids = Vec::with_capacity(logins.len());
     for login in logins {

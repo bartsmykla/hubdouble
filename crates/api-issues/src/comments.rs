@@ -165,12 +165,14 @@ pub(crate) fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let who = who(ctx, &repo)?;
     let urls = ctx.urls().clone();
     let now = ctx.now();
-    let tx = ctx.tx_mut()?;
-    let issue = tx
+    let issue = ctx
+        .tx()
         .table::<Issues>()
         .by_number(repo.id, number)
         .cloned()
         .ok_or_else(ApiError::not_found)?;
+    hubdouble_auth::refuse_locked(ctx.tx(), ctx.actor(), &repo, issue.locked)?;
+    let tx = ctx.tx_mut()?;
     let id = tx.next_id();
     let comment = tx.table_mut::<IssueComments>().insert(IssueComment {
         id,

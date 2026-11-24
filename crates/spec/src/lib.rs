@@ -62,6 +62,8 @@ pub struct Operation {
     pub params: &'static [&'static str],
     pub category: &'static str,
     pub subcategory: &'static str,
+    /// The operation's page in GitHub's docs, which GitHub's errors give as `documentation_url`.
+    pub docs: &'static str,
 }
 
 /// A node of the route segment tree. Index `0` is the root.
