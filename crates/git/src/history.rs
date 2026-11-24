@@ -1,13 +1,163 @@
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
 
 use hubdouble_store::Tx;
 
 use crate::contract::{Commit, Git, GitError, ObjectData, ObjectId, RefChange};
+use crate::diff::tree_changes;
 use crate::odb::Odb;
 
+const FROM_TIP: u8 = 1;
+const FROM_OTHERS: u8 = 2;
+
+struct Painter<'o> {
+    odb: &'o Odb,
+    seen: HashMap<ObjectId, (u8, u64, Arc<Commit>)>,
+    queue: BinaryHeap<(u64, ObjectId)>,
+    only_tip: BTreeSet<(u64, ObjectId)>,
+}
+
+impl Painter<'_> {
+    fn paint(&mut self, id: ObjectId, flag: u8) -> Result<(), GitError> {
+        let entry = match self.seen.entry(id) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(v) => v.insert((0, self.odb.generation(id), self.odb.commit(id)?)),
+        };
+        if entry.0 & flag == flag {
+            return Ok(());
+        }
+        let generation = entry.1;
+        let before = entry.0;
+        entry.0 |= flag;
+        match (before == FROM_TIP, entry.0 == FROM_TIP) {
+            (false, true) => {
+                self.only_tip.insert((generation, id));
+            }
+            (true, false) => {
+                self.only_tip.remove(&(generation, id));
+            }
+            _ => {}
+        }
+        self.queue.push((generation, id));
+        Ok(())
+    }
+
+    fn done(&self) -> bool {
+        match (self.only_tip.first(), self.queue.peek()) {
+            (None, _) | (_, None) => true,
+            (Some((oldest, _)), Some((newest, _))) => newest < oldest,
+        }
+    }
+}
+
 impl Git {
+    /// The commits reachable from `tip` and from none of `others`, children before their
+    /// parents, as `git rev-list <tip> --not <others>`. The walk goes back by generation (one
+    /// more than the highest parent's, kept with each commit) and stops once every commit left
+    /// to read has a lower generation than every commit only `tip` reaches, so it reads the
+    /// history only down to where `tip` meets `others`, whatever the commit times say.
+    ///
+    /// # Errors
+    ///
+    /// [`GitError::NotFound`] when a commit is missing.
+    pub fn exclusive_commits(
+        &self,
+        tx: &Tx,
+        repo: i64,
+        tip: ObjectId,
+        others: &[ObjectId],
+    ) -> Result<Vec<(ObjectId, Arc<Commit>)>, GitError> {
+        let odb = self.odb(tx, repo);
+        let mut painter = Painter {
+            odb: &odb,
+            seen: HashMap::new(),
+            queue: BinaryHeap::new(),
+            only_tip: BTreeSet::new(),
+        };
+        for &other in others {
+            let (other, _) = odb.peel_commit(other)?;
+            painter.paint(other, FROM_OTHERS)?;
+        }
+        let (tip, _) = odb.peel_commit(tip)?;
+        painter.paint(tip, FROM_TIP)?;
+        while !painter.done() {
+            let Some((_, id)) = painter.queue.pop() else {
+                break;
+            };
+            let (flags, _, commit) = painter.seen[&id].clone();
+            for &parent in &commit.parents {
+                painter.paint(parent, flags)?;
+            }
+        }
+        Ok(painter
+            .only_tip
+            .iter()
+            .rev()
+            .map(|(_, id)| (*id, painter.seen[id].2.clone()))
+            .collect())
+    }
+
+    /// The files a commit writes against its first parent, or every file of a root commit,
+    /// each with its path and blob. Removed files are left out.
+    ///
+    /// # Errors
+    ///
+    /// [`GitError::NotFound`] when a commit or tree is missing.
+    pub fn written_files(
+        &self,
+        tx: &Tx,
+        repo: i64,
+        commit: &Commit,
+    ) -> Result<Vec<(String, ObjectId)>, GitError> {
+        let odb = self.odb(tx, repo);
+        let parent = commit
+            .parents
+            .first()
+            .map(|p| odb.commit(*p).map(|c| c.tree))
+            .transpose()?;
+        Ok(tree_changes(&odb, parent, Some(commit.tree))?
+            .into_iter()
+            .filter_map(|c| c.new.map(|(_, id)| (c.path, id)))
+            .collect())
+    }
+
+    /// The paths that differ between the merge base of `base` and `head` and `head`, as the
+    /// files of GitHub's three-dot compare and of a pull request, without their patches.
+    ///
+    /// # Errors
+    ///
+    /// [`GitError::NotFound`] when either commit is missing.
+    pub fn changed_paths(
+        &self,
+        tx: &Tx,
+        repo: i64,
+        base: ObjectId,
+        head: ObjectId,
+    ) -> Result<Vec<String>, GitError> {
+        let odb = self.odb(tx, repo);
+        let (base, base_commit) = odb.peel_commit(base)?;
+        let (head, head_commit) = odb.peel_commit(head)?;
+        let from = match merge_base(&odb, base, head)? {
+            Some(m) => odb.commit(m)?.tree,
+            None => base_commit.tree,
+        };
+        Ok(tree_changes(&odb, Some(from), Some(head_commit.tree))?
+            .into_iter()
+            .map(|c| c.path)
+            .collect())
+    }
+
+    /// The size in bytes of a blob.
+    ///
+    /// # Errors
+    ///
+    /// [`GitError::NotFound`] for a missing blob.
+    pub fn blob_size(&self, tx: &Tx, repo: i64, id: ObjectId) -> Result<usize, GitError> {
+        Ok(self.odb(tx, repo).blob(id)?.len())
+    }
+
     /// Returns the commits a branch update makes reachable, with parents before children.
     ///
     /// # Errors

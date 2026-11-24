@@ -14,6 +14,7 @@ const MAX_PEEL: usize = 16;
 struct StoredObject {
     data: ObjectData,
     tree_depth: usize,
+    generation: u64,
 }
 
 type Objects = HashMap<ObjectId, StoredObject, FixedState>;
@@ -48,12 +49,29 @@ impl Odb {
             }
             check_tree_depth(tree_depth)?;
         }
+        let generation = match &data {
+            ObjectData::Commit(c) => c
+                .parents
+                .iter()
+                .map(|p| self.generation(*p))
+                .max()
+                .map_or(1, |g| g.saturating_add(1)),
+            _ => 0,
+        };
         let id = encode::hash(&data)?;
-        self.shard(id)
-            .write()
-            .entry(id)
-            .or_insert(StoredObject { data, tree_depth });
+        self.shard(id).write().entry(id).or_insert(StoredObject {
+            data,
+            tree_depth,
+            generation,
+        });
         Ok(id)
+    }
+
+    pub(crate) fn generation(&self, id: ObjectId) -> u64 {
+        self.shard(id)
+            .read()
+            .get(&id)
+            .map_or(u64::MAX, |object| object.generation)
     }
 
     fn tree_depth(&self, id: ObjectId) -> Result<usize, GitError> {

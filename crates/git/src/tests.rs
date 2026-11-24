@@ -670,6 +670,67 @@ fn divergent(fx: &Fx) -> (ObjectId, ObjectId, ObjectId) {
     (base, main, feature)
 }
 
+#[test]
+fn exclusive_commits_are_the_commits_only_the_tip_reaches() {
+    // Given divergent branches whose commits all share one time, and a history whose
+    // commits each claim an older time than their parent
+    let fx = fixture();
+    let (base, main, feature) = divergent(&fx);
+    let one = fx.commit_object(REPO, feature).parents[0];
+    fx.branch(REPO, "refs/heads/dated", main);
+    let at = |n: i64| Signature {
+        time: Timestamp(Timestamp::SEED.0 - n),
+        ..alice()
+    };
+    let dated: Vec<ObjectId> = (1..=3)
+        .map(|n| {
+            fx.commit_as(
+                REPO,
+                "dated",
+                &[write("n.txt", &n.to_string())],
+                "dated",
+                &at(n),
+            )
+            .unwrap()
+        })
+        .collect();
+    let walk = |tip: ObjectId, others: &[ObjectId]| -> Vec<ObjectId> {
+        fx.store
+            .view(|tx| Ok(fx.git.exclusive_commits(tx, REPO, tip, others)?))
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    };
+    let sorted = |mut ids: Vec<ObjectId>| {
+        ids.sort_unstable();
+        ids
+    };
+    // When
+    let walks = [
+        sorted(walk(feature, &[main])),
+        walk(main, &[feature]),
+        walk(feature, &[feature]),
+        walk(feature, &[main, one]),
+        sorted(walk(feature, &[])),
+        walk(dated[2], &[main]),
+        walk(dated[2], &[dated[0], feature]),
+    ];
+    // Then each walk gives what git rev-list gives, children before their parents
+    assert_eq!(
+        walks,
+        [
+            sorted(vec![feature, one]),
+            vec![main],
+            vec![],
+            vec![feature],
+            sorted(vec![feature, one, base]),
+            vec![dated[2], dated[1], dated[0]],
+            vec![dated[2], dated[1]],
+        ]
+    );
+}
+
 type FileRow<'a> = (
     &'a str,
     FileStatus,

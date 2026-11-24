@@ -161,6 +161,43 @@ fn bench(c: &mut Criterion) {
                 .unwrap()
         });
     });
+
+    for i in 0..5000 {
+        commit(&store, &git, "main", &files(10_000 + i, 1));
+    }
+    let main = store
+        .view(|tx| Ok(git.resolve_ref(tx, REPO, "refs/heads/main")?))
+        .unwrap();
+    store
+        .update(|tx| {
+            Ok(git.update_ref(tx, REPO, OWNER, "refs/heads/topic", None, Some(main), false)?)
+        })
+        .unwrap();
+    let topic = commit(&store, &git, "topic", &files(99_999, 1));
+    c.bench_function("git_log_whole_5000_commit_history", |b| {
+        b.iter(|| {
+            store
+                .view(|tx| Ok(git.log(tx, REPO, black_box(main), false, usize::MAX)?))
+                .unwrap()
+        });
+    });
+    c.bench_function(
+        "git_exclusive_commits_of_a_new_branch_on_5000_commits",
+        |b| {
+            b.iter(|| {
+                store
+                    .view(|tx| {
+                        Ok(git.exclusive_commits(
+                            tx,
+                            REPO,
+                            black_box(topic),
+                            &[main, left, right],
+                        )?)
+                    })
+                    .unwrap()
+            });
+        },
+    );
 }
 
 criterion_group!(benches, bench);
