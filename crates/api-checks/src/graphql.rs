@@ -31,6 +31,7 @@ pub fn register(registry: &mut Registry) {
 
 /// The worst state of the latest check runs and the latest status per context, `None` when the
 /// commit has neither, as GitHub answers `statusCheckRollup: null`.
+#[must_use]
 pub fn rollup_state(tx: &Tx, repo: i64, sha: &str) -> Option<RollupState> {
     let runs = latest(runs_on(tx, repo, sha)).into_iter().map(|run| {
         if run.status != RunStatus::Completed {

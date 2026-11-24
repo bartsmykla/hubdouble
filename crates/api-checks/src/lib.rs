@@ -6,6 +6,7 @@ use serde::Serialize;
 use serde_json::json;
 
 pub mod actions;
+pub use graphql::{RollupState, rollup_state};
 pub use runs::{AnnotationInput, annotation};
 mod events;
 mod graphql;

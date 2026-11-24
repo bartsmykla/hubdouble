@@ -10,6 +10,7 @@ mod shared;
 
 use hubdouble_admin::Registrar;
 
+pub use links::closing_links;
 pub use shared::{comment_view, issue_view};
 
 use crate::shared::{ISSUES_READ, ISSUES_WRITE, READ, WRITE};

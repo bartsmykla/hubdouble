@@ -363,6 +363,14 @@ async fn every_qualifier_narrows_the_results() {
             &["Private parser issue", "Parser crashes"],
         ),
         (
+            "repo:acme/private user:nobody is:issue parser in:title",
+            &["Private parser issue"],
+        ),
+        (
+            "repo:acme/public org:acme is:issue parser in:title",
+            &["Private parser issue", "Parser crashes"],
+        ),
+        (
             "repo:acme/public is:pr head:prompts/proposal- sort:created-asc",
             &["Proposal alpha", "Proposal beta", "Old proposal"],
         ),

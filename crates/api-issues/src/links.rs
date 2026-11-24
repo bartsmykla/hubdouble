@@ -266,6 +266,43 @@ fn lookup_repo<'a>(tx: &'a Tx, full_name: &str) -> Option<&'a Repo> {
         .map(AsRef::as_ref)
 }
 
+/// Each pull request and an issue that it closes, as `(pull issue ID, issue ID)`: a closing
+/// keyword in the body of a pull request on its repository's default branch, or a manual link.
+#[must_use]
+pub fn closing_links(tx: &Tx) -> Vec<(i64, i64)> {
+    let issues = tx.table::<Issues>();
+    let repos = tx.table::<Repos>();
+    let mut links: Vec<(i64, i64)> = tx
+        .table::<IssueLinks>()
+        .iter()
+        .map(|l| (l.pull_issue_id, l.issue_id))
+        .collect();
+    for pull in issues.iter() {
+        let (Some(p), Some(body), Some(source)) =
+            (&pull.pull, pull.body.as_deref(), repos.get(pull.repo_id))
+        else {
+            continue;
+        };
+        if p.base.ref_name != source.default_branch {
+            continue;
+        }
+        for (qualifier, number) in closing_references(body) {
+            let target = if qualifier.is_empty() {
+                Some(source.id)
+            } else {
+                lookup_repo(tx, qualifier).map(|r| r.id)
+            };
+            if let Some(issue) = target
+                .and_then(|repo| issues.by_number(repo, number))
+                .filter(|i| i.pull.is_none())
+            {
+                links.push((pull.id, issue.id));
+            }
+        }
+    }
+    links
+}
+
 fn repo_named(tx: &Tx, full_name: &str) -> Result<i64, ApiError> {
     lookup_repo(tx, full_name)
         .map(|repo| repo.id)

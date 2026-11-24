@@ -19,7 +19,7 @@ pub use association::association;
 pub use change::kept;
 pub use merge_state::mergeable_state;
 pub use reopen::{reopen, reopened};
-pub use reviewing::review_submitted;
+pub use reviewing::{review_decision, review_submitted};
 pub use state::sync_refs;
 pub use timeline::{StateEvent, StateEvents, StateKind, review_dismissed};
 

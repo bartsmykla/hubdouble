@@ -10,14 +10,18 @@ publish.workspace = true
 
 [dependencies]
 hubdouble-admin.workspace = true
+hubdouble-api-checks.workspace = true
+hubdouble-api-issues.workspace = true
+hubdouble-api-pulls.workspace = true
 hubdouble-auth.workspace = true
+hubdouble-git.workspace = true
 hubdouble-gql.workspace = true
 hubdouble-model.workspace = true
 hubdouble-store.workspace = true
+rust-stemmers.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-hubdouble-git.workspace = true
 hubdouble-render.workspace = true
 hubdouble-rest.workspace = true
 serde_json.workspace = true

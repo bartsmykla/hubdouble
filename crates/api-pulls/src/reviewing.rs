@@ -266,7 +266,9 @@ fn tally(tx: &Tx, issue: &Issue, repo: &Repo) -> Tally {
     }
 }
 
-pub(crate) fn review_decision(tx: &Tx, issue: &Issue, p: &Pull) -> Option<&'static str> {
+/// GraphQL `reviewDecision`: `None` when no rule on the base branch asks for reviews.
+#[must_use]
+pub fn review_decision(tx: &Tx, issue: &Issue, p: &Pull) -> Option<&'static str> {
     let repo = base_repo(tx, p)?;
     let asks = Asks::of(&branch_rules::rules(tx, None, repo, &p.base.ref_name, true));
     if !asks.any() {
