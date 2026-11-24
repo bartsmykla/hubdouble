@@ -180,6 +180,37 @@ async fn a_repeated_body_key_takes_its_last_value_on_every_route() {
 }
 
 #[tokio::test]
+async fn a_repeated_graphql_body_key_takes_its_last_value() {
+    // Given
+    let (_server, client) = start().await;
+    let repository = r#"{ repository(owner: \"acme\", name: \"public\") { name } }"#;
+    let named = r#"query($n: String!) { repository(owner: \"acme\", name: $n) { name } }"#;
+    let two = r#"query A { viewer { login } } query B { repository(owner: \"acme\", name: \"public\") { name } }"#;
+
+    // When a GraphQL body repeats query, variables and operationName
+    let bodies = [
+        format!(r#"{{"query": "{{ bad }}", "query": "{repository}"}}"#),
+        format!(
+            r#"{{"query": "{named}", "variables": {{"n": "nope"}}, "variables": {{"n": "public"}}}}"#
+        ),
+        format!(r#"{{"query": "{two}", "operationName": "A", "operationName": "B"}}"#),
+    ];
+    for body in bodies {
+        let answer = client
+            .call_bytes(Method::POST, "graphql", body.clone().into_bytes())
+            .await;
+
+        // Then GitHub runs the last value of each, as live GitHub did on 2026-11-24
+        assert_eq!(answer.status, StatusCode::OK, "{body}");
+        assert_eq!(
+            answer.json(),
+            json!({"data": {"repository": {"name": "public"}}}),
+            "{body}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn the_issue_list_refuses_a_filter_value_with_the_value_and_the_list_documentation() {
     // Given
     let (_server, client) = start().await;

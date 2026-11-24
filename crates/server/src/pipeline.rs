@@ -271,7 +271,13 @@ impl Inner {
         urls: &Urls,
         version: &'static str,
     ) -> HttpResponse {
-        let Ok(request) = serde_json::from_slice::<GraphqlBody>(body) else {
+        let parsed = serde_json::from_slice::<GraphqlBody>(body).or_else(|e| {
+            if e.classify() != serde_json::error::Category::Data {
+                return Err(e);
+            }
+            serde_json::from_slice::<serde_json::Value>(body).and_then(GraphqlBody::deserialize)
+        });
+        let Ok(request) = parsed else {
             let e = ApiError::bad_request("Problems parsing JSON");
             return self.finish(error_call(parts, "graphql", "graphql", version, e));
         };
