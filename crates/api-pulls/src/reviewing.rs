@@ -1,13 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use hubdouble_api_gitdata::branch_rules::{self, Via, diff_state, flag, parameter};
 use hubdouble_auth::Actor;
 use hubdouble_git::{Git, ObjectId, RefChange};
 use hubdouble_model::{
-    AccountKind, ApiError, Issue, Pull, Repo, RepoRole, ReviewState, Rule, Team, Timestamp,
+    AccountKind, ApiError, Issue, Pull, Repo, RepoRole, ReviewState, Rule, Team,
 };
 use hubdouble_store::{
-    Accounts, Counters, Entity, Repos, ReviewThreads, Reviews, Rows, Sequence, Teams, Tx, TxMut,
+    Accounts, Entity, Repos, ReviewThreads, Reviews, Rows, Table, Teams, Tx, TxMut,
 };
 use serde_json::Value;
 
@@ -17,7 +17,7 @@ pub(crate) type LastPushes = Rows<LastPush>;
 pub(crate) struct LastPush {
     issue_id: i64,
     pusher: i64,
-    at: (Timestamp, i64),
+    order: u64,
 }
 
 impl Entity for LastPush {
@@ -26,10 +26,43 @@ impl Entity for LastPush {
     }
 }
 
-fn last_push(tx: &Tx, issue: &Issue) -> (i64, (Timestamp, i64)) {
+#[derive(Clone, Default)]
+pub(crate) struct ReviewOrder {
+    last: u64,
+    submitted: HashMap<i64, u64>,
+}
+
+impl Table for ReviewOrder {}
+
+fn next_order(tx: &mut TxMut<'_>) -> u64 {
+    let mut order = tx.table_mut::<ReviewOrder>();
+    let order = order.get_mut();
+    order.last += 1;
+    order.last
+}
+
+/// Records that the review `review_id` was submitted now, after every push and submission
+/// recorded before it, for the approval of the last push.
+pub fn review_submitted(tx: &mut TxMut<'_>, review_id: i64) {
+    let order = next_order(tx);
+    tx.table_mut::<ReviewOrder>()
+        .get_mut()
+        .submitted
+        .insert(review_id, order);
+}
+
+fn last_push(tx: &Tx, issue: &Issue) -> (i64, u64) {
     tx.table::<LastPushes>()
         .get(issue.id)
-        .map_or((issue.user_id, (issue.created_at, 0)), |p| (p.pusher, p.at))
+        .map_or((issue.user_id, 0), |p| (p.pusher, p.order))
+}
+
+fn submitted_order(tx: &Tx, review_id: i64) -> u64 {
+    tx.table::<ReviewOrder>()
+        .submitted
+        .get(&review_id)
+        .copied()
+        .unwrap_or(0)
 }
 
 fn base_repo<'t>(tx: &'t Tx, p: &Pull) -> Option<&'t Repo> {
@@ -62,11 +95,11 @@ pub(crate) fn pushed(
             return Ok(());
         }
     }
-    let at = (git.now(), tx.table::<Counters>().current(Sequence::Id));
+    let order = next_order(tx);
     tx.table_mut::<LastPushes>().replace(LastPush {
         issue_id: issue.id,
         pusher: change.sender,
-        at,
+        order,
     })?;
     Ok(())
 }
@@ -208,27 +241,27 @@ fn tally(tx: &Tx, issue: &Issue, repo: &Repo) -> Tally {
         {
             continue;
         }
-        let key = (review.submitted_at, review.id, review.state);
+        let order = submitted_order(tx, review.id);
+        let key = ((order, review.submitted_at, review.id), review.state);
         let last = reviewers.entry(review.user_id).or_insert(key);
-        if (key.0, key.1) > (last.0, last.1) {
+        if key.0 > last.0 {
             *last = key;
         }
     }
-    let (pusher, pushed_at) = last_push(tx, issue);
+    let (pusher, push_order) = last_push(tx, issue);
     let approved = || {
         reviewers
             .iter()
-            .filter(|(_, entry)| entry.2 == ReviewState::Approved)
+            .filter(|(_, entry)| entry.1 == ReviewState::Approved)
     };
     Tally {
         approvals: approved().count(),
         changes: reviewers
             .values()
-            .filter(|entry| entry.2 == ReviewState::ChangesRequested)
+            .filter(|entry| entry.1 == ReviewState::ChangesRequested)
             .count(),
-        approved_since_push: approved().any(|(&user, entry)| {
-            user != pusher && entry.0.is_some_and(|at| (at, entry.1) > pushed_at)
-        }),
+        approved_since_push: approved()
+            .any(|(&user, entry)| user != pusher && (push_order == 0 || entry.0.0 > push_order)),
         approvers: approved().map(|(&user, _)| user).collect(),
     }
 }

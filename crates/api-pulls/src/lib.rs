@@ -19,6 +19,7 @@ pub use association::association;
 pub use change::kept;
 pub use merge_state::mergeable_state;
 pub use reopen::{reopen, reopened};
+pub use reviewing::review_submitted;
 pub use state::sync_refs;
 pub use timeline::{StateEvent, StateEvents, StateKind, review_dismissed};
 
@@ -40,6 +41,7 @@ const CONTENTS_WRITE: Requirement = repo_requirement(&[Grant::write("contents")]
 pub fn register_tables(b: &mut StoreBuilder) {
     b.register_table::<merge_state::MergeStates>()
         .register_table::<reviewing::LastPushes>()
+        .register_table::<reviewing::ReviewOrder>()
         .register_table::<association::Contributors>();
 }
 

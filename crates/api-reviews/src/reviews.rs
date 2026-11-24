@@ -251,6 +251,7 @@ pub fn publish(
     tx.table_mut::<Reviews>()
         .replace(submitted.clone())
         .map_err(|e| ApiError::internal(e.to_string()))?;
+    hubdouble_api_pulls::review_submitted(tx, submitted.id);
     let issue = remove_requested_user(tx, issue, review.user_id)?;
     events::review(tx, &issue, review.user_id, &submitted, "submitted", None)?;
     for comment in comments {
