@@ -346,7 +346,7 @@ pub(crate) fn list_commits(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             .get(name)
             .filter(|t| !t.is_empty())
             .map(|t| {
-                Timestamp::parse_date_time(t, ctx.now()).map_err(|_| {
+                Timestamp::parse_commit_date(t, ctx.now()).map_err(|_| {
                     ApiError::internal("Server Error")
                         .with_docs("https://docs.github.com/rest/commits/commits#list-commits")
                 })

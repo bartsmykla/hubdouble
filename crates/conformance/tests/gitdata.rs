@@ -143,8 +143,11 @@ fn person(name: &str, email: &str, time: &str) -> Signature {
 
 #[tokio::test]
 async fn the_commit_list_filters_by_committer_date_and_by_author_or_committer() {
-    // Given three commits on dated, committed at 2026-11-18T17:16:26Z, :27Z and :28Z
+    // Given three commits on dated, committed at 2026-11-18T17:16:26Z, :27Z and :28Z, and a
+    // clock at 2026-11-24T12:00:00Z
     let s = server().await;
+    s.clock
+        .set(Timestamp::parse("2026-11-24T12:00:00Z").unwrap());
     let client = alice(&s);
     let at = |second: u8| format!("2026-11-18T17:16:{second}Z");
     let alice_at = |second| person("Alice", "alice@example.com", &at(second));
@@ -206,6 +209,13 @@ async fn the_commit_list_filters_by_committer_date_and_by_author_or_committer() 
         ("&author=", vec![]),
         ("&committer=alice", vec![&third, &second]),
         ("&committer=carol@example.org", vec![&first]),
+        ("&until=1969-11-18T17:16:27Z", vec![&second, &first]),
+        ("&until=2100-11-18T10:00:00%2B17:16", vec![]),
+        (
+            "&until=2100-11-18T10:00:00%2B17:17",
+            vec![&third, &second, &first],
+        ),
+        ("&until=2100-12-20T00:00:00Z", vec![]),
     ] {
         let answer = client.get(&format!("{list}{query}")).await;
 
@@ -213,6 +223,22 @@ async fn the_commit_list_filters_by_committer_date_and_by_author_or_committer() 
         assert_eq!(answer.status, StatusCode::OK, "{query}");
         let listed = shas("repos/list-commits", &answer);
         assert_eq!(listed.iter().collect::<Vec<_>>(), expected, "{query}");
+    }
+
+    // When the list reads a since with a year that Git does not read
+    for (since, expected) in [
+        ("2100-11-18T17:16:27Z", vec![&third, &second]),
+        ("10000-11-18T17:16:28Z", vec![&third]),
+    ] {
+        let answer = client
+            .get(&format!(
+                "repos/acme/public/commits?sha=dated&since={since}"
+            ))
+            .await;
+
+        // Then Git keeps the month, day and time on the clock's year
+        let listed = shas("repos/list-commits", &answer);
+        assert_eq!(listed.iter().collect::<Vec<_>>(), expected, "{since}");
     }
 
     // When the list reads a since or until that Ruby's DateTime.parse cannot read

@@ -3,6 +3,7 @@ use crate::time::{civil_from_days, days_from_civil};
 
 const DAY: i64 = 86_400;
 const UNIX_JD: i64 = 2_440_588;
+const REFORM_JD: i64 = 2_299_161;
 const YEAR_LIMIT: i64 = 1_000_000;
 const MAX_ZONE_WORD: usize = 17;
 
@@ -415,7 +416,18 @@ struct Day {
 
 impl Day {
     fn civil(&self) -> (i64, i64, i64) {
-        civil_from_days(self.jd - UNIX_JD)
+        if self.jd >= REFORM_JD {
+            return civil_from_days(self.jd - UNIX_JD);
+        }
+        let c = self.jd + 32_082;
+        let d = (4 * c + 3).div_euclid(1461);
+        let e = c - (1461 * d).div_euclid(4);
+        let m = (5 * e + 2) / 153;
+        (
+            d - 4800 + m / 10,
+            m + 3 - 12 * (m / 10),
+            e - (153 * m + 2) / 5 + 1,
+        )
     }
 
     fn wday(&self) -> i64 {
@@ -425,7 +437,7 @@ impl Day {
     fn commercial(&self) -> (i64, i64, i64) {
         let cwday = self.jd.rem_euclid(7) + 1;
         let thursday = self.jd - cwday + 4;
-        let (cwyear, _, _) = civil_from_days(thursday - UNIX_JD);
+        let (cwyear, _, _) = Day { jd: thursday }.civil();
         let cweek = (thursday - jd_of(cwyear, 1, 1)).div_euclid(7) + 1;
         (cwyear, cweek, cwday)
     }
@@ -446,16 +458,14 @@ impl Day {
 }
 
 fn jd_of(year: i64, mon: i64, mday: i64) -> i64 {
-    days_from_civil(year, mon, mday) + UNIX_JD
-}
-
-fn days_in_month(year: i64, mon: i64) -> i64 {
-    let (next_year, next) = if mon == 12 {
-        (year + 1, 1)
-    } else {
-        (year, mon + 1)
-    };
-    jd_of(next_year, next, 1) - jd_of(year, mon, 1)
+    let gregorian = days_from_civil(year, mon, mday) + UNIX_JD;
+    if gregorian >= REFORM_JD {
+        return gregorian;
+    }
+    let a = i64::from(mon <= 2);
+    let y = year + 4800 - a;
+    let m = mon + 12 * a - 3;
+    mday + (153 * m + 2) / 5 + 365 * y + y.div_euclid(4) - 32_083
 }
 
 fn valid_civil(year: i64, mon: i64, mday: i64) -> Option<i64> {
@@ -463,9 +473,18 @@ fn valid_civil(year: i64, mon: i64, mday: i64) -> Option<i64> {
     if !(1..=12).contains(&mon) {
         return None;
     }
-    let days = days_in_month(year, mon);
-    let mday = if mday < 0 { days + mday + 1 } else { mday };
-    (1..=days).contains(&mday).then(|| jd_of(year, mon, mday))
+    let jd = if mday < 0 {
+        let (next_year, next) = if mon == 12 {
+            (year + 1, 1)
+        } else {
+            (year, mon + 1)
+        };
+        jd_of(next_year, next, 1) + mday
+    } else {
+        jd_of(year, mon, mday)
+    };
+    let (y, m, d) = Day { jd }.civil();
+    ((y, m) == (year, mon) && (mday < 0 || d == mday)).then_some(jd)
 }
 
 fn valid_ordinal(year: i64, yday: i64) -> Option<i64> {
@@ -741,9 +760,42 @@ fn zone_to_diff(zone: &str) -> Option<i64> {
     Some(sign * seconds)
 }
 
-/// Ruby's `DateTime.parse(text)` in a UTC process, as Unix seconds without the fraction.
-/// `None` is the `Date::Error` that Ruby raises.
-pub(crate) fn date_time_parse(text: &str, now: i64) -> Option<i64> {
+/// A `DateTime` without its fraction: the day and time at its own offset.
+pub(crate) struct DateTime {
+    jd: i64,
+    seconds: i64,
+    offset: i64,
+}
+
+impl DateTime {
+    /// The time as the `DateTime#xmlschema` of `ActiveSupport` writes it: `%Y-%m-%dT%H:%M:%S`,
+    /// then `Z` for no offset or `%:z`, on Ruby's calendar, Julian before 1582-10-15.
+    pub(crate) fn xmlschema(&self) -> String {
+        let (year, mon, mday) = Day {
+            jd: self.jd + self.seconds / DAY,
+        }
+        .civil();
+        let s = self.seconds % DAY;
+        let sign = if year < 0 { "-" } else { "" };
+        let zone = if self.offset == 0 {
+            "Z".to_owned()
+        } else {
+            let o = self.offset.abs();
+            let sign = if self.offset < 0 { '-' } else { '+' };
+            format!("{sign}{:02}:{:02}", o / 3600, o / 60 % 60)
+        };
+        format!(
+            "{sign}{:04}-{mon:02}-{mday:02}T{:02}:{:02}:{:02}{zone}",
+            year.abs(),
+            s / 3600,
+            s / 60 % 60,
+            s % 60
+        )
+    }
+}
+
+/// Ruby's `DateTime.parse(text)` in a UTC process. `None` is the `Date::Error` that Ruby raises.
+pub(crate) fn date_time_parse(text: &str, now: i64) -> Option<DateTime> {
     let p: Parts = parts(text)?;
     let mut frags = Frags::default();
     for (f, value) in [
@@ -804,5 +856,9 @@ pub(crate) fn date_time_parse(text: &str, now: i64) -> Option<i64> {
         .and_then(zone_to_diff)
         .filter(|o| o.abs() <= DAY)
         .unwrap_or(0);
-    Some((jd - UNIX_JD) * DAY + hour * 3600 + min * 60 + sec - offset)
+    Some(DateTime {
+        jd,
+        seconds: hour * 3600 + min * 60 + sec,
+        offset,
+    })
 }

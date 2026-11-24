@@ -3,6 +3,7 @@ mod config;
 mod entity;
 mod error;
 mod event;
+mod git_date;
 pub mod node_id;
 mod ruby_datetime;
 mod ruby_time;

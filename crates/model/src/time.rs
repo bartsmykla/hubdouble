@@ -101,18 +101,25 @@ impl Timestamp {
             .ok_or(TimestampError)
     }
 
-    /// Reads a time as Ruby's `DateTime.parse` does in a UTC process: the first date and
-    /// time that `Date._parse` finds, a missing field completed from `now` as Ruby completes
-    /// it, a zone that Ruby does not name read as UTC, and the fraction dropped.
+    /// Reads a commit list `since` or `until` as GitHub does. Ruby's `DateTime.parse` in a UTC
+    /// process reads the text: the first date and time that `Date._parse` finds, a missing
+    /// field completed from `now` as Ruby completes it, a zone that Ruby does not name read
+    /// as UTC, on the Julian calendar before 1582-10-15. GitHub writes that time back as
+    /// `%Y-%m-%dT%H:%M:%S` with `Z` or the `%:z` offset, and Git's `approxidate` reads it in
+    /// UTC at `now`. Git reads a year from 1970 to 2099 exactly. For another year it keeps
+    /// the month and day, takes the year from `now` (the year before when the month is
+    /// later), and reads the hours and minutes of an offset as the time of day.
     ///
     /// # Errors
     ///
     /// Returns [`TimestampError`] where Ruby raises `Date::Error`: no date, an invalid
     /// date or time, or more than 128 characters.
-    pub fn parse_date_time(text: &str, now: Timestamp) -> Result<Timestamp, TimestampError> {
-        crate::ruby_datetime::date_time_parse(text, now.0)
-            .map(Timestamp)
-            .ok_or(TimestampError)
+    pub fn parse_commit_date(text: &str, now: Timestamp) -> Result<Timestamp, TimestampError> {
+        let time = crate::ruby_datetime::date_time_parse(text, now.0).ok_or(TimestampError)?;
+        Ok(Timestamp(crate::git_date::approxidate(
+            &time.xmlschema(),
+            now.0,
+        )))
     }
 
     /// Whether a SQL `DATETIME` holds the time: `1000-01-01T00:00:00Z` to `9999-12-31T23:59:59Z`.
@@ -364,11 +371,26 @@ mod tests {
     }
 
     #[test]
-    fn date_times_read_free_text_as_the_live_commit_list_does() {
+    fn commit_dates_read_free_text_and_years_past_git_as_the_live_commit_list_does() {
         // Given the since and until values that live GET /repos/cli/cli/commits read, 2026-11-24,
+        // a year outside 1970 to 2099 read as Git reads it (docs.github.com/rest/commits/commits),
         // and a clock at Tuesday 2026-11-24T12:00:00Z
         let now = Timestamp(1_795_521_600);
         for (text, expected) in [
+            ("2100-11-20T12:00:00Z", "2026-11-20T12:00:00Z"),
+            ("10000-05-05T12:00:00Z", "2026-05-05T12:00:00Z"),
+            ("1969-12-01T12:00:00Z", "2025-12-01T12:00:00Z"),
+            ("1969-12-10T12:00:00Z", "2026-10-12T12:00:00Z"),
+            ("2100-12-20T12:00:00Z", "2012-12-20T12:00:00Z"),
+            ("9999-12-31T12:00:00Z", "2012-12-31T12:00:00Z"),
+            ("2100-11-23T18:24:25+05:00", "2026-11-23T05:00:00Z"),
+            ("2100-11-19T10:00:00+18:46", "2026-11-19T18:46:00Z"),
+            ("1500-02-29T12:00:00Z", "2026-03-01T12:00:00Z"),
+            ("0080-05-05T12:00:00Z", "1980-05-05T12:00:00Z"),
+            ("0005-03-04T12:00:00Z", "2004-05-03T12:00:00Z"),
+            ("1999-12-31 BC", "1998-12-31T00:00:00Z"),
+            ("1970-01-01T02:00:00+05:00", "1970-01-01T05:00:00Z"),
+            ("2099-12-31T23:00:00-05:00", "2099-12-31T05:00:00Z"),
             ("2026-11-18T17:16:33Z", "2026-11-18T17:16:33Z"),
             ("2026-11-18T17:16:33.5Z", "2026-11-18T17:16:33Z"),
             ("2026-11-18 17:16:33", "2026-11-18T17:16:33Z"),
@@ -384,7 +406,7 @@ mod tests {
             ("2028-02-29", "2028-02-29T00:00:00Z"),
         ] {
             // When / Then
-            let read = Timestamp::parse_date_time(text, now).map(|t| t.to_string());
+            let read = Timestamp::parse_commit_date(text, now).map(|t| t.to_string());
             assert_eq!(read.as_deref(), Ok(expected), "{text}");
         }
         for text in [
@@ -399,7 +421,7 @@ mod tests {
             "2026-13-01",
         ] {
             assert_eq!(
-                Timestamp::parse_date_time(text, now),
+                Timestamp::parse_commit_date(text, now),
                 Err(TimestampError),
                 "{text}"
             );
