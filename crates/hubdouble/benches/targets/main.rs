@@ -1098,6 +1098,34 @@ async fn open_mergeable(client: &mut Client) -> usize {
     mergeable
 }
 
+async fn first_reads(client: &mut Client, doc: &mut Doc) -> Result<Vec<Duration>, String> {
+    let Some(vars) = doc.vars.as_mut() else {
+        return Err("no variables for updateRefs".to_owned());
+    };
+    let mut samples = Vec::with_capacity(PUSH_SAMPLES);
+    for i in 0..PUSH_WARMUP + PUSH_SAMPLES {
+        let body = json!({"query": doc.query, "variables": doc_variables(vars, i)}).to_string();
+        let pushed = client
+            .call(Method::POST, "/graphql", Some(Bytes::from(body)))
+            .await;
+        if pushed.status != StatusCode::OK || pushed.json().get("errors").is_some() {
+            return Err(format!("{}: {}", pushed.status, pushed.json()));
+        }
+        let path = format!("/repos/acme/public/pulls/{}", i % PUSH_PULLS + 1);
+        let started = Instant::now();
+        let answer = client.call(Method::GET, &path, None).await;
+        let spent = started.elapsed();
+        if answer.status != StatusCode::OK {
+            return Err(format!("{path}: {}", answer.status));
+        }
+        if i >= PUSH_WARMUP {
+            samples.push(spent);
+        }
+    }
+    samples.sort();
+    Ok(samples)
+}
+
 fn push_rows(dir: &Path, rows: &mut Vec<Row>) {
     let receiver = Receiver::start(Duration::ZERO);
     let running = start_server(&push_seed(), &receiver.url, dir, "push-seed.json");
@@ -1129,37 +1157,64 @@ fn push_rows(dir: &Path, rows: &mut Vec<Row>) {
             }),
         };
         let samples = measure_doc(&mut client, &mut doc, (PUSH_WARMUP, PUSH_SAMPLES)).await;
+        let reads = first_reads(&mut client, &mut doc).await;
         let after = open_mergeable(&mut client).await;
-        match samples {
-            Ok(_) if before != PUSH_PULLS || after != PUSH_PULLS => Err(format!(
+        match (samples, reads) {
+            (Ok(_), Ok(_)) if before != PUSH_PULLS || after != PUSH_PULLS => Err(format!(
                 "{before} open mergeable pull requests before and {after} after, \
                  {PUSH_PULLS} expected"
             )),
-            other => other,
+            (Ok(samples), Ok(reads)) => Ok((samples, reads)),
+            (Err(e), _) | (_, Err(e)) => Err(e),
         }
     });
     let measure = format!("GraphQL updateRefs p99, main with {PUSH_PULLS} open pull requests");
-    let row = match measured {
-        Ok(samples) => {
+    let read_measure = format!(
+        "REST pull request read p99, first after a push to main with {PUSH_PULLS} open pull requests"
+    );
+    let (row, read_row) = match measured {
+        Ok((samples, reads)) => {
+            eprintln!(
+                "first pull request read after a push: p50 {:.1} µs, p99 {:.1} µs",
+                micros(percentile(&reads, 0.5)),
+                micros(percentile(&reads, 0.99))
+            );
+            let read_row = Row::new(
+                read_measure,
+                Some(micros(percentile(&reads, 0.99))),
+                "µs",
+                Goal::Below(1000.0),
+            )
+            .scaled()
+            .note(format!(
+                "{PUSH_SAMPLES} pushes, each followed by one read of the next pull request"
+            ));
             eprintln!(
                 "graphql updateRefs on main: p50 {:.1} µs, p99 {:.1} µs",
                 micros(percentile(&samples, 0.5)),
                 micros(percentile(&samples, 0.99))
             );
-            Row::new(
+            let row = Row::new(
                 measure,
                 Some(micros(percentile(&samples, 0.99)) / 1000.0),
                 "ms",
                 Goal::Below(3.0),
             )
             .note(format!(
-                "{PUSH_SAMPLES} pushes that move main back and forth, each a test merge of every \
-                 pull request"
-            ))
+                "{PUSH_SAMPLES} pushes that move main back and forth, each a mergeability check \
+                 of every pull request"
+            ));
+            (row, read_row)
         }
-        Err(e) => Row::new(measure, None, "ms", Goal::Below(3.0)).note(e),
+        Err(e) => (
+            Row::new(measure, None, "ms", Goal::Below(3.0)).note(e.clone()),
+            Row::new(read_measure, None, "µs", Goal::Below(1000.0))
+                .scaled()
+                .note(e),
+        ),
     };
     rows.push(row);
+    rows.push(read_row);
     drop(receiver);
     running.runtime.shutdown_background();
     client_runtime.shutdown_background();
