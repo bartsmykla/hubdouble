@@ -23,6 +23,9 @@ pub struct ApiError {
     pub message: String,
     pub documentation_url: String,
     pub errors: Vec<FieldError>,
+    /// `errors` written as one string instead of a list, as GitHub writes a model's
+    /// `Validation failed: ...` text. It replaces `errors` when set.
+    pub errors_text: Option<Box<str>>,
     /// Extra response headers, such as `X-Accepted-GitHub-Permissions` or `X-GitHub-SSO`.
     pub headers: Vec<(&'static str, String)>,
 }
@@ -35,6 +38,7 @@ impl ApiError {
             message: message.into(),
             documentation_url: DOCS.to_owned(),
             errors: Vec::new(),
+            errors_text: None,
             headers: Vec::new(),
         }
     }
@@ -92,6 +96,12 @@ impl ApiError {
     #[must_use]
     pub fn with_error(mut self, e: FieldError) -> ApiError {
         self.errors.push(e);
+        self
+    }
+
+    #[must_use]
+    pub fn with_errors_text(mut self, text: impl Into<Box<str>>) -> ApiError {
+        self.errors_text = Some(text.into());
         self
     }
 

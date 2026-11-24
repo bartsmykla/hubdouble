@@ -511,17 +511,20 @@ struct ErrorBody<'a> {
     status: String,
 }
 
-struct Errors<'a>(&'a [FieldError]);
+struct Errors<'a>(&'a [FieldError], Option<&'a str>);
 
 impl Errors<'_> {
     fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0.is_empty() && self.1.is_none()
     }
 }
 
 impl Serialize for Errors<'_> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq as _;
+        if let Some(text) = self.1 {
+            return s.serialize_str(text);
+        }
         let mut seq = s.serialize_seq(Some(self.0.len()))?;
         for e in self.0 {
             match &e.message {
@@ -555,7 +558,7 @@ fn error_call<'r>(
 pub(crate) fn error_reply(e: &ApiError) -> Reply {
     let body = ErrorBody {
         message: &e.message,
-        errors: Errors(&e.errors),
+        errors: Errors(&e.errors, e.errors_text.as_deref()),
         documentation_url: &e.documentation_url,
         status: e.status.to_string(),
     };

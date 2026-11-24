@@ -59,13 +59,14 @@ pub fn statuses_on<'t>(tx: &'t Tx, repo: i64, sha: &str) -> Vec<&'t Arc<Status>>
     statuses
 }
 
-/// The newest status per context, in the order GitHub's combined status lists them.
+/// The newest status per context, contexts compared without case, in the order GitHub's
+/// combined status lists them. Each keeps the context spelling it was created with.
 pub fn latest_statuses<'t>(statuses: &[&'t Arc<Status>]) -> Vec<&'t Arc<Status>> {
     let mut seen = std::collections::BTreeSet::new();
     let mut latest: Vec<_> = statuses
         .iter()
         .copied()
-        .filter(|status| seen.insert(status.context.as_str()))
+        .filter(|status| seen.insert(status.context.to_lowercase()))
         .collect();
     latest.sort_unstable_by_key(|status| status.id);
     latest

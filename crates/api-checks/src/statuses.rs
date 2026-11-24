@@ -3,14 +3,35 @@ use std::sync::Arc;
 use http::StatusCode;
 use http::header::LINK;
 use hubdouble_git::Git;
-use hubdouble_model::{ApiError, Repo, Status, StatusState, Timestamp, node_id};
+use hubdouble_model::{ApiError, FieldError, Repo, Status, StatusState, Timestamp, node_id};
 use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::{Statuses, TxMut};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::view::{self, View, latest_statuses, no_commit, statuses_on};
-use crate::{events, invalid, missing, window};
+use crate::{events, window};
+
+const MAX_DESCRIPTION: usize = 140;
+const CREATE_DOCS: &str = "https://docs.github.com/rest/commits/statuses#create-a-commit-status";
+
+fn status_error(field: &str, message: &str) -> ApiError {
+    ApiError::unprocessable("Validation Failed")
+        .with_docs(CREATE_DOCS)
+        .with_error(FieldError {
+            resource: "Status".to_owned(),
+            field: field.to_owned(),
+            code: "custom".to_owned(),
+            message: Some(message.to_owned()),
+            value: None,
+        })
+}
+
+fn http_scheme(url: &str) -> bool {
+    url.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+    })
+}
 
 #[derive(Deserialize)]
 pub struct StatusInput {
@@ -29,8 +50,38 @@ pub fn insert(
     input: StatusInput,
     (id, now): (Option<i64>, Timestamp),
 ) -> Result<Arc<Status>, ApiError> {
-    let state = input.state.ok_or_else(|| missing("state"))?;
-    let state = StatusState::from_rest(&state).ok_or_else(|| invalid("state"))?;
+    let state = input
+        .state
+        .as_deref()
+        .and_then(StatusState::from_rest)
+        .ok_or_else(|| status_error("state", "state is not included in the list"))?;
+    let context = input.context.unwrap_or_else(|| "default".to_owned());
+    if context.chars().any(|c| c.len_utf8() == 4) {
+        return Err(status_error(
+            "context",
+            "context doesn't accept 4-byte Unicode",
+        ));
+    }
+    let mut failed = Vec::new();
+    if input
+        .description
+        .as_ref()
+        .is_some_and(|d| d.chars().count() > MAX_DESCRIPTION)
+    {
+        failed.push("Description is too long (maximum is 140 characters)");
+    }
+    if input
+        .target_url
+        .as_deref()
+        .is_some_and(|url| !url.is_empty() && !http_scheme(url))
+    {
+        failed.push("Target url must use http(s) scheme");
+    }
+    if !failed.is_empty() {
+        return Err(ApiError::unprocessable("Validation Failed")
+            .with_errors_text(format!("Validation failed: {}", failed.join(", ")))
+            .with_docs(CREATE_DOCS));
+    }
     let sha = view::commit(tx, git, repo.id, reference)
         .ok_or_else(|| no_commit(reference))?
         .to_string();
@@ -41,7 +92,7 @@ pub fn insert(
         repo_id: repo.id,
         sha,
         state,
-        context: input.context.unwrap_or_else(|| "default".to_owned()),
+        context,
         description: input.description,
         target_url: input.target_url,
         creator_id: creator,
