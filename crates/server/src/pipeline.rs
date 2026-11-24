@@ -970,15 +970,16 @@ fn cache_headers(reply: &mut Reply, operation_id: &str, read: bool, authenticate
     let cached = reply.status == StatusCode::OK || reply.status == StatusCode::NOT_MODIFIED;
     let vary = if read && cached {
         let spaced = SPACED_VARY.contains(&operation_id);
-        let age = if DAY_CACHE.contains(&operation_id) {
-            86_400
-        } else {
-            60
-        };
-        let scope = if authenticated { "private" } else { "public" };
         if !reply.headers.contains_key(header::CACHE_CONTROL) {
-            let value = format!("{scope}, max-age={age}, s-maxage={age}");
-            set(&mut reply.headers, "cache-control", &value);
+            let value = match (authenticated, DAY_CACHE.contains(&operation_id)) {
+                (true, false) => "private, max-age=60, s-maxage=60",
+                (true, true) => "private, max-age=86400, s-maxage=86400",
+                (false, false) => "public, max-age=60, s-maxage=60",
+                (false, true) => "public, max-age=86400, s-maxage=86400",
+            };
+            reply
+                .headers
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
         }
         match (authenticated, spaced) {
             (true, false) => AUTHENTICATED_VARY,
@@ -989,7 +990,9 @@ fn cache_headers(reply: &mut Reply, operation_id: &str, read: bool, authenticate
     } else {
         PLAIN_VARY
     };
-    set(&mut reply.headers, "vary", vary);
+    reply
+        .headers
+        .insert(header::VARY, HeaderValue::from_static(vary));
 }
 
 fn accepts_gzip(headers: &HeaderMap) -> bool {
