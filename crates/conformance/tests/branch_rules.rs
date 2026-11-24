@@ -226,7 +226,7 @@ async fn a_ref_write_refuses_each_broken_rule_with_422() {
             Method::DELETE,
             "git/refs/heads/develop",
             json!({}),
-            vec!["Cannot delete this protected branch."],
+            vec!["Cannot delete this branch"],
         ),
         (
             json!([{"type": "update"}]),

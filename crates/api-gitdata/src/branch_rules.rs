@@ -9,7 +9,7 @@ use serde_json::Value;
 
 const CREATION: &str = "Cannot create ref due to creations being restricted.";
 const UPDATE: &str = "Cannot update this protected ref.";
-const DELETION: &str = "Cannot delete this protected branch.";
+const DELETION: &str = "Cannot delete this branch";
 const FORCE_PUSH: &str = "Cannot force-push to this branch";
 const PULL_REQUEST: &str = "Changes must be made through a pull request.";
 const MERGE_METHOD: &str = "Merge is not an allowed merge method in this repository.";
