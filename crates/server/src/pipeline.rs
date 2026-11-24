@@ -410,12 +410,7 @@ impl Inner {
                 if let Some(unsupported) = unsupported_accept(&parts.headers, &[]) {
                     return Err(unsupported);
                 }
-                let body = self
-                    .gql
-                    .schema()
-                    .introspection()
-                    .map_err(|e| ApiError::internal(e.message))?;
-                Reply::raw(hubdouble_rest::JSON, body)
+                Reply::raw(hubdouble_rest::JSON, self.gql.schema().introspection())
                     .header(header::CACHE_CONTROL, "private, max-age=60, s-maxage=60")
             });
         self.finish(Call {

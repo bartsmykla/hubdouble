@@ -7,14 +7,19 @@ mod ops_gen;
 
 pub use ops_gen::{NODES, OPERATIONS};
 
-/// GitHub's pinned public GraphQL schema, `schema.docs.graphql`.
-pub const GRAPHQL_SCHEMA: &str = include_str!("../../../spec/graphql/schema.docs.graphql");
+/// The SDL that `xtask gen` writes from the two introspection pins below; it is the schema that
+/// hubdouble validates and executes documents against.
+pub const GRAPHQL_SCHEMA: &str = include_str!("../../../spec/graphql/schema.graphql");
 
-/// The introspection entries that GitHub's GraphQL server defines itself and its schema file
-/// leaves out: the built-in scalars, the `__` types and the directives, as `{"types":[...],
-/// "directives":[...]}`, read from live `GET /graphql` on 2026-11-24.
-pub const GRAPHQL_INTROSPECTION_BUILT_INS: &str =
-    include_str!("../../../spec/graphql/introspection.json");
+/// The body of live `GET /graphql`, GitHub's full introspection answer, as `xtask graphql-pin`
+/// read it, with one trailing newline.
+pub const GRAPHQL_INTROSPECTION: &str = include_str!("../../../spec/graphql/introspection.json");
+
+/// The introspection facts that only an introspection `POST /graphql` shows: the schema
+/// description, `isRepeatable`, `specifiedByURL` and `isOneOf` values that differ from the
+/// default, and the deprecated arguments and input fields with their live positions.
+pub const GRAPHQL_INTROSPECTION_EXTRA: &str =
+    include_str!("../../../spec/graphql/introspection-extra.json");
 
 /// The path parameters GitHub allows to hold `/`; each matches one or more segments.
 pub const SLASH_PARAMS: [&str; 6] = ["ref", "path", "branch", "basehead", "tag", "tree_sha"];

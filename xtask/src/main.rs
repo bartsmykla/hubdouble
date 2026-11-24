@@ -4,11 +4,13 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod graphql_pin;
 mod inventory;
 mod smoke_kind;
 
 const BUNDLE: &str = "spec/openapi/api.github.com.json";
 const OUTPUT: &str = "crates/spec/src/ops_gen.rs";
+const GRAPHQL_SCHEMA: &str = "spec/graphql/schema.graphql";
 const SLASH_PARAMS: [&str; 6] = ["ref", "path", "branch", "basehead", "tag", "tree_sha"];
 const METHODS: [(&str, &str); 5] = [
     ("get", "Get"),
@@ -24,8 +26,11 @@ fn main() -> ExitCode {
         [task] if task == "gen" => generate(&root()),
         [task, rest @ ..] if task == "inventory" => inventory::run(&root(), rest),
         [task] if task == "smoke-kind" => smoke_kind::run(&root()),
+        [task] if task == "graphql-pin" => {
+            graphql_pin::run(&root(), &|name| std::env::var(name).ok())
+        }
         _ => Err(
-            "usage: xtask gen | xtask inventory --client <path> [--names <file>] [--check] | xtask smoke-kind"
+            "usage: xtask gen | xtask inventory --client <path> [--names <file>] [--check] | xtask smoke-kind | xtask graphql-pin"
                 .into(),
         ),
     };
@@ -71,6 +76,15 @@ fn generate(root: &Path) -> Result<(), Box<dyn Error>> {
         ops.len(),
         nodes.len()
     );
+    write_graphql_schema(root)
+}
+
+fn write_graphql_schema(root: &Path) -> Result<(), Box<dyn Error>> {
+    let introspection = std::fs::read_to_string(root.join(graphql_pin::INTROSPECTION))?;
+    let extra = std::fs::read_to_string(root.join(graphql_pin::EXTRA))?;
+    let sdl = hubdouble_gql::schema_sdl(&introspection, &extra)?;
+    std::fs::write(root.join(GRAPHQL_SCHEMA), sdl)?;
+    eprintln!("xtask: wrote {GRAPHQL_SCHEMA}");
     Ok(())
 }
 

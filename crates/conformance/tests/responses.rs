@@ -289,6 +289,64 @@ async fn an_authenticated_graphql_read_answers_the_introspection_of_the_served_s
     assert_eq!(html.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
+const LIVE_INTROSPECTION_QUERY: &str = r#"query { __typename t: __type(name: "Nope") { name } input: __type(name: "RepositoryRulesetBypassActorInput") { ...T inputFields { name } all: inputFields(includeDeprecated: true) { name isDeprecated deprecationReason defaultValue type { kind name ofType { name } } } } __schema { description subscriptionType { name } queryType { __typename kind isOneOf ofType { name } } directives { name isRepeatable onField args { name defaultValue } } } enum: __type(name: "IssueState") { enumValues(includeDeprecated: true) { name isDeprecated } kind @include(if: false) } } fragment T on __Type { name kind isOneOf specifiedByURL }"#;
+
+const LIVE_INTROSPECTION_ANSWER: &str = r#"{"data":{"__typename":"Query","t":null,"input":{"name":"RepositoryRulesetBypassActorInput","kind":"INPUT_OBJECT","isOneOf":false,"specifiedByURL":null,"inputFields":[{"name":"actorId"},{"name":"repositoryRoleDatabaseId"},{"name":"organizationAdmin"},{"name":"enterpriseOwner"},{"name":"enterpriseRoleDatabaseId"},{"name":"deployKey"},{"name":"bypassMode"}],"all":[{"name":"actorId","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"SCALAR","name":"ID","ofType":null}},{"name":"repositoryRoleDatabaseId","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"SCALAR","name":"Int","ofType":null}},{"name":"organizationAdmin","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"SCALAR","name":"Boolean","ofType":null}},{"name":"enterpriseOwner","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"SCALAR","name":"Boolean","ofType":null}},{"name":"enterpriseRole","isDeprecated":true,"deprecationReason":"Use enterpriseRoleDatabaseId.","defaultValue":null,"type":{"kind":"SCALAR","name":"Boolean","ofType":null}},{"name":"enterpriseRoleDatabaseId","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"SCALAR","name":"BigInt","ofType":null}},{"name":"deployKey","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"SCALAR","name":"Boolean","ofType":null}},{"name":"bypassMode","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"NON_NULL","name":null,"ofType":{"name":"RepositoryRulesetBypassActorBypassMode"}}}]},"__schema":{"description":null,"subscriptionType":null,"queryType":{"__typename":"__Type","kind":"OBJECT","isOneOf":false,"ofType":null},"directives":[{"name":"deprecated","isRepeatable":false,"onField":false,"args":[{"name":"reason","defaultValue":"\"No longer supported\""}]},{"name":"include","isRepeatable":false,"onField":true,"args":[{"name":"if","defaultValue":null}]},{"name":"oneOf","isRepeatable":false,"onField":false,"args":[]},{"name":"skip","isRepeatable":false,"onField":true,"args":[{"name":"if","defaultValue":null}]},{"name":"specifiedBy","isRepeatable":false,"onField":false,"args":[{"name":"url","defaultValue":null}]}]},"enum":{"enumValues":[{"name":"OPEN","isDeprecated":false},{"name":"CLOSED","isDeprecated":false}]}}}"#;
+
+const CLASSIC_INTROSPECTION_QUERY: &str = "query IntrospectionQuery { __schema { queryType { name } mutationType { name } subscriptionType { name } types { ...FullType } directives { name description locations args { ...InputValue } } } } fragment FullType on __Type { kind name description fields(includeDeprecated: true) { name description args { ...InputValue } type { ...TypeRef } isDeprecated deprecationReason } inputFields { ...InputValue } interfaces { ...TypeRef } enumValues(includeDeprecated: true) { name description isDeprecated deprecationReason } possibleTypes { ...TypeRef } } fragment InputValue on __InputValue { name description type { ...TypeRef } defaultValue } fragment TypeRef on __Type { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } } } }";
+
+#[tokio::test]
+async fn a_graphql_answer_keeps_the_order_of_its_selection() {
+    // Given a user of the GraphQL endpoint
+    let server = whole_server(&[]).await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+
+    // When it selects fields in an order that is not sorted
+    let body = br#"{"query":"{ viewer { login __typename } b: __typename a: __typename }"}"#;
+    let answer = alice
+        .call_bytes(Method::POST, "graphql", body.to_vec())
+        .await;
+
+    // Then the answer keeps that order, as the GraphQL spec and live GitHub do
+    assert_eq!(
+        std::str::from_utf8(&answer.body).unwrap(),
+        format!(
+            r#"{{"data":{{"viewer":{{"login":"{ALICE}","__typename":"User"}},"b":"Query","a":"Query"}}}}"#
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_posted_introspection_query_answers_as_live_github_does() {
+    // Given a user of the GraphQL endpoint
+    let server = whole_server(&[]).await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let query = |q: &str| serde_json::to_vec(&json!({ "query": q })).unwrap();
+
+    // When it posts a mixed introspection selection, posts the query that GET /graphql answers
+    // and reads GET /graphql
+    let mixed = alice
+        .call_bytes(Method::POST, "graphql", query(LIVE_INTROSPECTION_QUERY))
+        .await;
+    let classic = alice
+        .call_bytes(Method::POST, "graphql", query(CLASSIC_INTROSPECTION_QUERY))
+        .await;
+    let read = alice.call(Method::GET, "graphql").await;
+
+    // Then the mixed selection is the live answer byte for byte, and the posted classic query
+    // is the GET answer byte for byte
+    assert_eq!(mixed.status, StatusCode::OK);
+    assert_eq!(
+        std::str::from_utf8(&mixed.body).unwrap(),
+        LIVE_INTROSPECTION_ANSWER
+    );
+    assert_eq!(classic.status, StatusCode::OK);
+    assert!(
+        classic.body == read.body,
+        "the POST and GET introspection answers differ"
+    );
+}
+
 #[tokio::test]
 async fn a_commit_status_is_validated_as_github_validates_a_status() {
     // Given

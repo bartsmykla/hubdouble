@@ -38,8 +38,12 @@ description = "Compare the five paired base-N.json and head-N.json rounds in HUB
 run = "cargo bench --locked -p hubdouble --bench targets -- --gate"
 
 [gen]
-description = "Generate crates/spec/src/ops_gen.rs from the pinned OpenAPI bundle"
+description = "Generate crates/spec/src/ops_gen.rs from the pinned OpenAPI bundle and spec/graphql/schema.graphql from the GraphQL pins"
 run = "cargo run --locked -p xtask -- gen"
+
+["graphql:pin"]
+description = "Read live GET /graphql and one introspection POST with GITHUB_TOKEN or GH_TOKEN, rewrite the GraphQL pins in spec/graphql and regenerate the schema"
+run = "cargo run --locked -p xtask -- graphql-pin"
 
 [inventory]
 description = "Generate the client's API inventory"

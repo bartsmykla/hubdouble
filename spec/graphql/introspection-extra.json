@@ -1,0 +1,41 @@
+{
+  "deprecatedArgs": {},
+  "deprecatedInputFields": {
+    "RepositoryRulesetBypassActorInput": [
+      {
+        "index": 4,
+        "value": {
+          "defaultValue": null,
+          "deprecationReason": "Use enterpriseRoleDatabaseId.",
+          "description": "For enterprise role bypasses, true. NOTE: This bypass actor is in beta.",
+          "isDeprecated": true,
+          "name": "enterpriseRole",
+          "type": {
+            "kind": "SCALAR",
+            "name": "Boolean",
+            "ofType": null
+          }
+        }
+      }
+    ]
+  },
+  "description": null,
+  "directives": {
+    "deprecated": {
+      "isRepeatable": false
+    },
+    "include": {
+      "isRepeatable": false
+    },
+    "oneOf": {
+      "isRepeatable": false
+    },
+    "skip": {
+      "isRepeatable": false
+    },
+    "specifiedBy": {
+      "isRepeatable": false
+    }
+  },
+  "types": {}
+}

@@ -57,7 +57,6 @@ hubdouble implements the GitHub operations in the [client inventory](inventory/r
 | Code owner review refusal | Public samples show one owner set: `Waiting on code owner review from A, B, and/or C.`, before the check violations. When the changed files have more than one owner set without an approval, hubdouble gives one such line for each set, in the order of the changed paths. Owners without write access are not named. |
 | Workflow change in a merge | GitHub refuses a push that changes a workflow file without the right. No public sample shows `POST /merges` or `PUT .../pulls/{n}/merge` with such a change. hubdouble answers `403` with the push text, as the update-branch merge answers `403` (`limitlessprojects/Go-Hybrid` 762). |
 | Conversation lock | `PUT .../issues/{n}/lock` by a user without write access answers `403` `Must have push access to repository.`; no public sample shows the text. `addPullRequestReviewThread` on a locked pull request answers `FORBIDDEN` with the REST text; no public GraphQL sample shows it. |
-| Schema introspection | An authenticated `GET /graphql` answers the full introspection of the pinned `schema.docs.graphql`, so a type or field that GitHub added after the pin is absent, and `_Any` and `_Entity` are absent too. Live introspection gives arguments, input fields and enum values in definition order, and gives descriptions on one line. The pinned file sorts those lists by name and wraps long descriptions at 80 columns, so hubdouble gives them as the file does. Types and fields are sorted by name as on GitHub, and the built-in scalars, the `__` types and the directives are GitHub's own, read from live `GET /graphql` on 2026-11-24. |
 GitHub documents redirect responses for the [repository endpoint](https://docs.github.com/en/rest/repos/repos#get-a-repository).
 
 ## REST, IDs, and commits
@@ -78,7 +77,8 @@ GitHub documents redirect responses for the [repository endpoint](https://docs.g
 
 - The validation exception in the plan allows fields with the same response name to differ in nullability on mutually exclusive concrete types. The `originalCommentEdit` inventory document uses this for `pullRequest` on `IssueComment` and `PullRequestReviewComment`.
 - A null from a failed non-null field propagates to the nearest nullable parent. GraphQL errors give a `type`, and execution errors identify the field with a `path` and source `locations`.
-- An authenticated `GET /graphql` answers `200` with GitHub's full introspection query result for the schema that `POST /graphql` serves, with the `graphql` rate-limit resource, `X-Accepted-OAuth-Scopes: repo` and `Cache-Control: private, max-age=60, s-maxage=60`.
+- The schema is GitHub's live introspection, pinned in `spec/graphql/` by `mise run graphql:pin`: the body of `GET /graphql` and the facts that only an introspection `POST` shows. `spec/graphql/schema.graphql` is generated from the two pins, and a test fails when it differs from them. An authenticated `GET /graphql` answers the pinned body byte for byte, with the `graphql` rate-limit resource and `X-Accepted-OAuth-Scopes: repo`. `__schema`, `__type` and `__typename` in a posted document answer from the same pins.
+- A GraphQL answer keeps the order of the selection.
 - Connections require `first` or `last`, with a maximum of 100. An unimplemented field returns `HUBDOUBLE_NOT_IMPLEMENTED` on its path. A repository the caller cannot see returns null with `NOT_FOUND` for that alias.
 
 ## Test controls

@@ -1,4 +1,5 @@
 mod complete;
+mod introspect;
 mod request;
 mod resolve;
 
@@ -290,6 +291,9 @@ impl<'r> Exec<'r> {
         let name = f.name.as_str();
         if name == "__typename" {
             return Ok(Value::String(type_name.to_owned()));
+        }
+        if type_name == QUERY && path.parent.is_none() && matches!(name, "__schema" | "__type") {
+            return self.introspect(fields, path);
         }
         let Ok(def) = self.schema().type_field(type_name, name) else {
             self.error(

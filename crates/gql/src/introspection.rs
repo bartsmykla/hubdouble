@@ -1,14 +1,13 @@
 use apollo_compiler::ExecutableDocument;
 use apollo_compiler::introspection::partial_execute;
 use apollo_compiler::request::coerce_variable_values;
-use apollo_compiler::response::{JsonMap, JsonValue};
-use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+use apollo_compiler::response::JsonMap;
+use serde_json::Value;
 
-use crate::contract::{ErrorType, GqlError};
+use crate::pin::is_built_in;
 use crate::schema::Schema;
 
-const QUERY: &str = "query IntrospectionQuery {
+pub(crate) const CLASSIC_QUERY: &str = "query IntrospectionQuery {
   __schema {
     queryType { name }
     mutationType { name }
@@ -41,66 +40,55 @@ fragment TypeRef on __Type {
   } } } }
 }";
 
-#[derive(Serialize)]
-struct Answer<'a> {
-    data: &'a JsonMap,
+fn user_types(schema: &Value) -> Vec<Value> {
+    schema["types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| !is_built_in(t["name"].as_str().unwrap()))
+        .cloned()
+        .collect()
 }
 
-fn internal(e: impl std::fmt::Debug) -> GqlError {
-    GqlError::new(ErrorType::Internal, format!("{e:?}"))
+#[test]
+fn the_served_schema_is_the_sdl_of_the_pins() {
+    // Given the two introspection pins
+    let introspection = hubdouble_spec::GRAPHQL_INTROSPECTION;
+    let extra = hubdouble_spec::GRAPHQL_INTROSPECTION_EXTRA;
+
+    // When the SDL is written from them
+    let sdl = crate::schema_sdl(introspection, extra).unwrap();
+
+    // Then it is the embedded schema, so `mise run gen` left nothing to write
+    assert!(
+        sdl == hubdouble_spec::GRAPHQL_SCHEMA,
+        "spec/graphql/schema.graphql differs from its pins: run `mise run gen`"
+    );
 }
 
-#[derive(Deserialize)]
-struct BuiltIns {
-    types: Vec<JsonValue>,
-    directives: Vec<JsonValue>,
-}
-
-fn name(v: &JsonValue) -> Option<&str> {
-    v.get("name").and_then(JsonValue::as_str)
-}
-
-fn sort_by_name(items: &mut [JsonValue]) {
-    items.sort_by_cached_key(|v| name(v).map(str::to_owned));
-}
-
-fn merge(meta: &mut JsonMap, built_ins: BuiltIns) {
-    if let Some(JsonValue::Array(types)) = meta.get_mut("types") {
-        types.retain(|t| !built_ins.types.iter().any(|b| name(b) == name(t)));
-        types.extend(built_ins.types);
-        sort_by_name(types);
-        for t in types {
-            if let Some(JsonValue::Array(fields)) = t.get_mut("fields") {
-                sort_by_name(fields);
-            }
-        }
-    }
-    meta.insert("directives", JsonValue::Array(built_ins.directives));
-}
-
-pub(crate) fn build(schema: &Schema) -> Result<Bytes, GqlError> {
+#[test]
+fn the_served_schema_describes_every_pinned_type_as_live_github_does() {
+    // Given the served schema and the pinned live answer
+    let schema = Schema::load().unwrap();
     let inner = &schema.inner;
-    let doc = ExecutableDocument::parse_and_validate(inner, QUERY, "introspection.graphql")
-        .map_err(|e| internal(e.errors))?;
-    let operation = doc.operations.get(None).map_err(internal)?;
-    let variables = coerce_variable_values(inner, operation, &JsonMap::new()).map_err(internal)?;
-    let response = partial_execute(
+    let pin: Value = serde_json::from_str(hubdouble_spec::GRAPHQL_INTROSPECTION).unwrap();
+
+    // When the live query runs on the served schema
+    let doc = ExecutableDocument::parse_and_validate(inner, CLASSIC_QUERY, "q.graphql").unwrap();
+    let operation = doc.operations.get(None).unwrap();
+    let variables = coerce_variable_values(inner, operation, &JsonMap::new()).unwrap();
+    let answer = partial_execute(
         inner,
         &inner.implementers_map(),
         &doc,
         operation,
         &variables,
     )
-    .map_err(internal)?;
-    let mut data = response
-        .data
-        .ok_or_else(|| internal("the introspection query answered no data"))?;
-    let built_ins: BuiltIns =
-        serde_json::from_str(hubdouble_spec::GRAPHQL_INTROSPECTION_BUILT_INS).map_err(internal)?;
-    if let Some(JsonValue::Object(meta)) = data.get_mut("__schema") {
-        merge(meta, built_ins);
-    }
-    serde_json::to_vec(&Answer { data: &data })
-        .map(Bytes::from)
-        .map_err(internal)
+    .expect("the introspection query runs");
+    let answer = serde_json::to_value(answer.data.unwrap()).unwrap();
+
+    // Then every type outside the built-ins is the pinned one, in the pinned order
+    let mut served = user_types(&answer["__schema"]);
+    served.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    assert_eq!(served, user_types(&pin["data"]["__schema"]));
 }

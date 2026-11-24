@@ -1,17 +1,18 @@
-use apollo_compiler::executable::{Selection, SelectionSet};
-use apollo_compiler::schema::ExtendedType;
 use std::sync::OnceLock;
 
+use apollo_compiler::executable::{Selection, SelectionSet};
+use apollo_compiler::schema::ExtendedType;
 use apollo_compiler::validation::Valid;
 use bytes::Bytes;
 
 use crate::contract::{ErrorType, GqlError, ResponseError};
+use crate::meta::Meta;
 
 /// GitHub's parsed GraphQL schema, loaded once per server.
 #[derive(Debug)]
 pub struct Schema {
     pub(crate) inner: Valid<apollo_compiler::Schema>,
-    introspection: OnceLock<Result<Bytes, GqlError>>,
+    meta: OnceLock<Result<Meta, GqlError>>,
 }
 
 impl Schema {
@@ -33,22 +34,26 @@ impl Schema {
         apollo_compiler::Schema::parse_and_validate(sdl, "schema.graphql")
             .map(|inner| Schema {
                 inner,
-                introspection: OnceLock::new(),
+                meta: OnceLock::new(),
             })
             .map_err(|e| GqlError::new(ErrorType::Internal, e.errors.to_string()))
     }
 
-    /// The `{"data":{"__schema":...}}` answer of GitHub's full introspection query, as compact
-    /// JSON with the types and directives sorted by name. It is built on the first call and
-    /// shared after that.
-    ///
-    /// # Errors
-    ///
-    /// An `INTERNAL` error when the introspection query does not run on this schema.
-    pub fn introspection(&self) -> Result<Bytes, GqlError> {
-        self.introspection
-            .get_or_init(|| crate::introspection::build(self))
-            .clone()
+    /// The body that live `GET /graphql` answered, byte for byte.
+    #[must_use]
+    pub fn introspection(&self) -> Bytes {
+        Bytes::from_static(hubdouble_spec::GRAPHQL_INTROSPECTION.trim_end().as_bytes())
+    }
+
+    pub(crate) fn meta(&self) -> Result<&Meta, &GqlError> {
+        self.meta
+            .get_or_init(|| {
+                Meta::load(
+                    hubdouble_spec::GRAPHQL_INTROSPECTION,
+                    hubdouble_spec::GRAPHQL_INTROSPECTION_EXTRA,
+                )
+            })
+            .as_ref()
     }
 
     /// Validates a document with GitHub's rule set (plan 4.7).
