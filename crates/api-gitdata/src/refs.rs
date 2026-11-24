@@ -4,7 +4,7 @@ use http::StatusCode;
 use http::header::LOCATION;
 use hubdouble_auth::{Actor, Target, authorize};
 use hubdouble_git::{EntryMode, Git, GitError, ObjectData, ObjectId, Ref, TreeEntry};
-use hubdouble_model::{ApiError, Repo};
+use hubdouble_model::{ApiError, Repo, TokenKind};
 use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::Tx;
 use serde::{Deserialize, Serialize};
@@ -72,11 +72,14 @@ fn check_rules(
         actor: ctx.actor(),
         repo: ctx.repo()?,
     };
-    let violations = guard.check(name, moves, Via::Push)?;
+    let docs = format!("{DOCS}#{operation}");
+    let violations = guard
+        .check(name, moves, Via::Push)
+        .map_err(|e| e.with_docs(docs.clone()))?;
     if violations.is_empty() {
         return Ok(());
     }
-    Err(refusal(422, &violations, &format!("{DOCS}#{operation}")))
+    Err(refusal(422, &violations, &docs))
 }
 
 pub(crate) fn get_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
@@ -190,19 +193,36 @@ fn check_workflows(
     operation: &str,
 ) -> Result<(), ApiError> {
     match denied_workflow(ctx.tx(), ctx.git(), ctx.actor(), ctx.repo()?, base, target)? {
-        Some(path) => Err(ApiError::unprocessable(workflow_refusal(&path))
-            .with_docs(format!("{DOCS}#{operation}"))),
+        Some(path) => Err(
+            ApiError::unprocessable(workflow_refusal(ctx.actor(), &path))
+                .with_docs(format!("{DOCS}#{operation}")),
+        ),
         None => Ok(()),
     }
 }
 
-pub(crate) fn workflow_refusal(path: &str) -> String {
-    format!(
-        "refusing to allow a GitHub App to create or update workflow `{path}` without `workflows` permission"
-    )
+/// GitHub's refusal of a write that changes the workflow file `path` without the right to,
+/// worded for the kind of token that `actor` holds.
+#[must_use]
+pub fn workflow_refusal(actor: &Actor, path: &str) -> String {
+    let (who, right) = match actor {
+        Actor::User { token, .. } if token.kind == TokenKind::Personal => {
+            ("a Personal Access Token", "`workflow` scope")
+        }
+        Actor::User { token, .. } if token.app_id.is_none() => ("an OAuth App", "`workflow` scope"),
+        _ => ("a GitHub App", "`workflows` permission"),
+    };
+    format!("refusing to allow {who} to create or update workflow `{path}` without {right}")
 }
 
-pub(crate) fn denied_workflow(
+/// The first workflow file that moving a ref from `base` to `target` changes when `actor` may
+/// not write workflows: an App without the `workflows` permission, or a classic or OAuth token
+/// without the `workflow` scope.
+///
+/// # Errors
+///
+/// A git error while it reads the trees, or an authorization error other than a refusal.
+pub fn denied_workflow(
     tx: &Tx,
     git: &Git,
     actor: &Actor,
@@ -210,7 +230,7 @@ pub(crate) fn denied_workflow(
     base: Option<ObjectId>,
     target: ObjectId,
 ) -> Result<Option<String>, ApiError> {
-    if base == Some(target) || !matches!(actor, Actor::Installation { .. }) {
+    if base == Some(target) {
         return Ok(None);
     }
     let trees = Trees {

@@ -1,5 +1,6 @@
 use hubdouble_api_gitdata::branch_rules::{self, CheckResults, RequiredChecks};
-use hubdouble_git::{Git, ObjectId};
+use hubdouble_api_gitdata::codeowners;
+use hubdouble_git::{Git, GitError, ObjectId};
 use hubdouble_model::{ApiError, Issue, IssueState, Pull};
 use hubdouble_store::{Entity, Repos, Rows, Tx, TxMut};
 
@@ -12,6 +13,19 @@ pub(crate) struct MergeFacts {
     issue_id: i64,
     behind: bool,
     closed: Option<&'static str>,
+    owners: Owners,
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+struct Owners {
+    at: Option<(ObjectId, ObjectId)>,
+    groups: Vec<Vec<String>>,
+}
+
+pub(crate) fn owner_groups<'t>(tx: &'t Tx, issue: &Issue) -> &'t [Vec<String>] {
+    tx.table::<MergeStates>()
+        .get(issue.id)
+        .map_or(&[], |f| f.owners.groups.as_slice())
 }
 
 impl Entity for MergeFacts {
@@ -48,11 +62,13 @@ pub(crate) fn record(tx: &mut TxMut<'_>, git: &Git, issue: &Issue) -> Result<(),
         return Ok(());
     };
     let old = tx.table::<MergeStates>().get(issue.id).cloned();
+    let kept = old.as_ref().map_or_default(|f| f.owners.clone());
     let facts = match issue.state {
         IssueState::Open => MergeFacts {
             issue_id: issue.id,
             behind: p.mergeable == Some(true) && behind(git, tx, issue.repo_id, p)?,
             closed: None,
+            owners: owners(git, tx, issue.repo_id, p, kept)?,
         },
         IssueState::Closed => {
             let behind = old.as_ref().is_some_and(|f| f.behind);
@@ -64,6 +80,7 @@ pub(crate) fn record(tx: &mut TxMut<'_>, git: &Git, issue: &Issue) -> Result<(),
                         .and_then(|f| f.closed)
                         .unwrap_or_else(|| open_state(tx, issue, p, behind)),
                 ),
+                owners: kept,
             }
         }
     };
@@ -73,13 +90,47 @@ pub(crate) fn record(tx: &mut TxMut<'_>, git: &Git, issue: &Issue) -> Result<(),
     Ok(())
 }
 
+fn base_tip(git: &Git, tx: &Tx, p: &Pull) -> Result<ObjectId, ApiError> {
+    match crate::state::live_tip(git, tx, &p.base)? {
+        Some(tip) => Ok(tip),
+        None => Ok(p.base.sha.parse()?),
+    }
+}
+
 fn behind(git: &Git, tx: &Tx, repo: i64, p: &Pull) -> Result<bool, ApiError> {
-    let base: ObjectId = match crate::state::live_tip(git, tx, &p.base)? {
-        Some(tip) => tip,
-        None => p.base.sha.parse()?,
-    };
+    let base = base_tip(git, tx, p)?;
     let head: ObjectId = p.head.sha.parse()?;
     Ok(!git.is_ancestor(tx, repo, base, head)?)
+}
+
+fn owners(git: &Git, tx: &Tx, repo: i64, p: &Pull, kept: Owners) -> Result<Owners, ApiError> {
+    let at = (base_tip(git, tx, p)?, p.head.sha.parse()?);
+    if kept.at == Some(at) {
+        return Ok(kept);
+    }
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    if let Some((_, text)) = codeowners::file_at(tx, git, repo, at.0)? {
+        let rules: Vec<_> = codeowners::lines(&text).collect();
+        let paths = match git.changed_paths(tx, repo, at.0, at.1) {
+            Ok(paths) => paths,
+            Err(GitError::NotFound) => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        for path in paths {
+            let Some(owners) = codeowners::owners_of(&rules, &path).filter(|o| !o.is_empty())
+            else {
+                continue;
+            };
+            let group: Vec<String> = owners.iter().map(|(_, o)| (*o).to_owned()).collect();
+            if !groups.contains(&group) {
+                groups.push(group);
+            }
+        }
+    }
+    Ok(Owners {
+        at: Some(at),
+        groups,
+    })
 }
 
 fn open_state(tx: &Tx, issue: &Issue, p: &Pull, behind: bool) -> &'static str {

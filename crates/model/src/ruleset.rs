@@ -57,6 +57,15 @@ pub fn ref_matches(conditions: Option<&Value>, branch: &str, default_branch: &st
     })
 }
 
+fn tag_matches(conditions: Option<&Value>, tag: &str) -> bool {
+    let Some(ref_name) = conditions.and_then(|c| c.get("ref_name")) else {
+        return false;
+    };
+    admits(ref_name, &format!("refs/tags/{tag}"), |p| {
+        (p == "~ALL").then_some(true)
+    })
+}
+
 fn repo_matches(conditions: Option<&Value>, repo: &Repo) -> bool {
     let Some(c) = conditions else {
         return false;
@@ -89,6 +98,25 @@ impl Ruleset {
             && self.target == RulesetTarget::Branch
             && self.governs(repo)
             && ref_matches(self.conditions.as_ref(), branch, &repo.default_branch)
+    }
+
+    /// Whether the ruleset is an active tag ruleset that applies to `tag` of the repository.
+    #[must_use]
+    pub fn applies_to_tag(&self, repo: &Repo, tag: &str) -> bool {
+        self.enforcement == Enforcement::Active
+            && self.target == RulesetTarget::Tag
+            && self.governs(repo)
+            && tag_matches(self.conditions.as_ref(), tag)
+    }
+
+    /// Whether the ruleset is an active push ruleset of the repository or of `root`, the
+    /// repository at the root of its fork network: GitHub applies a push ruleset to the whole
+    /// network.
+    #[must_use]
+    pub fn applies_to_push(&self, repo: &Repo, root: &Repo) -> bool {
+        self.enforcement == Enforcement::Active
+            && self.target == RulesetTarget::Push
+            && (self.governs(repo) || self.governs(root))
     }
 }
 

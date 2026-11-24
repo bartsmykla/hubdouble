@@ -2,7 +2,7 @@ use hubdouble_git::{Git, ObjectData, ObjectId, Signature};
 use hubdouble_hooks::emit;
 use hubdouble_model::{ApiError, CheckRun, CheckSuite, Event, Status, node_id};
 use hubdouble_render::Urls;
-use hubdouble_store::{Accounts, CheckSuites, Installations, Repos, Tx, TxMut};
+use hubdouble_store::{Accounts, CheckSuites, Installations, Repos, Rulesets, Tx, TxMut};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -254,10 +254,16 @@ fn branches(view: &View<'_>, sha: &str) -> Vec<Value> {
         .take(10)
         .map(|r| {
             let head = r.target;
+            let name = r.name.trim_start_matches("refs/heads/");
+            let protected = view
+                .tx
+                .table::<Rulesets>()
+                .iter()
+                .any(|rs| rs.applies_to_branch(view.repo, name));
             json!({
-                "name": r.name.trim_start_matches("refs/heads/"),
+                "name": name,
                 "commit": { "sha": head, "url": format!("{api}/repos/{full}/commits/{head}") },
-                "protected": false,
+                "protected": protected,
             })
         })
         .collect()

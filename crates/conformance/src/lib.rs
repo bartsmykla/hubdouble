@@ -169,6 +169,7 @@ pub const VARIANTS: &[Variant] = &[
     v(MERGES, MERGES_ROUTE, 204, &[]),
     v(MERGES, MERGES_ROUTE, 409, &[]),
     v(MERGES, MERGES_ROUTE, 404, &[]),
+    v(MERGES, MERGES_ROUTE, 403, &[]),
     v(
         DISPATCH,
         DISPATCH_ROUTE,

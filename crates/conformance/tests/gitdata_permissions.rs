@@ -257,6 +257,98 @@ async fn graphql_git_fields_need_the_contents_grant_on_a_private_repository() {
     }
 }
 
+async fn workflow_branch(server: &TestServer) -> String {
+    let writer = GoGithub::new(server).with_token(WORKFLOWS);
+    let main = branch_sha(&writer, "main").await;
+    let sha = detached_commit(&writer, &main, ".github/workflows/check.yml").await;
+    let created = writer
+        .post(
+            &format!("{GIT}/refs"),
+            &json!({"ref": "refs/heads/wf", "sha": sha}),
+        )
+        .await;
+    checked("git/create-ref", StatusCode::CREATED, &created);
+    main
+}
+
+#[tokio::test]
+async fn merges_that_bring_in_a_workflow_change_need_the_workflows_grant() {
+    // Given a wf branch that adds a workflow file to main
+    let server = server_with_tokens().await;
+    let main = workflow_branch(&server).await;
+    let contents = GoGithub::new(&server).with_token(CONTENTS);
+    let merge = json!({"base": "main", "head": "wf"});
+    // When an installation without workflows merges it through POST /merges
+    let denied = contents.post("repos/acme/public/merges", &merge).await;
+    // Then GitHub refuses with 403 and main stays
+    let body = checked("repos/merge", StatusCode::FORBIDDEN, &denied);
+    assert_eq!(
+        body["documentation_url"],
+        "https://docs.github.com/rest/branches/branches#merge-a-branch"
+    );
+    assert_eq!(branch_sha(&contents, "main").await, main);
+    // When alice opens a pull request of wf and the same installation merges it
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    let opened = alice
+        .post(
+            "repos/acme/public/pulls",
+            &json!({"title": "workflow", "head": "wf", "base": "main"}),
+        )
+        .await;
+    let number = checked("pulls/create", StatusCode::CREATED, &opened)["number"].clone();
+    let path = format!("repos/acme/public/pulls/{number}/merge");
+    let denied = contents.call_json(Method::PUT, &path, &json!({})).await;
+    // Then that merge is refused with 403 too, and main stays
+    let body = checked("pulls/merge", StatusCode::FORBIDDEN, &denied);
+    assert_eq!(
+        body["documentation_url"],
+        "https://docs.github.com/rest/pulls/pulls#merge-a-pull-request"
+    );
+    assert_eq!(branch_sha(&contents, "main").await, main);
+    // When an installation with workflows merges it
+    let allowed = GoGithub::new(&server)
+        .with_token(WORKFLOWS)
+        .call_json(Method::PUT, &path, &json!({}))
+        .await;
+    // Then the merge goes through
+    checked("pulls/merge", StatusCode::OK, &allowed);
+    assert_ne!(branch_sha(&contents, "main").await, main);
+}
+
+#[tokio::test]
+async fn a_classic_token_without_the_workflow_scope_cannot_change_a_workflow() {
+    // Given alice's classic tokens with and without the workflow scope
+    let plain = format!("ghp_{:0<36}", "c1a55");
+    let scoped = format!("ghp_{:0<36}", "c1a55f");
+    let server = TestServer::builder()
+        .frame(hubdouble_api::register_all)
+        .fixture()
+        .entry(json!({"kind": "token", "user": "alice", "token": plain, "scopes": ["repo"]}))
+        .entry(json!({"kind": "token", "user": "alice", "token": scoped,
+                      "scopes": ["repo", "workflow"]}))
+        .start()
+        .await;
+    let client = GoGithub::new(&server).with_token(&plain);
+    let main = branch_sha(&client, "main").await;
+    let sha = detached_commit(&client, &main, ".github/workflows/check.yml").await;
+    let path = format!("{GIT}/refs/heads%2Fmain");
+    // When the token without the scope moves main to the workflow change
+    let denied = client
+        .call_json(Method::PATCH, &path, &json!({"sha": sha}))
+        .await;
+    // Then GitHub refuses it and main stays
+    checked("git/update-ref", StatusCode::UNPROCESSABLE_ENTITY, &denied);
+    assert_eq!(branch_sha(&client, "main").await, main);
+    // When the token with the scope does the same
+    let allowed = GoGithub::new(&server)
+        .with_token(&scoped)
+        .call_json(Method::PATCH, &path, &json!({"sha": sha}))
+        .await;
+    // Then main moves
+    checked("git/update-ref", StatusCode::OK, &allowed);
+    assert_eq!(branch_sha(&client, "main").await, sha);
+}
+
 async fn branch_sha(client: &GoGithub, branch: &str) -> String {
     let answer = client.get(&format!("{GIT}/ref/heads/{branch}")).await;
     checked("git/get-ref", StatusCode::OK, &answer)["object"]["sha"]

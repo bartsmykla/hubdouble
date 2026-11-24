@@ -3,8 +3,12 @@ use std::collections::BTreeMap;
 use hubdouble_api_gitdata::branch_rules::{self, Via, diff_state, flag, parameter};
 use hubdouble_auth::Actor;
 use hubdouble_git::{Git, ObjectId, RefChange};
-use hubdouble_model::{ApiError, Issue, Pull, Repo, RepoRole, ReviewState, Rule, Timestamp};
-use hubdouble_store::{Counters, Entity, Repos, ReviewThreads, Reviews, Rows, Sequence, Tx, TxMut};
+use hubdouble_model::{
+    AccountKind, ApiError, Issue, Pull, Repo, RepoRole, ReviewState, Rule, Team, Timestamp,
+};
+use hubdouble_store::{
+    Accounts, Counters, Entity, Repos, ReviewThreads, Reviews, Rows, Sequence, Teams, Tx, TxMut,
+};
 use serde_json::Value;
 
 pub(crate) type LastPushes = Rows<LastPush>;
@@ -72,7 +76,7 @@ struct Asks {
     approvals: usize,
     last_push: bool,
     threads: bool,
-    any: bool,
+    code_owners: bool,
 }
 
 impl Asks {
@@ -86,9 +90,13 @@ impl Asks {
             asks.approvals = asks.approvals.max(count);
             asks.last_push |= flag(rule, "require_last_push_approval");
             asks.threads |= flag(rule, "required_review_thread_resolution");
+            asks.code_owners |= flag(rule, "require_code_owner_review");
         }
-        asks.any = asks.approvals > 0 || asks.last_push;
         asks
+    }
+
+    fn any(&self) -> bool {
+        self.approvals > 0 || self.last_push || self.code_owners
     }
 }
 
@@ -96,6 +104,99 @@ struct Tally {
     approvals: usize,
     changes: usize,
     approved_since_push: bool,
+    approvers: Vec<i64>,
+}
+
+fn writes(tx: &Tx, repo: &Repo, user: i64) -> bool {
+    hubdouble_auth::repo_role(tx, user, repo) >= Some(RepoRole::Write)
+}
+
+fn team_of<'t>(tx: &'t Tx, repo: &Repo, name: &str) -> Option<&'t Team> {
+    let (org, slug) = name.split_once('/')?;
+    let org = tx.table::<Accounts>().by_login(org)?;
+    tx.table::<Teams>()
+        .by_slug(org.id, slug)
+        .map(AsRef::as_ref)
+        .filter(|t| {
+            t.repos
+                .iter()
+                .any(|r| r.repo_id == repo.id && r.role >= RepoRole::Write)
+        })
+}
+
+fn owner_users(tx: &Tx, repo: &Repo, owner: &str) -> Vec<i64> {
+    let accounts = tx.table::<Accounts>();
+    let users: Vec<i64> = match owner.strip_prefix('@') {
+        Some(name) if name.contains('/') => team_of(tx, repo, name)
+            .map_or_default(|t| t.members.iter().map(|m| m.user_id).collect()),
+        Some(login) => accounts
+            .by_login(login)
+            .filter(|a| a.kind != AccountKind::Organization)
+            .map_or_default(|a| vec![a.id]),
+        None => accounts
+            .iter()
+            .filter(|a| {
+                a.email
+                    .as_deref()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(owner))
+            })
+            .map(|a| a.id)
+            .collect(),
+    };
+    users.into_iter().filter(|&u| writes(tx, repo, u)).collect()
+}
+
+fn valid_owner(tx: &Tx, repo: &Repo, owner: &str) -> bool {
+    match owner.strip_prefix('@') {
+        Some(name) if name.contains('/') => team_of(tx, repo, name).is_some(),
+        _ => !owner_users(tx, repo, owner).is_empty(),
+    }
+}
+
+fn unmet_owners(tx: &Tx, issue: &Issue, repo: &Repo, approvers: &[i64]) -> Vec<Vec<String>> {
+    crate::merge_state::owner_groups(tx, issue)
+        .iter()
+        .filter_map(|group| {
+            let valid: Vec<&String> = group.iter().filter(|o| valid_owner(tx, repo, o)).collect();
+            let met = valid.iter().any(|o| {
+                owner_users(tx, repo, o)
+                    .iter()
+                    .any(|u| approvers.contains(u))
+            });
+            (!valid.is_empty() && !met).then(|| {
+                valid
+                    .into_iter()
+                    .map(|o| o.trim_start_matches('@').to_owned())
+                    .collect()
+            })
+        })
+        .collect()
+}
+
+fn either(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} and/or {b}"),
+        [rest @ .., last] => format!("{}, and/or {last}", rest.join(", ")),
+    }
+}
+
+fn owner_blocks(tx: &Tx, issue: &Issue, p: &Pull, rules: &[&Rule]) -> Vec<String> {
+    let Some(repo) = base_repo(tx, p) else {
+        return Vec::new();
+    };
+    if !Asks::of(rules).code_owners {
+        return Vec::new();
+    }
+    let tally = tally(tx, issue, repo);
+    if tally.changes > 0 {
+        return Vec::new();
+    }
+    unmet_owners(tx, issue, repo, &tally.approvers)
+        .iter()
+        .map(|names| format!("Waiting on code owner review from {}.", either(names)))
+        .collect()
 }
 
 fn tally(tx: &Tx, issue: &Issue, repo: &Repo) -> Tally {
@@ -128,13 +229,14 @@ fn tally(tx: &Tx, issue: &Issue, repo: &Repo) -> Tally {
         approved_since_push: approved().any(|(&user, entry)| {
             user != pusher && entry.0.is_some_and(|at| (at, entry.1) > pushed_at)
         }),
+        approvers: approved().map(|(&user, _)| user).collect(),
     }
 }
 
 pub(crate) fn review_decision(tx: &Tx, issue: &Issue, p: &Pull) -> Option<&'static str> {
     let repo = base_repo(tx, p)?;
     let asks = Asks::of(&branch_rules::rules(tx, None, repo, &p.base.ref_name, true));
-    if !asks.any {
+    if !asks.any() {
         return None;
     }
     let tally = tally(tx, issue, repo);
@@ -142,6 +244,7 @@ pub(crate) fn review_decision(tx: &Tx, issue: &Issue, p: &Pull) -> Option<&'stat
         "CHANGES_REQUESTED"
     } else if tally.approvals >= asks.approvals.max(1)
         && (!asks.last_push || tally.approved_since_push)
+        && (!asks.code_owners || unmet_owners(tx, issue, repo, &tally.approvers).is_empty())
     {
         "APPROVED"
     } else {
@@ -158,12 +261,18 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 pub(crate) fn blocks(tx: &Tx, issue: &Issue, p: &Pull, rules: &[&Rule]) -> Vec<String> {
+    let mut out = owner_blocks(tx, issue, p, rules);
+    out.extend(review_blocks(tx, issue, p, rules));
+    out
+}
+
+fn review_blocks(tx: &Tx, issue: &Issue, p: &Pull, rules: &[&Rule]) -> Vec<String> {
     let Some(repo) = base_repo(tx, p) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     let asks = Asks::of(rules);
-    if asks.any {
+    if asks.any() {
         let tally = tally(tx, issue, repo);
         if tally.changes > 0 {
             out.push(format!(
@@ -219,16 +328,24 @@ pub(crate) fn merge_violations(
         return Ok(Vec::new());
     };
     let branch = &p.base.ref_name;
-    let mut out = branch_rules::violations(
+    let moves = (Some(old), Some(new));
+    let rules = branch_rules::rules(tx, Some(actor), repo, branch, true);
+    let mut out = owner_blocks(tx, issue, p, &rules);
+    out.extend(branch_rules::violations(
         tx,
         git,
         actor,
         repo,
         branch,
-        (Some(old), Some(new)),
+        moves,
         tested(p)?,
-    )?;
-    let rules = branch_rules::rules(tx, Some(actor), repo, branch, true);
-    out.extend(blocks(tx, issue, p, &rules));
+    )?);
+    out.extend(review_blocks(tx, issue, p, &rules));
+    let name = format!("refs/heads/{branch}");
+    for v in branch_rules::push_violations(tx, git, actor, repo, &name, moves)? {
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
     Ok(out)
 }

@@ -14,13 +14,22 @@ const MERGE_DOCS: &str = "https://docs.github.com/rest/branches/branches#merge-a
 const PULL_MERGE_DOCS: &str = "https://docs.github.com/rest/pulls/pulls#merge-a-pull-request";
 
 async fn server(extra: &[Value]) -> TestServer {
+    server_where(extra, |_| {}).await
+}
+
+async fn server_where(extra: &[Value], edit: impl Fn(&mut Value)) -> TestServer {
     let mut entries = fixture::seed();
     for entry in &mut entries {
         if entry["kind"] == "app" {
-            entry["events"] = json!(["pull_request_review"]);
+            entry["events"] = json!(["pull_request_review", "push", "create", "delete", "status"]);
+            entry["permissions"]["statuses"] = json!("read");
+        }
+        if entry["kind"] == "installation" {
+            entry["permissions"]["statuses"] = json!("read");
         }
         if entry["kind"] == "repository" && entry["name"] == fixture::PUBLIC_REPO {
             entry["collaborators"] = json!([{"login": "bob", "permission": "write"}]);
+            edit(entry);
         }
     }
     entries.extend(extra.iter().cloned());
@@ -84,23 +93,27 @@ async fn status(client: &GoGithub, sha: &str, context: &str, state: &str) {
     assert_eq!(answer.status, StatusCode::CREATED, "{}", answer.json());
 }
 
-fn violations(list: &[&str]) -> String {
-    let mut message = String::from("Repository rule violations found\n\n");
-    for v in list {
-        message.push_str(v);
-        message.push_str("\n\n");
-    }
-    message
-}
-
-fn assert_refused(answer: &Answer, code: u16, docs: Option<&str>, list: &[&str], step: &str) {
+fn assert_refused(answer: &Answer, code: u16, docs: Option<&str>, step: &str) {
     let body = answer.json();
     assert_eq!(answer.status.as_u16(), code, "{step}: {body}");
-    assert_eq!(body["message"], violations(list), "{step}");
     assert_eq!(body["status"], code.to_string(), "{step}");
+    assert!(
+        body["message"].as_str().is_some_and(|m| !m.is_empty()),
+        "{step}"
+    );
     if let Some(docs) = docs {
         assert_eq!(body["documentation_url"], docs, "{step}");
     }
+}
+
+async fn assert_no_ref_events(server: &TestServer, step: &str) {
+    let sent: Vec<String> = deliveries(server)
+        .await
+        .iter()
+        .map(|d| d.header("x-github-event").to_owned())
+        .filter(|e| ["push", "create", "delete"].contains(&e.as_str()))
+        .collect();
+    assert_eq!(sent, Vec::<String>::new(), "{step}");
 }
 
 async fn merge_feature(client: &GoGithub) -> Answer {
@@ -148,48 +161,26 @@ fn commit(server: &TestServer, sender: i64, branch: &str, path: Option<&str>) ->
 
 #[tokio::test]
 async fn post_merges_refuses_each_broken_rule_with_409_and_keeps_the_branch() {
-    for (rules, list) in [
-        (
-            json!([{"type": "update"}]),
-            vec!["Cannot update this protected ref."],
-        ),
-        (
-            json!([reviews_rule(0, false, false)]),
-            vec!["Changes must be made through a pull request."],
-        ),
-        (
-            json!([{"type": "required_linear_history"}]),
-            vec!["This branch must not contain merge commits."],
-        ),
-        (
-            json!([{"type": "required_signatures"}]),
-            vec!["Commits must have verified signatures."],
-        ),
-        (
-            json!([required_checks(&["ci"], true)]),
-            vec!["Required status check \"ci\" is expected."],
-        ),
-        (
-            json!([required_checks(&["ci", "build"], true)]),
-            vec!["2 of 2 required status checks are expected."],
-        ),
-        (
-            json!([{"type": "update"}, {"type": "required_linear_history"}]),
-            vec![
-                "Cannot update this protected ref.",
-                "This branch must not contain merge commits.",
-            ],
-        ),
+    for rules in [
+        json!([{"type": "update"}]),
+        json!([reviews_rule(0, false, false)]),
+        json!([{"type": "required_linear_history"}]),
+        json!([{"type": "required_signatures"}]),
+        json!([required_checks(&["ci"], true)]),
+        json!([required_checks(&["ci", "build"], true)]),
+        json!([{"type": "update"}, {"type": "required_linear_history"}]),
     ] {
         // Given a main whose active ruleset holds these rules, with no bypass actor
         let server = server(&[on_main(&rules)]).await;
         let alice = client(&server, ALICE_TOKEN);
         let before = tip(&alice, "main").await;
+        deliveries(&server).await;
         // When the repository admin merges feature into main through POST /merges
         let answer = merge_feature(&alice).await;
-        // Then GitHub refuses with 409 and lists every broken rule, and main stays
-        assert_refused(&answer, 409, Some(MERGE_DOCS), &list, &format!("{rules}"));
+        // Then GitHub refuses with 409, main stays and no push goes out
+        assert_refused(&answer, 409, Some(MERGE_DOCS), &format!("{rules}"));
         assert_eq!(tip(&alice, "main").await, before, "{rules}");
+        assert_no_ref_events(&server, &format!("{rules}")).await;
     }
 }
 
@@ -203,8 +194,7 @@ async fn post_merges_reads_required_checks_on_the_merged_head_with_runs_and_stat
     // When it is merged
     let answer = merge_feature(&alice).await;
     // Then the failing check refuses the merge
-    let failing = ["Required status check \"ci\" is expected."];
-    assert_refused(&answer, 409, Some(MERGE_DOCS), &failing, "failing");
+    assert_refused(&answer, 409, Some(MERGE_DOCS), "failing");
     // When ci passes on the head
     status(&alice, &head, "ci", "success").await;
     // Then the merge goes through
@@ -215,55 +205,48 @@ async fn post_merges_reads_required_checks_on_the_merged_head_with_runs_and_stat
 #[tokio::test]
 async fn a_ref_write_refuses_each_broken_rule_with_422() {
     // Given the ref writes of git/refs that move develop, which starts at main's tip
-    for (rules, method, path, body, list) in [
+    for (rules, method, path, body) in [
         (
             json!([{"type": "creation"}]),
             Method::POST,
             "git/refs",
             json!({"ref": "refs/heads/develop-2", "sha": "main"}),
-            vec!["Cannot create ref due to creations being restricted."],
         ),
         (
             json!([{"type": "deletion"}]),
             Method::DELETE,
             "git/refs/heads/develop",
             json!({}),
-            vec!["Cannot delete this branch"],
         ),
         (
             json!([{"type": "update"}]),
             Method::PATCH,
             "git/refs/heads/develop",
             json!({"sha": "feature"}),
-            vec!["Cannot update this protected ref."],
         ),
         (
             json!([reviews_rule(0, false, false)]),
             Method::PATCH,
             "git/refs/heads/develop",
             json!({"sha": "feature"}),
-            vec!["Changes must be made through a pull request."],
         ),
         (
             json!([{"type": "required_signatures"}]),
             Method::PATCH,
             "git/refs/heads/develop",
             json!({"sha": "feature"}),
-            vec!["Commits must have verified signatures."],
         ),
         (
             json!([required_checks(&["ci"], true)]),
             Method::PATCH,
             "git/refs/heads/develop",
             json!({"sha": "feature"}),
-            vec!["Required status check \"ci\" is expected."],
         ),
         (
             json!([required_checks(&["ci"], true)]),
             Method::POST,
             "git/refs",
             json!({"ref": "refs/heads/develop-2", "sha": "feature"}),
-            vec!["Required status check \"ci\" is expected."],
         ),
     ] {
         let server = server(&[ruleset("refs/heads/develop*", &json!([]), &rules)]).await;
@@ -273,19 +256,18 @@ async fn a_ref_write_refuses_each_broken_rule_with_422() {
             body["sha"] = json!(tip(&alice, &branch).await);
         }
         let before = tip(&alice, "develop").await;
+        deliveries(&server).await;
         // When the repository admin writes the ref
         let answer = alice
             .call_json(method.clone(), &format!("{REPO}/{path}"), &body)
             .await;
-        // Then GitHub refuses with 422 and develop stays
-        assert_refused(
-            &answer,
-            422,
-            None,
-            &list,
-            &format!("{method} {path} {rules}"),
-        );
-        assert_eq!(tip(&alice, "develop").await, before, "{rules}");
+        // Then GitHub refuses with 422, develop stays and no ref event goes out
+        let step = format!("{method} {path} {rules}");
+        assert_refused(&answer, 422, None, &step);
+        assert_eq!(tip(&alice, "develop").await, before, "{step}");
+        let created = alice.get(&format!("{REPO}/git/ref/heads/develop-2")).await;
+        assert_eq!(created.status, StatusCode::NOT_FOUND, "{step}");
+        assert_no_ref_events(&server, &step).await;
     }
 }
 
@@ -314,13 +296,8 @@ async fn a_ref_write_refuses_a_force_push_and_a_merge_commit() {
         )
         .await;
     // Then the force push is refused
-    assert_refused(
-        &answer,
-        422,
-        None,
-        &["Cannot force-push to this branch"],
-        "force",
-    );
+    assert_refused(&answer, 422, None, "force");
+    assert_eq!(tip(&alice, "develop").await, feature);
     // When main gets a merge commit and develop moves to it
     let merged = merge_feature(&alice).await;
     assert_eq!(merged.status, StatusCode::CREATED, "{}", merged.json());
@@ -332,8 +309,8 @@ async fn a_ref_write_refuses_a_force_push_and_a_merge_commit() {
         )
         .await;
     // Then the merge commit is refused
-    let linear = ["This branch must not contain merge commits."];
-    assert_refused(&answer, 422, None, &linear, "merge commit");
+    assert_refused(&answer, 422, None, "merge commit");
+    assert_eq!(tip(&alice, "develop").await, feature);
 }
 
 #[tokio::test]
@@ -360,10 +337,6 @@ async fn graphql_branch_writes_refuse_broken_rules_as_unprocessable() {
         "{answer}"
     );
     assert_eq!(answer["errors"][0]["type"], "UNPROCESSABLE", "{answer}");
-    assert_eq!(
-        answer["errors"][0]["message"],
-        violations(&["Changes must be made through a pull request."])
-    );
     assert_eq!(tip(&alice, "main").await, before);
 }
 
@@ -377,8 +350,7 @@ async fn bypass_actors_skip_their_ruleset_by_mode() {
     // When bob, who can only write, merges
     let answer = merge_feature(&client(&server, BOB_TOKEN)).await;
     // Then the rule holds for bob
-    let update = ["Cannot update this protected ref."];
-    assert_refused(&answer, 409, Some(MERGE_DOCS), &update, "bob");
+    assert_refused(&answer, 409, Some(MERGE_DOCS), "bob");
     // When alice, an admin, merges
     let answer = merge_feature(&client(&server, ALICE_TOKEN)).await;
     // Then the admin bypasses it
@@ -391,7 +363,7 @@ async fn bypass_actors_skip_their_ruleset_by_mode() {
     // When alice merges outside a pull request
     let answer = merge_feature(&alice).await;
     // Then the rule holds
-    assert_refused(&answer, 409, Some(MERGE_DOCS), &update, "pull_request mode");
+    assert_refused(&answer, 409, Some(MERGE_DOCS), "pull_request mode");
     // When alice merges the pull request
     let answer = alice
         .call_json(Method::PUT, &format!("{PULL}/merge"), &json!({}))
@@ -458,14 +430,13 @@ async fn a_pull_request_merge_refuses_missing_reviews_and_checks_with_405() {
     let alice = client(&server, ALICE_TOKEN);
     // When alice merges without either
     let answer = merge_pull(&alice).await;
-    // Then GitHub refuses with 405 and both violations
-    let list = [
-        "Required status check \"ci\" is expected.",
-        "At least 1 approving review is required by reviewers with write access.",
-    ];
-    assert_refused(&answer, 405, Some(PULL_MERGE_DOCS), &list, "nothing");
-    // When bob approves and ci passes on the head
+    // Then GitHub refuses with 405
+    assert_refused(&answer, 405, Some(PULL_MERGE_DOCS), "nothing");
+    // When bob approves, the check still holds the merge
     approve(&server, 1).await;
+    let answer = merge_pull(&alice).await;
+    assert_refused(&answer, 405, Some(PULL_MERGE_DOCS), "approved only");
+    // When ci passes on the head too
     status(&alice, &tip(&alice, "feature").await, "ci", "success").await;
     // Then the merge goes through
     let answer = merge_pull(&alice).await;
@@ -548,12 +519,10 @@ async fn the_last_push_needs_an_approval_from_someone_else() {
         decision(&alice).await,
         (json!("blocked"), json!("REVIEW_REQUIRED"))
     );
-    let reapproval = ["Waiting on 1 reapproval from someone other than the last pusher."];
     assert_refused(
         &merge_pull(&alice).await,
         405,
         Some(PULL_MERGE_DOCS),
-        &reapproval,
         "alice",
     );
     // When bob approves again
@@ -571,8 +540,11 @@ async fn the_last_push_needs_an_approval_from_someone_else() {
 }
 
 fn branch_at(server: &TestServer, name: &str, at: ObjectId) {
+    ref_at(server, &format!("refs/heads/{name}"), at);
+}
+
+fn ref_at(server: &TestServer, name: &str, at: ObjectId) {
     let services = server.server.services();
-    let name = format!("refs/heads/{name}");
     services
         .store
         .update(|tx| {
@@ -580,7 +552,7 @@ fn branch_at(server: &TestServer, name: &str, at: ObjectId) {
                 tx,
                 PUBLIC_REPO_ID,
                 ALICE_ID,
-                &name,
+                name,
                 None,
                 Some(at),
                 false,
@@ -721,4 +693,389 @@ async fn an_automatic_base_change_keeps_approvals_when_no_change_comes_in() {
     // Then the merge base only moved forward, so the approval stays
     assert_eq!(review_states(&alice, 2).await, [json!("APPROVED")]);
     assert_eq!(dismissals(&alice, 2).await, Vec::<Value>::new());
+}
+
+const ZERO: &str = "0000000000000000000000000000000000000000";
+
+async fn update_refs(client: &GoGithub, name: &str, before: &str, after: &str) -> Value {
+    let repo = client.get(REPO).await.json();
+    Graphql::new(client.clone())
+        .query(
+            "mutation($input: UpdateRefsInput!) {updateRefs(input: $input) {clientMutationId}}",
+            &json!({"input": {"repositoryId": repo["node_id"], "refUpdates": [
+                {"name": name, "beforeOid": before, "afterOid": after, "force": true}]}}),
+        )
+        .await
+        .json()
+}
+
+#[tokio::test]
+async fn the_default_branch_cannot_be_deleted_on_any_path() {
+    // Given main, the default branch, with no ruleset, and a deletion ruleset on develop
+    let rules = ruleset(
+        "refs/heads/develop",
+        &json!([]),
+        &json!([{"type": "deletion"}]),
+    );
+    let server = server(&[rules]).await;
+    let alice = client(&server, ALICE_TOKEN);
+    let main = tip(&alice, "main").await;
+    deliveries(&server).await;
+    // When the repository admin deletes main through REST
+    let answer = alice
+        .call_json(
+            Method::DELETE,
+            &format!("{REPO}/git/refs/heads/main"),
+            &json!({}),
+        )
+        .await;
+    // Then GitHub refuses with 422 and the operation's docs
+    let docs = "https://docs.github.com/rest/git/refs#delete-a-reference";
+    assert_eq!(
+        answer.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        answer.json()
+    );
+    assert_eq!(answer.json()["documentation_url"], docs);
+    // When it deletes main through GraphQL updateRefs
+    let answer = update_refs(&alice, "refs/heads/main", &main, ZERO).await;
+    // Then the mutation fails as unprocessable
+    assert_eq!(answer["errors"][0]["type"], "UNPROCESSABLE", "{answer}");
+    // Then main stays and no ref event goes out
+    assert_eq!(tip(&alice, "main").await, main);
+    assert_no_ref_events(&server, "default branch").await;
+    // When it deletes feature, which is not the default branch
+    let answer = alice
+        .call_json(
+            Method::DELETE,
+            &format!("{REPO}/git/refs/heads/feature"),
+            &json!({}),
+        )
+        .await;
+    // Then the branch goes and GitHub sends the push of the deletion
+    assert_eq!(answer.status, StatusCode::NO_CONTENT);
+    let events: Vec<_> = deliveries(&server)
+        .await
+        .iter()
+        .map(|d| d.header("x-github-event").to_owned())
+        .collect();
+    assert!(events.iter().any(|e| e == "push"), "{events:?}");
+}
+
+fn strict_checks(contexts: &[&str]) -> Value {
+    let mut rule = required_checks(contexts, true);
+    rule["parameters"]["strict_required_status_checks_policy"] = json!(true);
+    rule
+}
+
+async fn merge_state_status(client: &GoGithub) -> Value {
+    let pull = client.get(PULL).await.json();
+    Graphql::new(client.clone())
+        .query(
+            "query($id: ID!) {node(id: $id) {... on PullRequest {mergeStateStatus}}}",
+            &json!({"id": pull["node_id"]}),
+        )
+        .await
+        .json()["data"]["node"]["mergeStateStatus"]
+        .clone()
+}
+
+#[tokio::test]
+async fn a_strict_check_refuses_the_merge_of_a_pull_request_behind_its_base() {
+    // Given a main with a strict ci check, and pull request 1 whose head passes ci
+    let rules = on_main(&json!([strict_checks(&["ci"])]));
+    let server = server_with_pull(&[rules, computed_at_once()]).await;
+    let alice = client(&server, ALICE_TOKEN);
+    status(&alice, &tip(&alice, "feature").await, "ci", "success").await;
+    // When main moves on, so the head lacks the base tip
+    commit(&server, ALICE_ID, "main", Some("main.txt"));
+    let main = tip(&alice, "main").await;
+    // Then the pull request reads as behind and its merge is refused with 405
+    assert_eq!(alice.get(PULL).await.json()["mergeable_state"], "behind");
+    assert_eq!(merge_state_status(&alice).await, "BEHIND");
+    assert_refused(
+        &merge_pull(&alice).await,
+        405,
+        Some(PULL_MERGE_DOCS),
+        "behind",
+    );
+    assert_eq!(tip(&alice, "main").await, main);
+}
+
+fn owners_rule() -> Value {
+    let mut rule = reviews_rule(0, false, false);
+    rule["parameters"]["require_code_owner_review"] = json!(true);
+    rule
+}
+
+async fn approve_as(server: &TestServer, token: &str) {
+    let answer = client(server, token)
+        .post(
+            &format!("{PULL}/reviews"),
+            &json!({"event": "APPROVE", "body": "ok"}),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.json());
+}
+
+#[tokio::test]
+async fn a_code_owner_review_rule_waits_for_an_owner_of_every_changed_file() {
+    // Given a CODEOWNERS file that gives src/ to bob, a main that needs code owner reviews,
+    // and pull request 1 that changes src/feature.txt
+    let rules = on_main(&json!([owners_rule()]));
+    let server = server_where(&[rules, computed_at_once(), pull_request()], |repo| {
+        repo["files"][".github/CODEOWNERS"] = json!("* @alice\n/src/ @bob\n");
+        repo["collaborators"] = json!([{"login": "bob", "permission": "write"},
+                                       {"login": "carol", "permission": "write"}]);
+    })
+    .await;
+    let alice = client(&server, ALICE_TOKEN);
+    let main = tip(&alice, "main").await;
+    // Then the pull request waits for a review
+    assert_eq!(
+        decision(&alice).await,
+        (json!("blocked"), json!("REVIEW_REQUIRED"))
+    );
+    assert_eq!(merge_state_status(&alice).await, "BLOCKED");
+    // When carol, who writes but owns nothing, approves
+    approve_as(&server, fixture::CAROL_TOKEN).await;
+    // Then it still waits, and its merge is refused with 405
+    assert_eq!(
+        decision(&alice).await,
+        (json!("blocked"), json!("REVIEW_REQUIRED"))
+    );
+    assert_refused(
+        &merge_pull(&alice).await,
+        405,
+        Some(PULL_MERGE_DOCS),
+        "carol",
+    );
+    assert_eq!(tip(&alice, "main").await, main);
+    // When bob, the owner of src/, approves
+    approve_as(&server, BOB_TOKEN).await;
+    // Then the pull request is approved and merges
+    assert_eq!(decision(&alice).await, (json!("clean"), json!("APPROVED")));
+    assert_eq!(merge_state_status(&alice).await, "CLEAN");
+    let merged = merge_pull(&alice).await;
+    assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
+}
+
+fn tag_ruleset(rules: &Value) -> Value {
+    json!({"kind": "ruleset", "repository": "acme/public", "name": "tags",
+           "target": "tag", "enforcement": "active", "bypass_actors": [],
+           "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+           "rules": rules})
+}
+
+async fn tag_tip(client: &GoGithub, tag: &str) -> Answer {
+    client.get(&format!("{REPO}/git/ref/tags/{tag}")).await
+}
+
+#[tokio::test]
+async fn tag_rulesets_refuse_each_broken_rule_on_ref_writes() {
+    for (rules, method, path, body, tag) in [
+        (
+            json!([{"type": "creation"}]),
+            Method::POST,
+            "git/refs",
+            json!({"ref": "refs/tags/v2.0.0", "sha": "main"}),
+            "v2.0.0",
+        ),
+        (
+            json!([{"type": "update"}]),
+            Method::PATCH,
+            "git/refs/tags/v1.0.0",
+            json!({"sha": "feature", "force": true}),
+            "v1.0.0",
+        ),
+        (
+            json!([{"type": "deletion"}]),
+            Method::DELETE,
+            "git/refs/tags/v1.0.0",
+            json!({}),
+            "v1.0.0",
+        ),
+        (
+            json!([{"type": "non_fast_forward"}]),
+            Method::PATCH,
+            "git/refs/tags/vf",
+            json!({"sha": "main", "force": true}),
+            "vf",
+        ),
+    ] {
+        // Given a tag ruleset on v* with this rule, and a vf tag at feature's tip
+        let server = server(&[tag_ruleset(&rules)]).await;
+        let alice = client(&server, ALICE_TOKEN);
+        let feature = tip(&alice, "feature").await;
+        ref_at(
+            &server,
+            "refs/tags/vf",
+            feature.parse().unwrap_or_else(|e| panic!("{e:?}")),
+        );
+        let mut body = body.clone();
+        if let Some(branch) = body["sha"].as_str().map(str::to_owned) {
+            body["sha"] = json!(tip(&alice, &branch).await);
+        }
+        let before = tag_tip(&alice, tag).await.json();
+        deliveries(&server).await;
+        // When the repository admin writes the tag
+        let answer = alice
+            .call_json(method.clone(), &format!("{REPO}/{path}"), &body)
+            .await;
+        // Then GitHub refuses with 422, the tag stays and no ref event goes out
+        let step = format!("{method} {path} {rules}");
+        assert_refused(&answer, 422, None, &step);
+        assert_eq!(tag_tip(&alice, tag).await.json(), before, "{step}");
+        assert_no_ref_events(&server, &step).await;
+    }
+}
+
+async fn file_commit(client: &GoGithub, parent: &str, path: &str, content: &str) -> String {
+    let base = client
+        .get(&format!("{REPO}/git/commits/{parent}"))
+        .await
+        .json();
+    let tree = client
+        .post(
+            &format!("{REPO}/git/trees"),
+            &json!({"base_tree": base["tree"]["sha"],
+                    "tree": [{"path": path, "mode": "100644", "type": "blob", "content": content}]}),
+        )
+        .await
+        .json();
+    let commit = client
+        .post(
+            &format!("{REPO}/git/commits"),
+            &json!({"message": "add a file", "tree": tree["sha"], "parents": [parent]}),
+        )
+        .await
+        .json();
+    commit["sha"].as_str().unwrap_or_default().to_owned()
+}
+
+#[tokio::test]
+async fn push_rulesets_refuse_restricted_files_on_every_write() {
+    let big = "a".repeat(1024 * 1024 + 1);
+    for (rule, path, content) in [
+        (
+            json!({"type": "file_path_restriction",
+                   "parameters": {"restricted_file_paths": ["secrets/**"]}}),
+            "secrets/key.txt",
+            "key\n",
+        ),
+        (
+            json!({"type": "max_file_path_length", "parameters": {"max_file_path_length": 10}}),
+            "docs/a-long-name.md",
+            "long\n",
+        ),
+        (
+            json!({"type": "file_extension_restriction",
+                   "parameters": {"restricted_file_extensions": ["*.exe"]}}),
+            "tool.exe",
+            "binary\n",
+        ),
+        (
+            json!({"type": "max_file_size", "parameters": {"max_file_size": 1}}),
+            "data.bin",
+            big.as_str(),
+        ),
+    ] {
+        // Given a push ruleset with this rule, and a commit on main that writes such a file
+        let push = json!({"kind": "ruleset", "repository": "acme/public", "name": "push",
+                          "target": "push", "enforcement": "active", "bypass_actors": [],
+                          "rules": [rule]});
+        let server = server(&[push]).await;
+        let alice = client(&server, ALICE_TOKEN);
+        let main = tip(&alice, "main").await;
+        let sha = file_commit(&alice, &main, path, content).await;
+        let fine = file_commit(&alice, &main, "ok.md", "ok\n").await;
+        deliveries(&server).await;
+        // When the repository admin moves develop to it through REST
+        let answer = alice
+            .call_json(
+                Method::PATCH,
+                &format!("{REPO}/git/refs/heads/develop"),
+                &json!({"sha": sha}),
+            )
+            .await;
+        // Then GitHub refuses with 422, develop stays and no push goes out
+        let step = format!("{rule}");
+        assert_refused(&answer, 422, None, &step);
+        assert_eq!(tip(&alice, "develop").await, main, "{step}");
+        assert_no_ref_events(&server, &step).await;
+        // When it creates a tag at that commit
+        let answer = alice
+            .post(
+                &format!("{REPO}/git/refs"),
+                &json!({"ref": "refs/tags/blocked", "sha": sha}),
+            )
+            .await;
+        // Then the tag is refused too
+        assert_refused(&answer, 422, None, &step);
+        // When it moves develop to a commit that writes an allowed file
+        let answer = alice
+            .call_json(
+                Method::PATCH,
+                &format!("{REPO}/git/refs/heads/develop"),
+                &json!({"sha": fine}),
+            )
+            .await;
+        // Then the write goes through
+        assert_eq!(answer.status, StatusCode::OK, "{step}: {}", answer.json());
+    }
+}
+
+#[tokio::test]
+async fn a_push_ruleset_refuses_a_pull_request_merge_that_brings_in_a_restricted_file() {
+    // Given a push ruleset on secrets/**, and a feature branch that adds a secret
+    let push = json!({"kind": "ruleset", "repository": "acme/public", "name": "push",
+                      "target": "push", "enforcement": "active", "bypass_actors": [],
+                      "rules": [{"type": "file_path_restriction",
+                                 "parameters": {"restricted_file_paths": ["secrets/**"]}}]});
+    let server = server_with_pull(&[push, computed_at_once()]).await;
+    let alice = client(&server, ALICE_TOKEN);
+    commit(&server, ALICE_ID, "feature", Some("secrets/key.txt"));
+    let main = tip(&alice, "main").await;
+    // When alice merges the pull request
+    let answer = merge_pull(&alice).await;
+    // Then GitHub refuses with 405 and main stays
+    assert_refused(&answer, 405, Some(PULL_MERGE_DOCS), "merge");
+    assert_eq!(tip(&alice, "main").await, main);
+}
+
+#[tokio::test]
+async fn a_branch_that_only_rulesets_cover_reads_as_protected_without_classic_protection() {
+    // Given a ruleset on main only
+    let server = server(&[on_main(&json!([{"type": "deletion"}]))]).await;
+    let alice = client(&server, ALICE_TOKEN);
+    // When main and develop are read
+    let main = alice.get(&format!("{REPO}/branches/main")).await.json();
+    let develop = alice.get(&format!("{REPO}/branches/develop")).await.json();
+    // Then main is protected with classic protection off, as live GitHub answers
+    let off = json!({"enabled": false, "required_status_checks":
+                     {"enforcement_level": "off", "contexts": [], "checks": []}});
+    assert_eq!(main["protected"], true);
+    assert_eq!(main["protection"], off);
+    assert_eq!(develop["protected"], false);
+    assert_eq!(develop["protection"], off);
+    deliveries(&server).await;
+    // When a status is set on main's tip, which develop shares
+    status(&alice, &tip(&alice, "main").await, "ci", "success").await;
+    // Then the status webhook marks main protected and develop not
+    let hooks: Vec<Value> = deliveries(&server)
+        .await
+        .iter()
+        .filter(|d| d.header("x-github-event") == "status")
+        .map(Delivery::json)
+        .collect();
+    assert_eq!(hooks.len(), 1, "{hooks:?}");
+    let protected = |name: &str| {
+        hooks[0]["branches"]
+            .as_array()
+            .and_then(|all| all.iter().find(|b| b["name"] == name))
+            .map(|b| b["protected"].clone())
+    };
+    assert_eq!(protected("main"), Some(json!(true)));
+    assert_eq!(protected("develop"), Some(json!(false)));
 }

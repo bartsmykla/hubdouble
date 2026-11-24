@@ -9,14 +9,15 @@ use hubdouble_git::{
 use hubdouble_model::{ApiError, Repo, Timestamp};
 use hubdouble_render::{SimpleUser, Urls};
 use hubdouble_rest::{Ctx, Page, Reply};
-use hubdouble_store::{Accounts, Rulesets, Tx};
+use hubdouble_store::{Accounts, Tx};
 use serde::{Deserialize, Serialize};
 
-use crate::branch_rules::{Guard, Via, refusal};
+use crate::branch_rules::{Guard, Via, protected, refusal};
 use crate::common::{
     GitPerson, Links, ObjectLink, ParentLink, Verification, accepted_media, account_by_email,
     commit_at, object_node_id, sender, unprocessable, user_of,
 };
+use crate::refs::{denied_workflow, workflow_refusal};
 
 pub(crate) use compare::compare;
 
@@ -432,13 +433,19 @@ pub(crate) fn merge(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         Err(GitError::Conflict { .. }) => return Err(ApiError::conflict("Merge Conflict")),
         Err(e) => return Err(e.into()),
     };
+    let (tx, git, actor, repo_row) = (ctx.tx(), ctx.git(), ctx.actor(), ctx.repo()?);
+    if let Some(path) = denied_workflow(tx, git, actor, repo_row, Some(tip), made)? {
+        return Err(ApiError::new(403, workflow_refusal(actor, &path)).with_docs(MERGE_DOCS));
+    }
     let guard = Guard {
-        tx: ctx.tx(),
-        git: ctx.git(),
-        actor: ctx.actor(),
-        repo: ctx.repo()?,
+        tx,
+        git,
+        actor,
+        repo: repo_row,
     };
-    let violations = guard.check(&branch, (Some(tip), Some(made)), Via::Merge { head })?;
+    let violations = guard
+        .check(&branch, (Some(tip), Some(made)), Via::Merge { head })
+        .map_err(|e| e.with_docs(MERGE_DOCS))?;
     if !violations.is_empty() {
         return Err(refusal(409, &violations, MERGE_DOCS));
     }
@@ -482,12 +489,6 @@ struct Branch {
     protection_url: String,
 }
 
-fn protected(tx: &Tx, repo: &Repo, branch: &str) -> bool {
-    tx.table::<Rulesets>()
-        .iter()
-        .any(|r| r.applies_to_branch(repo, branch))
-}
-
 pub(crate) fn get_branch(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let name = ctx.param("branch")?.to_owned();
     let view = View::of(ctx)?;
@@ -498,7 +499,6 @@ pub(crate) fn get_branch(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .map_err(|_| missing())?;
     let (id, commit) =
         commit_at(view.git, view.tx, view.repo.id, &target.to_string()).ok_or_else(missing)?;
-    let is_protected = protected(view.tx, view.repo, &name);
     let own = format!("{}/branches/{name}", view.links.api);
     Reply::json(&Branch {
         commit: view.commit(id, &commit),
@@ -506,9 +506,9 @@ pub(crate) fn get_branch(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             html: format!("{}/tree/{name}", view.links.web),
             own: own.clone(),
         },
-        protected: is_protected,
+        protected: protected(view.tx, view.repo, &name),
         protection: Protection {
-            enabled: is_protected,
+            enabled: false,
             required_status_checks: StatusChecks {
                 enforcement_level: "off",
                 contexts: [],

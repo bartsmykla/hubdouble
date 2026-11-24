@@ -647,7 +647,7 @@ pub(crate) fn update_refs(m: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, G
                 .or_else(|_| m.git.resolve_ref(&m.tx, repo.id, "HEAD"))
                 .ok();
             if let Some(path) = denied_workflow(&m.tx, m.git, m.actor, &repo, base, target)? {
-                return Err(unprocessable(workflow_refusal(&path)));
+                return Err(unprocessable(workflow_refusal(m.actor, &path)));
             }
         }
         let previous = m.git.resolve_ref(&m.tx, repo.id, &u.name).ok();

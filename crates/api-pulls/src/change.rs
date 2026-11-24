@@ -3,6 +3,7 @@ use std::sync::Arc;
 use http::StatusCode;
 use hubdouble_admin::SeedCtx;
 use hubdouble_api_gitdata::branch_rules::{self, refusal};
+use hubdouble_api_gitdata::{denied_workflow, workflow_refusal};
 use hubdouble_auth::{Actor, Target as AuthTarget, authorize, repo_role};
 use hubdouble_git::{Git, GitError};
 use hubdouble_model::{
@@ -584,6 +585,7 @@ pub(crate) fn merge(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let who = (actor, timeline::via_app(ctx.actor()));
     let base_tip = state::branch(ctx.git(), ctx.tx(), repo_id, &p.base.ref_name)?;
     let merger = ctx.actor().clone();
+    let base_repo = ctx.repo()?.clone();
     let (tx, git) = ctx.tx_mut_and_git()?;
     let result = git
         .merge(tx, repo_id, actor, &p.base.ref_name, &sha, &message)
@@ -593,6 +595,11 @@ pub(crate) fn merge(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             }
             other => other.into(),
         })?;
+    if let Some(path) =
+        denied_workflow(tx, git, &merger, &base_repo, Some(base_tip), result.commit)?
+    {
+        return Err(ApiError::new(403, workflow_refusal(&merger, &path)).with_docs(MERGE_DOCS));
+    }
     let violations =
         reviewing::merge_violations(tx, git, &merger, &issue, (base_tip, result.commit))?;
     if !violations.is_empty() {

@@ -1,4 +1,5 @@
 use hubdouble_admin::Registrar;
+use hubdouble_api_gitdata::codeowners::{LOCATIONS, lines};
 use hubdouble_auth::repo_role;
 use hubdouble_git::{GitError, ObjectData};
 use hubdouble_model::{AccountKind, ApiError, Repo, RepoRole};
@@ -7,8 +8,6 @@ use hubdouble_store::{Accounts, Teams, Tx};
 use serde::Serialize;
 
 use crate::CONTENTS;
-
-const LOCATIONS: [&str; 3] = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"];
 
 pub(crate) fn register(r: &mut Registrar<'_>) {
     r.rest.handle("repos/codeowners-errors", CONTENTS, errors);
@@ -111,36 +110,25 @@ fn owner_kind(owner: &str, owners: &impl Owners) -> Option<&'static str> {
 
 pub(crate) fn check(path: &str, text: &str, owners: &impl Owners) -> Vec<OwnersError> {
     let mut out = Vec::new();
-    for (i, raw) in text.lines().enumerate() {
-        let line = raw.split_once(" #").map_or(raw, |(l, _)| l);
-        if line.trim_start().starts_with('#') {
-            continue;
-        }
-        let mut tokens = tokens(line);
-        let Some((column, pattern)) = tokens.next() else {
-            continue;
-        };
+    for line in lines(text) {
+        let (column, pattern) = line.pattern;
         if pattern.starts_with('!') || pattern.contains('[') || pattern.contains(']') {
-            out.push(error(path, i + 1, column, raw, "Invalid pattern"));
+            out.push(error(
+                path,
+                line.number,
+                column,
+                line.raw,
+                "Invalid pattern",
+            ));
             continue;
         }
-        for (column, owner) in tokens {
+        for (column, owner) in line.owners {
             if let Some(kind) = owner_kind(owner, owners) {
-                out.push(error(path, i + 1, column, raw, kind));
+                out.push(error(path, line.number, column, line.raw, kind));
             }
         }
     }
     out
-}
-
-fn tokens(line: &str) -> impl Iterator<Item = (usize, &str)> {
-    line.split(' ')
-        .scan(1, |column, token| {
-            let at = *column;
-            *column += token.len() + 1;
-            Some((at, token))
-        })
-        .filter(|(_, t)| !t.is_empty())
 }
 
 fn errors(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
