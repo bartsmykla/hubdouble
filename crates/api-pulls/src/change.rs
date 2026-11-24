@@ -218,6 +218,7 @@ fn open(
             merge_commit_sha: None,
             merged_by: None,
             mergeable: None,
+            rebaseable: None,
             maintainer_can_modify: input.maintainer_can_modify,
             requested_reviewers: Vec::new(),
             requested_teams: Vec::new(),

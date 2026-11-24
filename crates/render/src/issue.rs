@@ -446,7 +446,7 @@ impl PullRequest {
             mergeable: p.mergeable,
             rebaseable: match issue.state {
                 m::IssueState::Closed => p.mergeable.map(|_| false),
-                m::IssueState::Open => p.mergeable,
+                m::IssueState::Open => p.mergeable.map(|m| m && p.rebaseable.unwrap_or(true)),
             },
             mergeable_state: match p.mergeable {
                 Some(true) => "clean",

@@ -606,6 +606,7 @@ fn merged_pull(server: &TestServer, merge_commit: ObjectId) {
                     merge_commit_sha: Some(merge_commit.to_string()),
                     merged_by: Some(ALICE_ID),
                     mergeable: None,
+                    rebaseable: None,
                     maintainer_can_modify: false,
                     requested_reviewers: Vec::new(),
                     requested_teams: Vec::new(),

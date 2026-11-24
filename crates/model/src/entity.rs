@@ -336,6 +336,10 @@ pub struct Pull {
     pub merge_commit_sha: Option<String>,
     pub merged_by: Option<i64>,
     pub mergeable: Option<bool>,
+    /// Whether a rebase merge of the last test merge's base and head would apply and give the
+    /// test merge's tree. It counts only while `mergeable` is `Some(true)`, and `None` there
+    /// reads as rebaseable.
+    pub rebaseable: Option<bool>,
     pub maintainer_can_modify: bool,
     pub requested_reviewers: Vec<i64>,
     pub requested_teams: Vec<i64>,

@@ -98,6 +98,7 @@ fn issue(number: i64) -> Issue {
         merge_commit_sha: None,
         merged_by: None,
         mergeable: None,
+        rebaseable: None,
         maintainer_can_modify: false,
         requested_reviewers: Vec::new(),
         requested_teams: Vec::new(),

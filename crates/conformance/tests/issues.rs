@@ -216,6 +216,7 @@ fn pull_request_on(
                     merge_commit_sha: None,
                     merged_by: None,
                     mergeable: Some(true),
+                    rebaseable: None,
                     maintainer_can_modify: false,
                     requested_reviewers: Vec::new(),
                     requested_teams: Vec::new(),

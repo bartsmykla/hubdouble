@@ -65,6 +65,10 @@ pub(crate) fn register(r: &mut Registry) {
             mergeability::read(cx.read_jobs, cx.tx, issue);
             match p.mergeable { Some(true) => "MERGEABLE", Some(false) => "CONFLICTING", None => "UNKNOWN" }
         },
+        "canBeRebased" => |cx, issue, p| {
+            mergeability::read(cx.read_jobs, cx.tx, issue);
+            issue.state == IssueState::Open && p.mergeable == Some(true) && p.rebaseable != Some(false)
+        },
         "mergeStateStatus" => |cx, issue, _p| {
             mergeability::read(cx.read_jobs, cx.tx, issue);
             crate::mergeable_state(cx.tx, issue).to_ascii_uppercase()

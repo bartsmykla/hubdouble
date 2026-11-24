@@ -56,6 +56,47 @@ pub(crate) fn rebase(
         .ok_or_else(cannot_merge)?;
     let committer = merger_signature(tx, (merger, email), git.now())?;
     let mut tip = base;
+    let tree = replay(tx, git, (repo, merger), base, &commits, |tree, c| {
+        tip = git.write_commit(
+            tx,
+            repo,
+            &Commit {
+                tree,
+                parents: vec![tip],
+                author: c.author.clone(),
+                committer: committer.clone(),
+                message: c.message.clone(),
+                gpg_signature: None,
+            },
+        )?;
+        Ok(())
+    })?;
+    if tree != Some(state::commit_node(git, tx, repo, test_merge)?.commit.tree) {
+        return Err(cannot_rebase());
+    }
+    Ok(tip)
+}
+
+pub(crate) fn rebaseable(
+    tx: &Tx,
+    git: &Git,
+    (repo, author): (i64, i64),
+    (base, head): (ObjectId, ObjectId),
+    test_merge: ObjectId,
+) -> Result<bool, ApiError> {
+    let commits = git.compare(tx, repo, base, head)?.commits;
+    let tree = replay(tx, git, (repo, author), base, &commits, |_, _| Ok(()))?;
+    Ok(tree == Some(state::commit_node(git, tx, repo, test_merge)?.commit.tree))
+}
+
+fn replay(
+    tx: &Tx,
+    git: &Git,
+    (repo, author): (i64, i64),
+    base: ObjectId,
+    commits: &[(ObjectId, Arc<Commit>)],
+    mut picked: impl FnMut(ObjectId, &Commit) -> Result<(), ApiError>,
+) -> Result<Option<ObjectId>, ApiError> {
     let mut tree = state::commit_node(git, tx, repo, base)?.commit.tree;
     for (id, c) in commits.iter().filter(|(_, c)| c.parents.len() < 2) {
         if let Some(parent) = c.parents.first()
@@ -75,27 +116,13 @@ pub(crate) fn rebase(
                 gpg_signature: None,
             },
         )?;
-        let picked = git
-            .test_merge(tx, repo, merger, stand_in, *id)?
-            .ok_or_else(cannot_rebase)?;
-        tree = state::commit_node(git, tx, repo, picked)?.commit.tree;
-        tip = git.write_commit(
-            tx,
-            repo,
-            &Commit {
-                tree,
-                parents: vec![tip],
-                author: c.author.clone(),
-                committer: committer.clone(),
-                message: c.message.clone(),
-                gpg_signature: None,
-            },
-        )?;
+        let Some(merged) = git.test_merge(tx, repo, author, stand_in, *id)? else {
+            return Ok(None);
+        };
+        tree = state::commit_node(git, tx, repo, merged)?.commit.tree;
+        picked(tree, c)?;
     }
-    if state::commit_node(git, tx, repo, test_merge)?.commit.tree != tree {
-        return Err(cannot_rebase());
-    }
-    Ok(tip)
+    Ok(Some(tree))
 }
 
 fn pull_commits(

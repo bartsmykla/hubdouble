@@ -413,6 +413,7 @@ fn open_pull_request(server: &TestServer, head: &str) -> (i64, String) {
                     merge_commit_sha: None,
                     merged_by: None,
                     mergeable: Some(true),
+                    rebaseable: None,
                     maintainer_can_modify: false,
                     requested_reviewers: Vec::new(),
                     requested_teams: Vec::new(),

@@ -180,6 +180,7 @@ fn insert(tx: &mut TxMut<'_>, age: i64, item: &Item) -> Result<(), ApiError> {
                 merge_commit_sha: None,
                 merged_by: None,
                 mergeable: None,
+                rebaseable: None,
                 maintainer_can_modify: false,
                 requested_reviewers: vec![],
                 requested_teams: vec![],

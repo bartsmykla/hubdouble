@@ -126,6 +126,7 @@ fn pull_issue(base: PullRef) -> Issue {
             merge_commit_sha: None,
             merged_by: None,
             mergeable: None,
+            rebaseable: None,
             maintainer_can_modify: true,
             requested_reviewers: vec![],
             requested_teams: vec![],

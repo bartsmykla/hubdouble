@@ -79,14 +79,21 @@ pub(crate) fn test_merge(
     (repo, author): (i64, i64),
     p: &mut Pull,
     (base, head): (ObjectId, ObjectId),
-) -> Result<(), GitError> {
-    set_merge(p, git.test_merge(tx, repo, author, base, head)?);
-    Ok(())
-}
-
-fn set_merge(p: &mut Pull, merge: Option<ObjectId>) {
+) -> Result<(), ApiError> {
+    let merge = git.test_merge(tx, repo, author, base, head)?;
+    p.rebaseable = match merge {
+        Some(merged) => Some(crate::merging::rebaseable(
+            tx,
+            git,
+            (repo, author),
+            (base, head),
+            merged,
+        )?),
+        None => Some(false),
+    };
     p.mergeable = Some(merge.is_some());
     p.merge_commit_sha = merge.map(|id| id.to_string());
+    Ok(())
 }
 
 /// Points `refs/pull/{n}/head` at the pull request's head and, while it is open,

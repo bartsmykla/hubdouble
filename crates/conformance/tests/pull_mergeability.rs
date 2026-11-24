@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use http::{Method, StatusCode};
-use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
+use hubdouble_git::{Commit, EntryMode, FileChange, Object, ObjectData, ObjectId, Signature};
 use hubdouble_testkit::fixture::{ALICE_ID, ALICE_TOKEN, PUBLIC_REPO_ID, WEBHOOK_SECRET};
 use hubdouble_testkit::validate::webhook_payload;
 use hubdouble_testkit::{GoGithub, Graphql, TestServer};
@@ -100,6 +100,97 @@ async fn graphql_state(client: &GoGithub, node: &Value) -> Value {
         .json();
     assert_eq!(answer.get("errors"), None, "{answer}");
     answer["data"]["node"].clone()
+}
+
+fn merge_main_into_feature(server: &TestServer, keep_feature_tree: bool) {
+    let services = server.server.services();
+    let git = &services.git;
+    let tree_of = |tx: &hubdouble_store::Tx, id: ObjectId| match git.object(tx, PUBLIC_REPO_ID, id)
+    {
+        Ok(Object {
+            data: ObjectData::Commit(c),
+            ..
+        }) => c.tree,
+        other => panic!("commit {id}: {other:?}"),
+    };
+    let (feature, main) = (tip(server, "feature"), tip(server, "main"));
+    services
+        .store
+        .update(|tx| {
+            let tree = if keep_feature_tree {
+                tree_of(tx, feature)
+            } else {
+                let merged = git
+                    .test_merge(tx, PUBLIC_REPO_ID, ALICE_ID, feature, main)?
+                    .unwrap_or_else(|| panic!("main merges into feature"));
+                tree_of(tx, merged)
+            };
+            let merge = git.write_commit(
+                tx,
+                PUBLIC_REPO_ID,
+                &Commit {
+                    tree,
+                    parents: vec![feature, main],
+                    author: Signature::seed(),
+                    committer: Signature::seed(),
+                    message: "Merge main into feature".into(),
+                    gpg_signature: None,
+                },
+            )?;
+            Ok(git.update_ref(
+                tx,
+                PUBLIC_REPO_ID,
+                ALICE_ID,
+                "refs/heads/feature",
+                Some(feature),
+                Some(merge),
+                false,
+            )?)
+        })
+        .unwrap_or_else(|e| panic!("merge main into feature: {e:?}"));
+}
+
+async fn graphql_rebase(client: &GoGithub, node: &Value, fields: &str) -> Value {
+    let answer = Graphql::new(client.clone())
+        .query(
+            &format!("query($id: ID!) {{node(id: $id) {{... on PullRequest {{{fields}}}}}}}"),
+            &json!({"id": node}),
+        )
+        .await
+        .json();
+    assert_eq!(answer.get("errors"), None, "{answer}");
+    answer["data"]["node"].clone()
+}
+
+#[tokio::test]
+async fn a_head_whose_merge_commit_makes_the_rebase_unsafe_is_not_rebaseable() {
+    for (keep_feature_tree, rebaseable) in [(true, false), (false, true)] {
+        // Given an open pull request whose head then merges the moved main back in
+        let server = server(&[pull_request()]).await;
+        let client = alice(&server);
+        let old = client.settled_pull(PULL).await;
+        push(&server, "main", "docs/main.txt", "main\n");
+        merge_main_into_feature(&server, keep_feature_tree);
+
+        // When the client reads only canBeRebased as often as a computation takes reads
+        let waiting = client.get(PULL).await.json();
+        for _ in 0..2 {
+            graphql_rebase(&client, &old["node_id"], "canBeRebased").await;
+        }
+        let pull = client.get(PULL).await.json();
+        let node = graphql_rebase(&client, &old["node_id"], "mergeable canBeRebased").await;
+
+        // Then rebaseable is null while mergeable is, canBeRebased reads count as mergeable
+        // reads do, and a merge commit that keeps only the head's files makes the rebase
+        // unsafe, as the merge docs say
+        assert_eq!(pending(&waiting), json!([null, "unknown", null]));
+        assert_eq!(pull["mergeable"], true, "{pull}");
+        assert_eq!(pull["rebaseable"], rebaseable, "{pull}");
+        assert_eq!(
+            node,
+            json!({"mergeable": "MERGEABLE", "canBeRebased": rebaseable})
+        );
+    }
 }
 
 #[tokio::test]

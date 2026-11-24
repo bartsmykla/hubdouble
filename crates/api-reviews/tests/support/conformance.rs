@@ -127,6 +127,7 @@ fn pull_issue(issue_id: i64, pull_id: i64, base: String, head: String) -> Issue 
             merge_commit_sha: None,
             merged_by: None,
             mergeable: Some(true),
+            rebaseable: None,
             maintainer_can_modify: true,
             requested_reviewers: vec![],
             requested_teams: vec![],

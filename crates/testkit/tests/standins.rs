@@ -48,6 +48,7 @@ fn issue(id: i64, number: i64, pull: bool) -> Issue {
             merge_commit_sha: None,
             merged_by: None,
             mergeable: None,
+            rebaseable: None,
             maintainer_can_modify: false,
             requested_reviewers: Vec::new(),
             requested_teams: Vec::new(),
