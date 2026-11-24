@@ -122,6 +122,9 @@ impl RequiredChecks {
     /// for it.
     #[must_use]
     pub fn unmet(&self, tx: &Tx, repo: i64, commits: &[ObjectId]) -> Vec<&str> {
+        if self.checks.is_empty() {
+            return Vec::new();
+        }
         let results: Vec<_> = commits
             .iter()
             .map(|c| CheckResults::of(tx, repo, &c.to_string()))

@@ -1,10 +1,14 @@
 use hubdouble_api_gitdata::branch_rules::{self, diff_state, flag};
 use hubdouble_api_pulls::{StateKind, review_dismissed};
 use hubdouble_git::{Git, ObjectId, RefChange};
-use hubdouble_model::{ApiError, Issue, IssueState, ReviewState};
-use hubdouble_store::{Issues, Repos, Reviews, TxMut};
+use hubdouble_model::{ApiError, Issue, IssueState, ReviewState, Rule};
+use hubdouble_store::{Issues, Repos, Reviews, Rulesets, TxMut};
 
 use crate::events;
+
+fn dismisses(rule: &Rule) -> bool {
+    rule.rule_type == "pull_request" && flag(rule, "dismiss_stale_reviews_on_push")
+}
 
 pub(crate) fn ref_changed(
     tx: &mut TxMut<'_>,
@@ -17,6 +21,13 @@ pub(crate) fn ref_changed(
     let Some(branch) = change.name.strip_prefix("refs/heads/") else {
         return Ok(());
     };
+    if !tx
+        .table::<Rulesets>()
+        .iter()
+        .any(|r| r.rules.iter().any(dismisses))
+    {
+        return Ok(());
+    }
     let open: Vec<_> = tx
         .table::<Issues>()
         .pulls_on_branch(change.repo_id, branch)
@@ -43,16 +54,19 @@ fn dismiss_stale(
     let Some(repo) = p.base.repo_id.and_then(|id| tx.table::<Repos>().get(id)) else {
         return Ok(());
     };
-    let enabled = branch_rules::rules(tx, None, repo, &p.base.ref_name, true)
-        .iter()
-        .any(|r| r.rule_type == "pull_request" && flag(r, "dismiss_stale_reviews_on_push"));
+    if !branch_rules::rules(tx, None, repo, &p.base.ref_name, true)
+        .into_iter()
+        .any(dismisses)
+    {
+        return Ok(());
+    }
     let approved: Vec<_> = tx
         .table::<Reviews>()
         .children(issue.id)
         .filter(|r| r.state == ReviewState::Approved)
         .cloned()
         .collect();
-    if !enabled || approved.is_empty() {
+    if approved.is_empty() {
         return Ok(());
     }
     let (base, head): (ObjectId, ObjectId) = (p.base.sha.parse()?, p.head.sha.parse()?);
