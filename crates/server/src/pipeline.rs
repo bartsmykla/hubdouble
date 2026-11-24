@@ -160,7 +160,9 @@ impl Inner {
         let store = &self.services.store;
         let result = catch_unwind(AssertUnwindSafe(|| {
             if read {
-                store.view(|tx| self.run(&request, Access::Read(tx), &mut who))
+                let reply = store.view(|tx| self.run(&request, Access::Read(tx), &mut who))?;
+                self.services.git.run_read_jobs(store)?;
+                Ok(reply)
             } else {
                 store.update(|tx| self.run(&request, Access::Write(tx.reborrow()), &mut who))
             }

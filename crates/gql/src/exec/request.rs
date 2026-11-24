@@ -44,22 +44,28 @@ pub(crate) fn execute(
         omit_data: false,
     };
     let data = match op.operation_type {
-        OperationType::Query => store.view(|tx| {
-            let cx = Ctx {
-                tx,
-                git,
-                actor,
-                clock: request.clock,
-                urls: request.urls,
-                registry,
-            };
-            let root = Obj {
-                type_name: QUERY,
-                value: registry.root.clone(),
-            };
-            Ok(ex.root(&cx, &root, &op.selection_set))
-        })?,
-        OperationType::Mutation => ex.mutations(store, git, actor, request, &op.selection_set),
+        OperationType::Query => store
+            .view(|tx| {
+                let cx = Ctx {
+                    tx,
+                    git,
+                    actor,
+                    clock: request.clock,
+                    urls: request.urls,
+                    registry,
+                };
+                let root = Obj {
+                    type_name: QUERY,
+                    value: registry.root.clone(),
+                };
+                Ok(ex.root(&cx, &root, &op.selection_set))
+            })
+            .and_then(|data| git.run_read_jobs(store).map(|()| data))?,
+        OperationType::Mutation => {
+            let data = ex.mutations(store, git, actor, request, &op.selection_set);
+            git.run_read_jobs(store)?;
+            data
+        }
         OperationType::Subscription => {
             return Ok(failed(vec![ResponseError {
                 kind: ErrorType::Validation,

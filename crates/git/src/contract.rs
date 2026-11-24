@@ -4,8 +4,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use hubdouble_model::{ApiError, Clock, SystemClock, Timestamp};
-use hubdouble_store::{Accounts, StoreBuilder, Tx, TxMut};
-use parking_lot::RwLock;
+use hubdouble_store::{Accounts, Store, StoreBuilder, Tx, TxMut};
+use parking_lot::{Mutex, RwLock};
 use serde::{Serialize, Serializer};
 
 use crate::odb::Odb;
@@ -407,6 +407,9 @@ pub struct SignatureNode {
 
 pub type RefSubscriber = fn(&mut TxMut<'_>, &Git, &RefChange) -> Result<(), ApiError>;
 
+/// Work a read asks for on one subject ID, as a GitHub read starts a background job.
+pub type ReadJob = fn(&mut TxMut<'_>, &Git, i64) -> Result<(), ApiError>;
+
 /// Collects ref subscribers at start; [`GitBuilder::build`] freezes them.
 pub struct GitBuilder {
     subscribers: Vec<RefSubscriber>,
@@ -442,6 +445,7 @@ impl GitBuilder {
                 networks: RwLock::new(HashMap::new()),
                 web_flow: WebFlow::new(),
                 clock: self.clock,
+                read_jobs: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -452,6 +456,7 @@ pub(crate) struct Inner {
     networks: RwLock<HashMap<i64, Arc<Odb>>>,
     web_flow: Result<WebFlow, GitError>,
     clock: Arc<dyn Clock>,
+    read_jobs: Mutex<Vec<(ReadJob, i64)>>,
 }
 
 /// One per server: objects shared per fork network outside the store lock, refs per repository
@@ -466,6 +471,34 @@ impl Git {
     #[must_use]
     pub fn now(&self) -> Timestamp {
         self.inner.clock.now()
+    }
+
+    /// Asks, from inside a read, for `job` on `id`. The server runs it in a write after the
+    /// read and before it answers, through [`Git::run_read_jobs`]. One run takes a job once
+    /// per subject, however many times reads asked for it.
+    pub fn ask_after_read(&self, job: ReadJob, id: i64) {
+        self.inner.read_jobs.lock().push((job, id));
+    }
+
+    /// Runs the jobs reads asked for in one write of `store`, and takes no lock when there are
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// The first error of a job; the write then rolls back.
+    pub fn run_read_jobs(&self, store: &Store) -> Result<(), ApiError> {
+        let mut jobs = std::mem::take(&mut *self.inner.read_jobs.lock());
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        jobs.sort_by_key(|&(_, id)| id);
+        jobs.dedup_by(|a, b| a.1 == b.1 && std::ptr::fn_addr_eq(a.0, b.0));
+        store.update(|tx| {
+            for (job, id) in &jobs {
+                job(tx, self, *id)?;
+            }
+            Ok(())
+        })
     }
 
     /// The number of registered ref subscribers.
