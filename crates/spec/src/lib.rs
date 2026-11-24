@@ -10,6 +10,12 @@ pub use ops_gen::{NODES, OPERATIONS};
 /// GitHub's pinned public GraphQL schema, `schema.docs.graphql`.
 pub const GRAPHQL_SCHEMA: &str = include_str!("../../../spec/graphql/schema.docs.graphql");
 
+/// The introspection entries that GitHub's GraphQL server defines itself and its schema file
+/// leaves out: the built-in scalars, the `__` types and the directives, as `{"types":[...],
+/// "directives":[...]}`, read from live `GET /graphql` on 2026-11-24.
+pub const GRAPHQL_INTROSPECTION_BUILT_INS: &str =
+    include_str!("../../../spec/graphql/introspection.json");
+
 /// The path parameters GitHub allows to hold `/`; each matches one or more segments.
 pub const SLASH_PARAMS: [&str; 6] = ["ref", "path", "branch", "basehead", "tag", "tree_sha"];
 

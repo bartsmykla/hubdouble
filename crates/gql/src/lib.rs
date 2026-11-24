@@ -2,6 +2,7 @@ mod answer;
 mod connection;
 mod contract;
 mod exec;
+mod introspection;
 #[cfg(test)]
 mod inventory;
 mod leaf;

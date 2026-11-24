@@ -1,6 +1,9 @@
 use apollo_compiler::executable::{Selection, SelectionSet};
 use apollo_compiler::schema::ExtendedType;
+use std::sync::OnceLock;
+
 use apollo_compiler::validation::Valid;
+use bytes::Bytes;
 
 use crate::contract::{ErrorType, GqlError, ResponseError};
 
@@ -8,6 +11,7 @@ use crate::contract::{ErrorType, GqlError, ResponseError};
 #[derive(Debug)]
 pub struct Schema {
     pub(crate) inner: Valid<apollo_compiler::Schema>,
+    introspection: OnceLock<Result<Bytes, GqlError>>,
 }
 
 impl Schema {
@@ -27,8 +31,24 @@ impl Schema {
     /// An `INTERNAL` error when the text does not parse or validate.
     pub fn parse(sdl: &str) -> Result<Schema, GqlError> {
         apollo_compiler::Schema::parse_and_validate(sdl, "schema.graphql")
-            .map(|inner| Schema { inner })
+            .map(|inner| Schema {
+                inner,
+                introspection: OnceLock::new(),
+            })
             .map_err(|e| GqlError::new(ErrorType::Internal, e.errors.to_string()))
+    }
+
+    /// The `{"data":{"__schema":...}}` answer of GitHub's full introspection query, as compact
+    /// JSON with the types and directives sorted by name. It is built on the first call and
+    /// shared after that.
+    ///
+    /// # Errors
+    ///
+    /// An `INTERNAL` error when the introspection query does not run on this schema.
+    pub fn introspection(&self) -> Result<Bytes, GqlError> {
+        self.introspection
+            .get_or_init(|| crate::introspection::build(self))
+            .clone()
     }
 
     /// Validates a document with GitHub's rule set (plan 4.7).

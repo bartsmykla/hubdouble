@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 apollo-compiler.workspace = true
 base64.workspace = true
+bytes.workspace = true
 hubdouble-auth.workspace = true
 hubdouble-git.workspace = true
 hubdouble-model.workspace = true

@@ -114,6 +114,9 @@ impl Inner {
         if (graphql || graphql_read) && self.anonymous(&parts.headers) {
             return self.graphql_rate_limited(&parts, peer);
         }
+        if graphql_read {
+            return self.graphql_schema(&parts);
+        }
         let resource = if graphql { "graphql" } else { "core" };
         let version = if graphql {
             ""
@@ -382,6 +385,43 @@ impl Inner {
             operation_id: "graphql",
             resource: "graphql",
             version,
+            result,
+            who,
+            parts,
+        })
+    }
+
+    fn graphql_schema(&self, parts: &RequestParts) -> HttpResponse {
+        let services = &self.services;
+        let mut who = Who::default();
+        let result = services
+            .store
+            .view(|tx| hubdouble_auth::authenticate(tx, services.clock.as_ref(), &parts.headers))
+            .and_then(|actor| {
+                who.login = actor.login().map(str::to_owned);
+                who.scopes = actor.oauth_scopes().map(|s| s.join(", "));
+                if matches!(actor, Actor::Anonymous | Actor::App { .. }) {
+                    return Err(ApiError::new(
+                        401,
+                        "This endpoint requires you to be authenticated.",
+                    )
+                    .with_docs(GRAPHQL_AUTH_DOCS));
+                }
+                if let Some(unsupported) = unsupported_accept(&parts.headers, &[]) {
+                    return Err(unsupported);
+                }
+                let body = self
+                    .gql
+                    .schema()
+                    .introspection()
+                    .map_err(|e| ApiError::internal(e.message))?;
+                Reply::raw(hubdouble_rest::JSON, body)
+                    .header(header::CACHE_CONTROL, "private, max-age=60, s-maxage=60")
+            });
+        self.finish(Call {
+            operation_id: "graphql",
+            resource: "graphql",
+            version: "",
             result,
             who,
             parts,

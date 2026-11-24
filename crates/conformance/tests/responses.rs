@@ -210,6 +210,86 @@ async fn anonymous_graphql_answers_github_rate_limit_403() {
 }
 
 #[tokio::test]
+async fn an_authenticated_graphql_read_answers_the_introspection_of_the_served_schema() {
+    // Given a user of the GraphQL endpoint
+    let server = whole_server(&[]).await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+
+    // When it reads the endpoint, reads it again with the tag and reads it with an HTML Accept
+    let read = alice.call(Method::GET, "graphql").await;
+    let mut tagged = HeaderMap::new();
+    tagged.insert(
+        http::header::IF_NONE_MATCH,
+        HeaderValue::from_str(read.header("etag")).unwrap(),
+    );
+    let again = alice.call_headers(Method::GET, "graphql", tagged).await;
+    let html = alice
+        .call_headers(Method::GET, "graphql", accepting("text/html"))
+        .await;
+
+    // Then it is GitHub's introspection answer, with GitHub's headers
+    assert_eq!(read.status, StatusCode::OK);
+    assert_eq!(
+        read.header("content-type"),
+        "application/json; charset=utf-8"
+    );
+    assert_eq!(read.header("x-github-media-type"), "github.v3; format=json");
+    assert_eq!(read.header("x-ratelimit-resource"), "graphql");
+    assert_eq!(read.header("x-accepted-oauth-scopes"), "repo");
+    assert_eq!(
+        read.header("cache-control"),
+        "private, max-age=60, s-maxage=60"
+    );
+    assert!(read.header("etag").starts_with("W/\""));
+    let text = std::str::from_utf8(&read.body).unwrap();
+    assert!(text.starts_with(
+        r#"{"data":{"__schema":{"queryType":{"name":"Query"},"mutationType":{"name":"Mutation"},"subscriptionType":null,"types":[{"kind":"#
+    ));
+    assert!(text.contains(r#"{"kind":"SCALAR","name":"String","description":"Represents textual data as UTF-8 character sequences. This type is most often used by GraphQL to represent free-form human-readable text.","fields":null,"inputFields":null,"interfaces":null,"enumValues":null,"possibleTypes":null}"#));
+    let schema = &read.json()["data"]["__schema"];
+    let names: Vec<&str> = schema["types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted);
+    let pinned = hubdouble_gql::Schema::load().unwrap();
+    assert_eq!(names.len(), pinned.type_count());
+    let repository = schema["types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "Repository")
+        .unwrap();
+    let fields: Vec<&str> = repository["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    let mut sorted = fields.clone();
+    sorted.sort_unstable();
+    assert_eq!(fields, sorted);
+    let directives: Vec<&str> = schema["directives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        directives,
+        ["deprecated", "include", "oneOf", "skip", "specifiedBy"]
+    );
+
+    // Then the tagged read is not modified and the HTML read is refused
+    assert_eq!(again.status, StatusCode::NOT_MODIFIED);
+    assert_eq!(html.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test]
 async fn a_commit_status_is_validated_as_github_validates_a_status() {
     // Given
     let server = whole_server(&[]).await;
