@@ -34,6 +34,8 @@ enum Field {
     CreatedAt,
     PushedAt,
     Owner,
+    Url,
+    Absent,
 }
 
 fn field<K: ?Sized + Serialize>(key: &K) -> Field {
@@ -49,6 +51,15 @@ fn field<K: ?Sized + Serialize>(key: &K) -> Field {
         b"\"created_at\"" => Field::CreatedAt,
         b"\"pushed_at\"" => Field::PushedAt,
         b"\"owner\"" => Field::Owner,
+        b"\"url\"" => Field::Url,
+        b"\"has_discussions\""
+        | b"\"permissions\""
+        | b"\"allow_rebase_merge\""
+        | b"\"allow_squash_merge\""
+        | b"\"allow_auto_merge\""
+        | b"\"delete_branch_on_merge\""
+        | b"\"allow_merge_commit\""
+        | b"\"allow_forking\"" => Field::Absent,
         _ => Field::Other,
     }
 }
@@ -65,7 +76,10 @@ impl<M: SerializeMap> SerializeMap for Entries<'_, M> {
 
     fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), M::Error> {
         self.field = field(key);
-        self.inner.serialize_key(key)
+        match self.field {
+            Field::Absent => Ok(()),
+            _ => self.inner.serialize_key(key),
+        }
     }
 
     fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), M::Error> {
@@ -78,6 +92,8 @@ impl<M: SerializeMap> SerializeMap for Entries<'_, M> {
                 email: self.push.owner_email.as_deref(),
                 user: &r.owner,
             }),
+            Field::Url => self.inner.serialize_value(&r.html_url),
+            Field::Absent => Ok(()),
             Field::Other => self.inner.serialize_value(value),
         }
     }

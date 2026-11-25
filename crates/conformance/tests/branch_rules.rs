@@ -916,6 +916,90 @@ async fn every_branch_and_tag_write_moves_pushed_at_and_leaves_updated_at() {
     assert_eq!(read["data"]["repository"]["pushedAt"], now, "{read}");
 }
 
+const PUSH_REPOSITORY_KEYS: [&str; 81] = [
+    "archive_url",
+    "archived",
+    "assignees_url",
+    "blobs_url",
+    "branches_url",
+    "clone_url",
+    "collaborators_url",
+    "comments_url",
+    "commits_url",
+    "compare_url",
+    "contents_url",
+    "contributors_url",
+    "created_at",
+    "custom_properties",
+    "default_branch",
+    "deployments_url",
+    "description",
+    "disabled",
+    "downloads_url",
+    "events_url",
+    "fork",
+    "forks",
+    "forks_count",
+    "forks_url",
+    "full_name",
+    "git_commits_url",
+    "git_refs_url",
+    "git_tags_url",
+    "git_url",
+    "has_downloads",
+    "has_issues",
+    "has_pages",
+    "has_projects",
+    "has_wiki",
+    "homepage",
+    "hooks_url",
+    "html_url",
+    "id",
+    "is_template",
+    "issue_comment_url",
+    "issue_events_url",
+    "issues_url",
+    "keys_url",
+    "labels_url",
+    "language",
+    "languages_url",
+    "license",
+    "master_branch",
+    "merges_url",
+    "milestones_url",
+    "mirror_url",
+    "name",
+    "node_id",
+    "notifications_url",
+    "open_issues",
+    "open_issues_count",
+    "organization",
+    "owner",
+    "private",
+    "pulls_url",
+    "pushed_at",
+    "releases_url",
+    "size",
+    "ssh_url",
+    "stargazers",
+    "stargazers_count",
+    "stargazers_url",
+    "statuses_url",
+    "subscribers_url",
+    "subscription_url",
+    "svn_url",
+    "tags_url",
+    "teams_url",
+    "topics",
+    "trees_url",
+    "updated_at",
+    "url",
+    "visibility",
+    "watchers",
+    "watchers_count",
+    "web_commit_signoff_required",
+];
+
 #[tokio::test]
 async fn a_push_delivery_has_the_push_form_of_the_repository() {
     // Given acme/public, owned by the acme organization
@@ -933,8 +1017,9 @@ async fn a_push_delivery_has_the_push_form_of_the_repository() {
         )
         .await;
     assert_eq!(answer.status, StatusCode::CREATED, "{}", answer.json());
-    // Then the push repository has Unix times, stargazers, master_branch and the owner's
-    // name, and the create repository keeps the common form
+    // Then the push repository has the keys of octokit's push example, Unix times,
+    // stargazers, master_branch, the owner's name and the web url as url, and the create
+    // repository keeps the common form
     let sent = deliveries(&server).await;
     let payload = |event: &str| {
         sent.iter()
@@ -944,6 +1029,14 @@ async fn a_push_delivery_has_the_push_form_of_the_repository() {
             .clone()
     };
     let push = payload("push");
+    let mut keys: Vec<&str> = push
+        .as_object()
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    keys.sort_unstable();
+    assert_eq!(keys, PUSH_REPOSITORY_KEYS);
+    assert_eq!(push["url"], push["html_url"]);
+    assert_eq!(push["url"], read["html_url"]);
     let created = Timestamp::parse(read["created_at"].as_str().unwrap_or_default())
         .unwrap_or_else(|e| panic!("{e:?}"));
     assert_eq!(push["created_at"], json!(created.0));
