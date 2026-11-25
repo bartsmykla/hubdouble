@@ -30,13 +30,18 @@ allow = [
     "Zlib",
 ]
 exceptions = [
-    { allow = ["GPL-2.0-only WITH GCC-exception-2.0"], crate = "libgit2-sys" },
+    { allow = ["GPL-2.0-only WITH GCC-exception-2.0", "LGPL-2.1-or-later"], crate = "libgit2-sys" },
 ]
 
 [[licenses.clarify]]
 crate = "libgit2-sys"
-expression = "(MIT OR Apache-2.0) AND GPL-2.0-only WITH GCC-exception-2.0"
-license-files = []
+expression = "(MIT OR Apache-2.0) AND GPL-2.0-only WITH GCC-exception-2.0 AND LGPL-2.1-or-later AND MIT AND BSD-3-Clause AND BSD-2-Clause AND CC0-1.0"
+license-files = [{ path = "libgit2/COPYING", hash = 0xfb547a4d }]
+
+[[licenses.clarify]]
+crate = "libz-sys"
+expression = "(MIT OR Apache-2.0) AND Zlib"
+license-files = [{ path = "src/zlib/LICENSE", hash = 0xcbc15cd1 }]
 
 [licenses.private]
 ignore = true

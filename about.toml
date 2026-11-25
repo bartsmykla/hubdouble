@@ -1,0 +1,118 @@
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "GPL-2.0-only WITH GCC-exception-2.0",
+    "LGPL-2.1-or-later",
+]
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+private = { ignore = true }
+
+[libgit2-sys.clarify]
+license = "(MIT OR Apache-2.0) AND GPL-2.0-only WITH GCC-exception-2.0 AND LGPL-2.1-or-later AND MIT AND BSD-3-Clause AND BSD-2-Clause AND CC0-1.0"
+
+[[libgit2-sys.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+
+[[libgit2-sys.clarify.files]]
+path = "libgit2/COPYING"
+license = "GPL-2.0-only WITH GCC-exception-2.0"
+checksum = "e0938121c0554985fe17196ac38fc590d149268e9c46e0c0e7a2eae1354fae71"
+
+[[libgit2-sys.clarify.files]]
+path = "libgit2/COPYING"
+license = "LGPL-2.1-or-later"
+checksum = "a1a33180d02960ab1c5de36cf20b1a2f0fe9888d83826ad263da5db52f1b183b"
+start = "                  GNU LESSER GENERAL PUBLIC LICENSE"
+end = "That's all there is to it!"
+
+[[libgit2-sys.clarify.files]]
+path = "libgit2/COPYING"
+license = "BSD-3-Clause"
+checksum = "6ee10158e0ec82ee7140d90609ab2bc7ef2adcac560b5640fb418e389ed3b1dc"
+start = "The bundled PCRE implementation"
+end = "PCRE2 independently."
+
+[[libgit2-sys.clarify.files]]
+path = "libgit2/COPYING"
+license = "BSD-3-Clause"
+checksum = "a8f52a22fbdda9d18fb33f1ebe954e64fcad7b56b0eeb1d32e86637856d085e3"
+start = "The built-in SHA256 support"
+end = "EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE."
+
+[[libgit2-sys.clarify.files]]
+path = "libgit2/COPYING"
+license = "BSD-2-Clause"
+checksum = "ff760ca241d1dfbaa71ef956dc1b6e6f65812fc89f3e2272eb121a71380466e4"
+start = "The built-in git_fs_path_basename_r()"
+end = "SUCH DAMAGE."
+
+[[libgit2-sys.clarify.files]]
+path = "libgit2/COPYING"
+license = "CC0-1.0"
+checksum = "d222b41fe18405b63fbd6de17aec449a33bfc8ba5956487f0e59b22bd6acc4f4"
+start = "The xoroshiro256** implementation"
+end = "publicdomain/zero/1.0/>."
+
+[[libgit2-sys.clarify.files]]
+path = "libgit2/COPYING"
+license = "MIT"
+checksum = "7af22606a39976a5ccb2b7baf3903032c6caeaf9c20f966298bad0e8adc312ff"
+start = "The bundled SHA1 collision detection code"
+end = "OTHER DEALINGS IN THE\nSOFTWARE."
+
+[[libgit2-sys.clarify.files]]
+path = "libgit2/COPYING"
+license = "MIT"
+checksum = "1b26546dec1a625abf259494207a5be7b40f80ba8fea2c0e65cb91188f7d0b3b"
+start = "The bundled llhttp dependency"
+end = "USE OR OTHER DEALINGS IN THE SOFTWARE."
+
+[jsonpath-rust.clarify]
+license = "MIT"
+
+[[jsonpath-rust.clarify.files]]
+path = "LICENSE"
+license = "MIT"
+checksum = "3476fd3314b213821c673ed2d9991dc4e044f9e7fbcbbd754f0635b8b644474a"
+
+[libz-sys.clarify]
+license = "(MIT OR Apache-2.0) AND Zlib"
+
+[[libz-sys.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "34c467b6945a22696d060b8fdd2379d464acb3408d4c599d3dc5fe4fa1b4c84f"
+
+[[libz-sys.clarify.files]]
+path = "src/zlib/LICENSE"
+license = "Zlib"
+checksum = "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+
+[libmimalloc-sys.clarify]
+license = "MIT"
+
+[[libmimalloc-sys.clarify.files]]
+path = "LICENSE.txt"
+license = "MIT"
+checksum = "a08554fab028af3af047e8588d32d019662c1b1bf07959a195a2f75fe340726b"
+
+[[libmimalloc-sys.clarify.files]]
+path = "c_src/mimalloc/v3/LICENSE"
+license = "MIT"
+checksum = "82ade5d7d9b029044b5fbbc326207fc47c2d44ee4dd71e8a559c36d728217de9"

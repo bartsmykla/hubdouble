@@ -70,7 +70,7 @@ Every crate is pinned to its latest stable version when P0-A adds it, and kept c
 | Lint | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` with the workspace lint table (section 7), `cargo deny check` (licenses, advisories, duplicates) | every advisory fails the build; the one allowed exception is RUSTSEC-2023-0071 in `rsa`, if the pinned version still carries it, ignored by ID in `deny.toml` with its reason: it is a timing side channel, and hubdouble signs only with its own test keys in a local double |
 | Config | environment variables only | Kubernetes friendly |
 | Tasks | `mise` for tools, tasks in `tasks.toml` (`mise run check`, `test`, `lint`, `build`, `bench`, `gen`) | the habits of the user's other projects |
-| Image | static musl binary with no dynamic section, alone in a `FROM scratch` image as user `65532:65532`, multi-arch, `ghcr.io/bartsmykla/hubdouble` | the binary reads no file from the image: it has no TLS, its time zone rules are in its code, and it writes no files, so the image holds nothing else |
+| Image | static musl binary with no dynamic section, alone in a `FROM scratch` image as user `65532:65532`, multi-arch, `ghcr.io/bartsmykla/hubdouble` | the binary reads no file from the image: it has no TLS, its time zone rules are in its code, and it writes no files, so the image holds nothing else but `/licenses`: the project `LICENSE` and `THIRD-PARTY-NOTICES`, which `cargo-about` 0.9.3 makes at build time from `about.toml` and `about.hbs` for every crate in the binary, with the parts of libgit2, zlib and mimalloc that their crates bundle |
 | License | MIT | |
 
 ## 4. Behaviour
