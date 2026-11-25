@@ -273,7 +273,7 @@ pub(crate) fn variables(
                 ),
                 path: Vec::new(),
                 locations: locations(var.location(), sources),
-                extensions: Some(json!({"value":value,"problems":found})),
+                extensions: Some(json!({"value":crate::scalar::shown(value),"problems":found})),
             })
         })
         .collect()
@@ -306,7 +306,10 @@ fn problems(
     let name = ty.inner_named_type();
     let fits = match schema.inner.types.get(name) {
         Some(ExtendedType::InputObject(def)) => {
-            if let Some(fields) = value.as_object() {
+            if let Some(fields) = value
+                .as_object()
+                .filter(|_| crate::scalar::wide_digits(value).is_none())
+            {
                 input_problems(schema, name, def, fields, path, out);
                 return;
             }
@@ -322,9 +325,43 @@ fn problems(
         _ => false,
     };
     if !fits {
+        let mut shown = String::new();
+        literal(value, &mut shown);
         out.push(
-            json!({"path":path,"explanation":format!("Could not coerce value {value} to {name}")}),
+            json!({"path":path,"explanation":format!("Could not coerce value {shown} to {name}")}),
         );
+    }
+}
+
+fn literal(value: &Value, out: &mut String) {
+    if let Some(digits) = crate::scalar::wide_digits(value) {
+        out.push_str(digits);
+        return;
+    }
+    match value {
+        Value::Object(fields) => {
+            out.push('{');
+            for (i, (key, value)) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(crate::scalar::unescaped(key));
+                out.push(':');
+                literal(value, out);
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                literal(item, out);
+            }
+            out.push(']');
+        }
+        v => out.push_str(&v.to_string()),
     }
 }
 
@@ -340,7 +377,7 @@ fn input_problems(
         .keys()
         .filter(|key| !def.fields.contains_key(key.as_str()))
     {
-        path.push(json!(key));
+        path.push(json!(crate::scalar::unescaped(key)));
         out.push(json!({"path":path,"explanation":format!("Field is not defined on {name}")}));
         path.pop();
     }

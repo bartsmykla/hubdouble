@@ -34,19 +34,20 @@ pub(crate) fn check(
         return Ok(());
     }
     let (message, at) = match cost.over {
-        Some((name, count, at)) => (
+        Some(over) => (
             format!(
-                "By the time this query traverses to the {name} connection, it is requesting up to {} possible nodes which exceeds the maximum limit of {}.",
-                separated(count),
-                separated(MAX_NODES),
+                "By the time this query traverses to the {} connection, it is requesting up to {} possible nodes which exceeds the maximum limit of {}.",
+                over.name,
+                separated(&times(over.page, over.parents)),
+                separated(&MAX_NODES.to_string()),
             ),
-            at,
+            over.at,
         ),
         None => (
             format!(
                 "This query requests up to {} possible nodes which exceeds the maximum limit of {}.",
-                separated(cost.total),
-                separated(MAX_NODES),
+                separated(&cost.total.to_string()),
+                separated(&MAX_NODES.to_string()),
             ),
             None,
         ),
@@ -60,8 +61,7 @@ pub(crate) fn check(
     })
 }
 
-fn separated(value: u128) -> String {
-    let digits = value.to_string();
+fn separated(digits: &str) -> String {
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, ch) in digits.chars().enumerate() {
         if i != 0 && (digits.len() - i).is_multiple_of(3) {
@@ -72,8 +72,47 @@ fn separated(value: u128) -> String {
     out
 }
 
-fn page_of(digits: &str) -> Option<u128> {
-    crate::scalar::digits(digits).then(|| digits.parse().unwrap_or(u128::MAX))
+#[derive(Clone, Copy)]
+enum Page<'a> {
+    Fits(u128),
+    Digits(&'a str),
+}
+
+impl Page<'_> {
+    fn size(self) -> u128 {
+        match self {
+            Page::Fits(n) => n,
+            Page::Digits(_) => u128::MAX,
+        }
+    }
+}
+
+fn page_of(digits: &str) -> Option<Page<'_>> {
+    crate::scalar::digits(digits).then(|| digits.parse().map_or(Page::Digits(digits), Page::Fits))
+}
+
+/// The decimal digits of `page` times `by`, which stays below the node limit.
+fn times(page: Page<'_>, by: u128) -> String {
+    let digits = match page {
+        Page::Fits(n) => n.to_string(),
+        Page::Digits(d) => d.to_owned(),
+    };
+    let mut reversed = Vec::with_capacity(digits.len() + 6);
+    let mut carry = 0;
+    for b in digits.bytes().rev() {
+        carry += u128::from(b - b'0') * by;
+        reversed.push(carry % 10);
+        carry /= 10;
+    }
+    while carry > 0 {
+        reversed.push(carry % 10);
+        carry /= 10;
+    }
+    reversed
+        .iter()
+        .rev()
+        .filter_map(|&d| char::from_digit(u32::try_from(d).ok()?, 10))
+        .collect()
 }
 
 fn depth<'a>(
@@ -115,7 +154,15 @@ type Key = (Vec<usize>, u128, Option<u128>);
 #[derive(Clone, Copy, Default)]
 struct Estimate<'a> {
     total: u128,
-    over: Option<(&'a str, u128, Option<SourceSpan>)>,
+    over: Option<Over<'a>>,
+}
+
+#[derive(Clone, Copy)]
+struct Over<'a> {
+    name: &'a str,
+    parents: u128,
+    page: Page<'a>,
+    at: Option<SourceSpan>,
 }
 
 struct Cost<'a> {
@@ -149,10 +196,10 @@ impl<'a> Cost<'a> {
         }
         let mut estimate = Estimate::default();
         for group in fields.values() {
-            let (field, size) = group
+            let (field, page) = group
                 .iter()
-                .map(|f| (*f, self.page_size(f)))
-                .max_by_key(|(_, size)| *size)
+                .map(|f| (*f, self.page(f)))
+                .max_by_key(|(_, page)| page.map(Page::size))
                 .unwrap_or((group[0], None));
             let name = field.name.as_str();
             let next_parents = if matches!(name, "nodes" | "edges") {
@@ -160,11 +207,17 @@ impl<'a> Cost<'a> {
             } else {
                 parents
             };
+            let size = page.map(Page::size);
             let nodes = next_parents.saturating_mul(size.unwrap_or(0));
-            if nodes > MAX_NODES {
+            if let Some(page) = page.filter(|_| nodes > MAX_NODES) {
                 return Estimate {
                     total: nodes,
-                    over: Some((name, nodes, field.location())),
+                    over: Some(Over {
+                        name,
+                        parents: next_parents,
+                        page,
+                        at: field.location(),
+                    }),
                 };
             }
             let children: Vec<_> = group.iter().map(|f| &f.selection_set).collect();
@@ -180,7 +233,7 @@ impl<'a> Cost<'a> {
         estimate
     }
 
-    fn page_size(&self, field: &Field) -> Option<u128> {
+    fn page(&self, field: &'a Field) -> Option<Page<'a>> {
         if !field
             .definition
             .ty
@@ -197,7 +250,7 @@ impl<'a> Cost<'a> {
                     let value = self.vars.get(n.as_str())?;
                     value
                         .as_u64()
-                        .map(u128::from)
+                        .map(|n| Page::Fits(n.into()))
                         .or_else(|| crate::scalar::wide_digits(value).and_then(page_of))
                 }
                 _ => None,

@@ -157,7 +157,8 @@ fn bench(c: &mut Criterion) {
         "query": "repo:acme/repo is:pr head:prompts/proposal- sort:updated-desc",
         "first": 50,
     });
-    let variables = variables.as_object().cloned().unwrap_or_default();
+    let variables =
+        hubdouble_gql::Variables::from(variables.as_object().cloned().unwrap_or_default());
     c.bench_function("search proposals of 1000 items", |b| {
         b.iter(|| {
             let answer = execute(

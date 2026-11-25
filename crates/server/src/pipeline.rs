@@ -344,13 +344,7 @@ impl Inner {
         urls: &Urls,
         version: &'static str,
     ) -> HttpResponse {
-        let parsed = serde_json::from_slice::<GraphqlBody>(body).or_else(|e| {
-            if e.classify() != serde_json::error::Category::Data {
-                return Err(e);
-            }
-            serde_json::from_slice::<serde_json::Value>(body).and_then(GraphqlBody::deserialize)
-        });
-        let Ok(request) = parsed else {
+        let Some(request) = GraphqlBody::parse(body) else {
             let e = ApiError::bad_request("Problems parsing JSON");
             return self.finish(error_call(parts, "graphql", "graphql", version, e));
         };
@@ -360,12 +354,7 @@ impl Inner {
         }
         let services = &self.services;
         let mut who = Who::default();
-        let variables = match request.variables {
-            Some(given) if hubdouble_gql::may_hold_wide_ints(&given) => {
-                exact_variables(body).unwrap_or(given)
-            }
-            given => given.unwrap_or_default(),
-        };
+        let variables = request.variables.unwrap_or_default();
         let result = catch_unwind(AssertUnwindSafe(|| {
             let actor = services.store.view(|tx| {
                 hubdouble_auth::authenticate(tx, services.clock.as_ref(), &parts.headers)
@@ -635,23 +624,90 @@ struct RestRequest<'r> {
     urls: &'r Urls,
 }
 
-#[derive(Deserialize)]
-struct GraphqlBody {
+struct GraphqlBody<V> {
     query: String,
-    #[serde(rename = "operationName")]
     operation_name: Option<String>,
-    variables: Option<serde_json::Map<String, serde_json::Value>>,
+    variables: Option<V>,
+}
+
+impl GraphqlBody<hubdouble_gql::Variables> {
+    fn parse(body: &[u8]) -> Option<Self> {
+        let read = serde_json::from_slice::<GraphqlBody<serde_json::Map<_, _>>>(body).ok();
+        if let Some(read) = read.filter(|r| {
+            !r.variables
+                .as_ref()
+                .is_some_and(hubdouble_gql::Variables::may_be_wide)
+        }) {
+            return Some(read.with(hubdouble_gql::Variables::from));
+        }
+        let raw = serde_json::from_slice::<GraphqlBody<&serde_json::value::RawValue>>(body).ok()?;
+        let variables = raw
+            .variables
+            .map(|v| hubdouble_gql::Variables::parse(v.get()))
+            .transpose()
+            .ok()?;
+        Some(GraphqlBody {
+            query: raw.query,
+            operation_name: raw.operation_name,
+            variables,
+        })
+    }
+}
+
+impl<V> GraphqlBody<V> {
+    fn with<W>(self, f: impl FnOnce(V) -> W) -> GraphqlBody<W> {
+        GraphqlBody {
+            query: self.query,
+            operation_name: self.operation_name,
+            variables: self.variables.map(f),
+        }
+    }
 }
 
 #[derive(Deserialize)]
-struct RawVariables<'a> {
-    #[serde(borrow)]
-    variables: &'a serde_json::value::RawValue,
+#[serde(field_identifier, rename_all = "camelCase")]
+enum GraphqlField {
+    Query,
+    OperationName,
+    Variables,
+    #[serde(other)]
+    Other,
 }
 
-fn exact_variables(body: &[u8]) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let raw = serde_json::from_slice::<RawVariables<'_>>(body).ok()?;
-    hubdouble_gql::exact_variables(raw.variables).ok()
+impl<'de, V: Deserialize<'de>> Deserialize<'de> for GraphqlBody<V> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Fields<V>(std::marker::PhantomData<V>);
+        impl<'de, V: Deserialize<'de>> serde::de::Visitor<'de> for Fields<V> {
+            type Value = GraphqlBody<V>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a GraphQL request body")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<GraphqlBody<V>, A::Error> {
+                let (mut query, mut operation_name, mut variables) = (None, None, None);
+                while let Some(field) = map.next_key()? {
+                    match field {
+                        GraphqlField::Query => query = Some(map.next_value()?),
+                        GraphqlField::OperationName => operation_name = map.next_value()?,
+                        GraphqlField::Variables => variables = map.next_value()?,
+                        GraphqlField::Other => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(GraphqlBody {
+                    query: query.ok_or_else(|| serde::de::Error::missing_field("query"))?,
+                    operation_name,
+                    variables,
+                })
+            }
+        }
+        d.deserialize_map(Fields(std::marker::PhantomData))
+    }
 }
 
 #[derive(Serialize)]

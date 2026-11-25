@@ -62,26 +62,27 @@ fn object(type_name: &'static str, a: &Arc<Account>) -> Resolved {
 }
 
 pub(crate) fn node(cx: &Ctx<'_>, id: &str) -> Result<(Resolved, Option<String>), GqlError> {
-    let not_found = || {
+    let missing = |end: &str| {
         GqlError::new(
             ErrorType::NotFound,
-            format!("Could not resolve to a node with the global id of '{id}'."),
+            format!("Could not resolve to a node with the global id of '{id}'{end}"),
         )
     };
     let nodes = &cx.registry.nodes;
-    let (entry, entity, next) = if let Some(n) = node_id::decode(id) {
+    let (entry, entity, next, end) = if let Some(n) = node_id::decode(id) {
         let [Part::Int(0), Part::Int(entity)] = n.parts[..] else {
-            return Err(not_found());
+            return Err(missing(""));
         };
         let entry = nodes.iter().find(|t| t.prefix == n.prefix);
-        (entry, entity, None)
+        (entry, entity, None, "")
     } else if let Some((type_name, entity)) = node_id::decode_legacy(id) {
         let entry: Option<&NodeType> = nodes.iter().find(|t| t.type_name == type_name);
         let next = entry.map(|t| node_id::entity(t.prefix, entity));
-        (entry, entity, next)
+        (entry, entity, next, ".")
     } else {
-        return Err(not_found());
+        return Err(missing(""));
     };
+    let not_found = || missing(end);
     let entry = entry.ok_or_else(not_found)?;
     match (entry.load)(cx, entity) {
         Ok(Resolved::Null) => Err(not_found()),

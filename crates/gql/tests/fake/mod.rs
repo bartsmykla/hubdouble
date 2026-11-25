@@ -5,7 +5,7 @@ use hubdouble_auth::Actor;
 use hubdouble_git::{Git, GitBuilder};
 use hubdouble_gql::{
     Args, Ctx, ErrorType, GqlError, MutCtx, Obj, Registry, Request, Resolved, Schema, Target,
-    connection,
+    Variables, connection,
 };
 use hubdouble_model::node_id;
 use hubdouble_model::{ManualClock, Timestamp};
@@ -372,7 +372,7 @@ impl World {
     /// Runs a document as an anonymous actor and answers the response as JSON.
     #[must_use]
     pub fn run(&self, query: &str, variables: &Value) -> Value {
-        let variables = variables.as_object().cloned().unwrap_or_default();
+        let variables = Variables::from(variables.as_object().cloned().unwrap_or_default());
         let response = hubdouble_gql::execute(
             &self.registry,
             &self.store,

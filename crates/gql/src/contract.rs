@@ -123,7 +123,8 @@ impl Obj {
 pub struct Args(pub serde_json::Map<String, serde_json::Value>);
 
 impl Args {
-    /// An argument, or `None` when it is absent or `null`.
+    /// An argument, or `None` when it is absent or `null`. An integer past `i64` reads as the
+    /// `i64` bound of its sign, which no row holds.
     ///
     /// # Errors
     ///
@@ -131,9 +132,13 @@ impl Args {
     pub fn get<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>, GqlError> {
         match self.0.get(name) {
             None | Some(serde_json::Value::Null) => Ok(None),
-            Some(v) => serde_json::from_value(v.clone())
-                .map(Some)
-                .map_err(|e| GqlError::new(ErrorType::Unprocessable, e.to_string())),
+            Some(v) => {
+                let mut v = v.clone();
+                crate::scalar::saturate_wide_ints(&mut v);
+                serde_json::from_value(v)
+                    .map(Some)
+                    .map_err(|e| GqlError::new(ErrorType::Unprocessable, e.to_string()))
+            }
         }
     }
 
@@ -478,7 +483,7 @@ impl Registry {
 pub struct Request<'a> {
     pub query: &'a str,
     pub operation_name: Option<&'a str>,
-    pub variables: &'a serde_json::Map<String, serde_json::Value>,
+    pub variables: &'a crate::Variables,
     pub clock: &'a dyn Clock,
     pub urls: &'a Urls,
 }

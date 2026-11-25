@@ -220,9 +220,11 @@ fn bench(c: &mut Criterion) {
     }
 
     let vars = json!({"org": "acme", "login": "bob", "owner": "acme", "n0": "demo", "n1": "demo"});
-    let vars = vars
-        .as_object()
-        .unwrap_or_else(|| panic!("invalid GraphQL variables"));
+    let vars = &hubdouble_gql::Variables::from(
+        vars.as_object()
+            .cloned()
+            .unwrap_or_else(|| panic!("invalid GraphQL variables")),
+    );
     for (name, query) in [("graphql/teams", TEAMS), ("graphql/access", ACCESS)] {
         c.bench_function(name, |b| {
             b.iter(|| {

@@ -1,7 +1,8 @@
 use std::fmt::Write as _;
 
 use super::{
-    Graphql, Method, REPO, StatusCode, Value, client, fixture, json, node_id, server, success,
+    GoGithub, Graphql, Method, REPO, StatusCode, Value, client, fixture, json, node_id, server,
+    success,
 };
 
 #[tokio::test]
@@ -408,54 +409,158 @@ async fn depth_and_node_limits_apply_before_field_resolution() {
     assert_eq!(answer["errors"][0]["type"], "HUBDOUBLE_NOT_IMPLEMENTED");
 }
 
+async fn ask(api: &GoGithub, query: &str, n: &str, as_variable: bool) -> Value {
+    let body = if as_variable {
+        format!(r#"{{"query":{},"variables":{{"n":{n}}}}}"#, json!(query))
+    } else {
+        let literal = query.replace("($n: Int!)", "").replace("$n", n);
+        format!(r#"{{"query":{}}}"#, json!(literal))
+    };
+    api.call_bytes(Method::POST, "graphql", body.into_bytes())
+        .await
+        .json()
+}
+
 #[tokio::test]
 async fn an_int_past_64_bits_keeps_its_digits() {
-    // Given
+    // Given an issue next to the pulls, and integers past 64 bits, past 128 bits and past the
+    // range of a double
     let server = server().await;
     let api = client(&server, fixture::ALICE_TOKEN);
-    let ask = async |query: &str, n: &str, as_variable: bool| {
-        let body = if as_variable {
-            format!(r#"{{"query":{},"variables":{{"n":{n}}}}}"#, json!(query))
-        } else {
-            let literal = query.replace("($n: Int!)", "").replace("$n", n);
-            format!(r#"{{"query":{}}}"#, json!(literal))
-        };
-        api.call_bytes(Method::POST, "graphql", body.into_bytes())
-            .await
-            .json()
+    let issue = api
+        .post(&format!("{REPO}/issues"), &json!({"title":"Report"}))
+        .await
+        .json();
+    let issue = issue["number"].to_string();
+    let past_doubles = "9".repeat(400);
+    let grouped = |digits: &str| {
+        let mut out = String::new();
+        for (i, digit) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i).is_multiple_of(3) {
+                out.push(',');
+            }
+            out.push(digit);
+        }
+        out
     };
     let pages = [
         "query($n: Int!) { repository(owner:\"acme\",name:\"docs\") { issues(first: $n) { totalCount } } }",
         "query($n: Int!) { repository(owner:\"acme\",name:\"docs\") { issues(first: $n, last: 1) { totalCount } } }",
     ];
-    let lookup = "query($n: Int!) { repository(owner:\"acme\",name:\"docs\") { issue(number: $n) { title } } }";
+    let lookups = [
+        (
+            "an Issue",
+            "query($n: Int!) { repository(owner:\"acme\",name:\"docs\") { found: issue(number: $n) { title } } }",
+            "1",
+        ),
+        (
+            "a PullRequest",
+            "query($n: Int!) { repository(owner:\"acme\",name:\"docs\") { found: pullRequest(number: $n) { title } } }",
+            issue.as_str(),
+        ),
+    ];
+    let wide = [
+        "99999999999999999999",
+        "9999999999999999999999999999999999999999",
+        past_doubles.as_str(),
+    ];
     for as_variable in [false, true] {
         for page in pages {
-            // When
-            let answer = ask(page, "99999999999999999999", as_variable).await;
+            for n in wide {
+                // When
+                let answer = ask(&api, page, n, as_variable).await;
 
-            // Then
-            assert!(answer.get("data").is_none_or(Value::is_null), "{page}");
-            let error = &answer["errors"][0];
-            assert_eq!(error["type"], "MAX_NODE_LIMIT_EXCEEDED", "{page}");
-            assert_eq!(
-                error["message"],
-                "By the time this query traverses to the issues connection, it is requesting up to 99,999,999,999,999,999,999 possible nodes which exceeds the maximum limit of 500,000.",
-            );
+                // Then
+                assert!(answer.get("data").is_none_or(Value::is_null), "{page}");
+                let error = &answer["errors"][0];
+                assert_eq!(error["type"], "MAX_NODE_LIMIT_EXCEEDED", "{page}");
+                assert_eq!(
+                    error["message"],
+                    format!(
+                        "By the time this query traverses to the issues connection, it is requesting up to {} possible nodes which exceeds the maximum limit of 500,000.",
+                        grouped(n)
+                    ),
+                );
+            }
         }
-        for number in ["9223372036854775808", "99999999999999999999"] {
-            // When
-            let answer = ask(lookup, number, as_variable).await;
+        for (kind, lookup, other_kind) in lookups {
+            for number in [
+                "9223372036854775808",
+                wide[0],
+                wide[1],
+                wide[2],
+                "999999999",
+                other_kind,
+            ] {
+                // When
+                let answer = ask(&api, lookup, number, as_variable).await;
 
-            // Then
-            let issue = &answer["data"]["repository"]["issue"];
-            assert_eq!(*issue, Value::Null, "{number} {as_variable}");
-            assert_eq!(answer["errors"][0]["type"], "NOT_FOUND", "{number}");
-            assert_eq!(
-                answer["errors"][0]["message"],
-                format!("Could not resolve to an Issue with the number of {number}."),
-            );
+                // Then
+                let found = &answer["data"]["repository"]["found"];
+                assert_eq!(*found, Value::Null, "{kind} {number} {as_variable}");
+                assert_eq!(answer["errors"][0]["type"], "NOT_FOUND", "{kind} {number}");
+                assert_eq!(
+                    answer["errors"][0]["message"],
+                    format!("Could not resolve to {kind} with the number of {number}."),
+                );
+            }
         }
+    }
+}
+
+#[tokio::test]
+async fn a_variable_in_the_form_of_a_wide_int_is_an_object_that_is_no_int() {
+    // Given the object that stands for a wide integer inside hubdouble, alone and next to a
+    // number that makes the variables be read again
+    let server = server().await;
+    let api = client(&server, fixture::ALICE_TOKEN);
+    let lookup = "query($n: Int!) { repository(owner:\"acme\",name:\"docs\") { issue(number: $n) { title } } }";
+    for others in ["", r#","w":1e30"#] {
+        let body = format!(
+            r#"{{"query":{},"variables":{{"n":{{"\u0000int":"99999999999999999999"}}{others}}}}}"#,
+            json!(lookup)
+        );
+
+        // When
+        let answer = api
+            .call_bytes(Method::POST, "graphql", body.into_bytes())
+            .await
+            .json();
+
+        // Then it fails as GitHub fails an object for an Int
+        assert!(answer.get("data").is_none(), "{answer}");
+        let error = &answer["errors"][0];
+        assert_eq!(
+            error["message"],
+            "Variable $n of type Int! was provided invalid value"
+        );
+        assert_eq!(
+            error["extensions"],
+            json!({"value":{"\u{0}int":"99999999999999999999"},"problems":[{"path":[],
+                "explanation":"Could not coerce value {\u{0}int:\"99999999999999999999\"} to Int"}]})
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_wide_int_in_an_input_object_reads_as_the_largest_i64() {
+    // Given a review thread on a line past 64 bits and one on the largest i64 line
+    let server = server().await;
+    let api = client(&server, fixture::ALICE_TOKEN);
+    let pull = api.get(&format!("{REPO}/pulls/1")).await.json();
+    let thread = format!(
+        "mutation($n: Int!) {{ addPullRequestReviewThread(input: {{pullRequestId: {}, \
+         path: \"guide.md\", line: $n, body: \"Note\"}}) {{ thread {{ id }} }} }}",
+        pull["node_id"]
+    );
+    for as_variable in [false, true] {
+        // When
+        let wide = ask(&api, &thread, "99999999999999999999", as_variable).await;
+        let largest = ask(&api, &thread, &i64::MAX.to_string(), as_variable).await;
+
+        // Then both fail the same way
+        assert!(wide["errors"][0]["type"].is_string(), "{wide}");
+        assert_eq!(wide, largest);
     }
 }
 

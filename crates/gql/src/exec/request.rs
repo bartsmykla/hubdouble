@@ -29,7 +29,7 @@ pub(crate) fn execute(
         Ok(op) => op,
         Err(e) => return Ok(failed(vec![request_error(&e, &doc.sources)])),
     };
-    let vars = match variables(&registry.schema, op, request.variables, &doc.sources) {
+    let vars = match variables(&registry.schema, op, &request.variables.0, &doc.sources) {
         Ok(vars) => vars,
         Err(errors) => return Ok(failed(errors)),
     };

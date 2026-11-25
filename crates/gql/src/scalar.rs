@@ -1,13 +1,14 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use hubdouble_model::Timestamp;
-use serde_json::Value;
+use serde_json::value::RawValue;
+use serde_json::{Map, Value};
 
 pub(crate) fn matches(name: &str, value: &Value) -> bool {
     match name {
         "Boolean" => value.is_boolean(),
         "Int" => value.is_i64() || value.is_u64() || wide_digits(value).is_some(),
-        "Float" => value.is_number(),
+        "Float" => value.is_number() || wide_digits(value).is_some(),
         "String" | "ID" => value.is_string(),
         "CustomPropertyValue" => {
             value.is_string()
@@ -46,10 +47,41 @@ pub(crate) fn digits(s: &str) -> bool {
 
 const WIDE_INT: &str = "\0int";
 
+/// GraphQL request variables. An integer past 64 bits keeps its digits in a form that only
+/// [`Variables::parse`] makes: a request that sends the same form gets its object back.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Variables(pub(crate) Map<String, Value>);
+
+impl Variables {
+    /// Reads the `variables` member of a GraphQL request body, keeping the digits of each
+    /// integer past 64 bits.
+    ///
+    /// # Errors
+    ///
+    /// The `serde_json` error when `text` is not a JSON object.
+    pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
+        exact_object(text).map(Self)
+    }
+
+    /// Whether `fields`, as `serde_json` read them, may have lost the digits of an integer past
+    /// 64 bits, so that [`Variables::parse`] must read them again.
+    #[must_use]
+    pub fn may_be_wide(fields: &Map<String, Value>) -> bool {
+        fields.values().any(holds_a_large_double)
+    }
+}
+
+impl From<Map<String, Value>> for Variables {
+    fn from(mut fields: Map<String, Value>) -> Self {
+        escape_keys(&mut fields);
+        Self(fields)
+    }
+}
+
 /// The value that stands for an integer past 64 bits, which a `serde_json::Number` cannot
-/// hold: a one-entry object whose key no request names, with the digits and sign.
+/// hold: a one-entry object whose key [`Variables`] keeps out of every request.
 pub(crate) fn wide_int(digits: &str) -> Value {
-    let mut entry = serde_json::Map::new();
+    let mut entry = Map::new();
     entry.insert(WIDE_INT.to_owned(), Value::String(digits.to_owned()));
     Value::Object(entry)
 }
@@ -59,30 +91,100 @@ pub(crate) fn wide_digits(value: &Value) -> Option<&str> {
     entry.get(WIDE_INT)?.as_str()
 }
 
-/// Reads GraphQL request variables and keeps the digits of an integer past 64 bits, which
-/// `serde_json` reads as the nearest double.
-///
-/// # Errors
-///
-/// The `serde_json` error when `raw` is not a JSON object.
-pub fn exact_variables(
-    raw: &serde_json::value::RawValue,
-) -> Result<serde_json::Map<String, Value>, serde_json::Error> {
-    let fields: std::collections::BTreeMap<String, &serde_json::value::RawValue> =
-        serde_json::from_str(raw.get())?;
+/// A request's object key as it sent it.
+pub(crate) fn unescaped(key: &str) -> &str {
+    key.strip_prefix('\0').unwrap_or(key)
+}
+
+/// `value` as the request sent it, with the nearest double for an integer past 64 bits.
+pub(crate) fn shown(value: &Value) -> Value {
+    if let Some(digits) = wide_digits(value) {
+        return digits
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map_or(Value::Null, Value::Number);
+    }
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(shown).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(k, v)| (unescaped(k).to_owned(), shown(v)))
+                .collect(),
+        ),
+        v => v.clone(),
+    }
+}
+
+/// `value` with each integer past 64 bits at the `i64` bound of its sign, for a typed read.
+pub(crate) fn saturate_wide_ints(value: &mut Value) {
+    if let Some(digits) = wide_digits(value) {
+        *value = Value::from(if digits.starts_with('-') {
+            i64::MIN
+        } else {
+            i64::MAX
+        });
+        return;
+    }
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(saturate_wide_ints),
+        Value::Object(fields) => fields.values_mut().for_each(saturate_wide_ints),
+        _ => {}
+    }
+}
+
+fn escaped(key: String) -> String {
+    if key.starts_with('\0') {
+        format!("\0{key}")
+    } else {
+        key
+    }
+}
+
+fn escape_keys(fields: &mut Map<String, Value>) {
+    if fields.keys().any(|k| k.starts_with('\0')) {
+        *fields = std::mem::take(fields)
+            .into_iter()
+            .map(|(k, v)| (escaped(k), v))
+            .collect();
+    }
+    for value in fields.values_mut() {
+        escape_value(value);
+    }
+}
+
+fn escape_value(value: &mut Value) {
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(escape_value),
+        Value::Object(fields) => escape_keys(fields),
+        _ => {}
+    }
+}
+
+fn holds_a_large_double(value: &Value) -> bool {
+    match value {
+        Value::Number(n) => n.is_f64() && n.as_f64().is_some_and(|f| f.abs() >= 2f64.powi(63)),
+        Value::Array(items) => items.iter().any(holds_a_large_double),
+        Value::Object(fields) => fields.values().any(holds_a_large_double),
+        _ => false,
+    }
+}
+
+fn exact_object(text: &str) -> Result<Map<String, Value>, serde_json::Error> {
+    let fields: std::collections::BTreeMap<String, &RawValue> = serde_json::from_str(text)?;
     fields
         .into_iter()
-        .map(|(name, value)| Ok((name, exact(value)?)))
+        .map(|(name, value)| Ok((escaped(name), exact(value.get())?)))
         .collect()
 }
 
-fn exact(raw: &serde_json::value::RawValue) -> Result<Value, serde_json::Error> {
-    let text = raw.get();
+fn exact(text: &str) -> Result<Value, serde_json::Error> {
     match text.as_bytes().first() {
-        Some(b'{') => Ok(Value::Object(exact_variables(raw)?)),
-        Some(b'[') => serde_json::from_str::<Vec<&serde_json::value::RawValue>>(text)?
+        Some(b'{') => exact_object(text).map(Value::Object),
+        Some(b'[') => serde_json::from_str::<Vec<&RawValue>>(text)?
             .into_iter()
-            .map(exact)
+            .map(|item| exact(item.get()))
             .collect::<Result<_, _>>()
             .map(Value::Array),
         Some(b'-' | b'0'..=b'9')
@@ -94,21 +196,6 @@ fn exact(raw: &serde_json::value::RawValue) -> Result<Value, serde_json::Error> 
         }
         _ => serde_json::from_str(text),
     }
-}
-
-/// Whether `variables` hold a number that may be an integer past 64 bits, so that
-/// [`exact_variables`] must read them again.
-#[must_use]
-pub fn may_hold_wide_ints(variables: &serde_json::Map<String, Value>) -> bool {
-    fn wide(value: &Value) -> bool {
-        match value {
-            Value::Number(n) => n.is_f64() && n.as_f64().is_some_and(|f| f.abs() >= 2f64.powi(63)),
-            Value::Array(items) => items.iter().any(wide),
-            Value::Object(fields) => fields.values().any(wide),
-            _ => false,
-        }
-    }
-    variables.values().any(wide)
 }
 
 fn date(s: &str) -> bool {
@@ -256,30 +343,51 @@ fn der_part(bytes: &[u8], tag: u8) -> Option<(&[u8], &[u8])> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use serde_json::value::RawValue;
 
     use super::*;
 
     #[test]
-    fn exact_variables_keep_the_digits_of_a_wide_integer_at_any_depth() {
+    fn variables_keep_the_digits_of_a_wide_integer_at_any_depth() {
         // Given variables with wide integers in a list and an input object, next to a string of
-        // digits, a float and integers that fit 64 bits
-        let raw = r#"{"a": [1, -99999999999999999999], "b": {"c": 18446744073709551616},
-            "d": "99999999999999999999", "e": 1e20, "f": 18446744073709551615, "g": -5}"#;
-        let raw: Box<RawValue> = serde_json::from_str(raw).unwrap();
+        // digits, a float, integers that fit 64 bits and one past the range of a double
+        let past_doubles = "9".repeat(400);
+        let raw = format!(
+            r#"{{"a": [1, -99999999999999999999], "b": {{"c": 18446744073709551616}},
+            "d": "99999999999999999999", "e": 1e20, "f": 18446744073709551615, "g": -5,
+            "h": {past_doubles}}}"#
+        );
 
         // When
-        let vars = exact_variables(&raw).unwrap();
+        let Variables(vars) = Variables::parse(&raw).unwrap();
 
-        // Then only the wide integers change form
+        // Then only the wide integers change form, and an Int and a Float take them
         assert_eq!(wide_digits(&vars["a"][1]), Some("-99999999999999999999"));
         assert_eq!(wide_digits(&vars["b"]["c"]), Some("18446744073709551616"));
+        assert_eq!(wide_digits(&vars["h"]), Some(past_doubles.as_str()));
         assert_eq!(vars["a"][0], json!(1));
         assert_eq!(vars["d"], json!("99999999999999999999"));
         assert_eq!(vars["e"], json!(1e20));
         assert_eq!(vars["f"], json!(u64::MAX));
         assert_eq!(vars["g"], json!(-5));
-        assert!(matches("Int", &vars["b"]["c"]));
+        assert!(matches("Int", &vars["b"]["c"]) && matches("Float", &vars["b"]["c"]));
         assert!(!matches("Int", &vars["d"]) && !matches("Int", &vars["e"]));
+    }
+
+    #[test]
+    fn a_request_cannot_send_the_form_of_a_wide_integer() {
+        // Given the form of a wide integer, sent at the top, in a list and inside an object
+        let raw = r#"{"n": {"\u0000int": "5"}, "l": [{"\u0000int": "5"}],
+            "o": {"x": {"\u0000int": "5"}}}"#;
+        let read: Map<String, Value> = serde_json::from_str(raw).unwrap();
+
+        // When the variables are read exactly, and from what serde_json read
+        for Variables(vars) in [Variables::parse(raw).unwrap(), Variables::from(read)] {
+            // Then no value reads as an integer, and each shows the object that was sent
+            for value in [&vars["n"], &vars["l"][0], &vars["o"]["x"]] {
+                assert_eq!(wide_digits(value), None);
+                assert!(!matches("Int", value) && !matches("Float", value));
+                assert_eq!(shown(value), json!({"\u{0}int": "5"}));
+            }
+        }
     }
 }
