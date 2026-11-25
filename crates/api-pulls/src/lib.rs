@@ -12,6 +12,7 @@ mod merging;
 mod read;
 mod render;
 mod reopen;
+mod review_requests;
 mod reviewing;
 mod state;
 mod timeline;
@@ -20,6 +21,7 @@ pub use association::association;
 pub use change::kept;
 pub use merge_state::mergeable_state;
 pub use reopen::{reopen, reopened};
+pub use review_requests::{Reviewer, change_reviewers};
 pub use reviewing::{review_decision, review_submitted};
 pub use state::sync_refs;
 pub use timeline::{StateEvent, StateEvents, StateKind, review_dismissed};
@@ -37,17 +39,17 @@ const GET: Requirement = repo_requirement(&[Grant::read("pull_requests"), Grant:
 const WRITE: Requirement = repo_requirement(&[Grant::write("pull_requests")]);
 const CONTENTS_WRITE: Requirement = repo_requirement(&[Grant::write("contents")]);
 
-/// Registers the tables that [`association`] and [`mergeable_state`] read, for a server that
-/// serves another track's routes without [`register`].
+/// Registers the tables that [`association`], [`mergeable_state`] and [`change_reviewers`]
+/// read, for a server that serves another track's routes without [`register`].
 pub fn register_tables(b: &mut StoreBuilder) {
-    b.register_table::<merge_state::MergeStates>()
+    b.register_table::<state::PullBases>()
+        .register_table::<merge_state::MergeStates>()
         .register_table::<reviewing::LastPushes>()
         .register_table::<reviewing::ReviewOrder>()
         .register_table::<association::Contributors>();
 }
 
 pub fn register(r: &mut Registrar<'_>) {
-    r.store.register_table::<state::PullBases>();
     r.store.register_table::<StateEvents>();
     register_tables(r.store);
     mergeability::register(r);

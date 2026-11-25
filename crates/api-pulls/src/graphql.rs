@@ -491,14 +491,12 @@ fn draft(cx: &mut MutCtx<'_>, args: &Args, draft: bool) -> Result<Resolved, GqlE
             .table_mut::<Issues>()
             .replace(issue.clone())
             .map_err(ApiError::from)?;
-        events::emit(
-            &mut cx.tx,
-            cx.git,
-            &issue,
-            change::sender(cx.actor)?,
-            action,
-            json!({}),
-        )?;
+        let sender = change::sender(cx.actor)?;
+        events::emit(&mut cx.tx, cx.git, &issue, sender, action, json!({}))?;
+        if !draft {
+            issue =
+                crate::review_requests::request_code_owners(&mut cx.tx, cx.git, &issue, sender)?;
+        }
     }
     Ok(Resolved::Object {
         type_name,

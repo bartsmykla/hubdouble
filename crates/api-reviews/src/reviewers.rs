@@ -1,12 +1,12 @@
 use http::{StatusCode, header::LINK};
+use hubdouble_api_pulls::Reviewer;
 use hubdouble_model::{AccountKind, ApiError, RepoRole};
 use hubdouble_render::{SimpleUser, Team};
 use hubdouble_rest::{Ctx, Registry, Reply};
-use hubdouble_store::{Accounts, Issues, Teams};
+use hubdouble_store::{Accounts, Teams};
 use serde::{Deserialize, Serialize};
-use serde_json::Map;
 
-use crate::{READ, WRITE, events, invalid, view};
+use crate::{READ, WRITE, invalid, view};
 
 pub fn register(registry: &mut Registry) {
     registry.handle("pulls/list-requested-reviewers", READ, list);
@@ -64,7 +64,7 @@ fn remove(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 }
 
 fn change(ctx: &mut Ctx<'_>, add: bool) -> Result<Reply, ApiError> {
-    let mut issue = (*view::pull(ctx)?).clone();
+    let issue = view::pull(ctx)?;
     let request: Request = ctx.body()?;
     if !add && request.reviewers.is_none() {
         return Err(invalid(
@@ -94,7 +94,7 @@ fn change(ctx: &mut Ctx<'_>, add: bool) -> Result<Reply, ApiError> {
                     "A reviewer cannot access this pull request",
                 )
             })?;
-        ids.push((false, user.id));
+        ids.push(Reviewer::User(user.id));
     }
     for slug in request.team_reviewers {
         let team = ctx
@@ -108,50 +108,10 @@ fn change(ctx: &mut Ctx<'_>, add: bool) -> Result<Reply, ApiError> {
                     "A team does not belong to this organization",
                 )
             })?;
-        ids.push((true, team.id));
+        ids.push(Reviewer::Team(team.id));
     }
     let sender = view::author(ctx.actor())?;
-    let pull = issue.pull.as_mut().ok_or_else(ApiError::not_found)?;
-    ids.retain(|&(team, id)| {
-        let requested = if team {
-            &mut pull.requested_teams
-        } else {
-            &mut pull.requested_reviewers
-        };
-        match (add, requested.iter().position(|&value| value == id)) {
-            (true, None) => {
-                requested.push(id);
-                true
-            }
-            (false, Some(index)) => {
-                requested.remove(index);
-                true
-            }
-            _ => false,
-        }
-    });
-    if !ids.is_empty() {
-        let tx = ctx.tx_mut()?;
-        tx.table_mut::<Issues>()
-            .replace(issue.clone())
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-        let action = if add {
-            "review_requested"
-        } else {
-            "review_request_removed"
-        };
-        for (team, id) in ids {
-            events::send(tx, &issue, sender, "pull_request", action, |view| {
-                let (key, reviewer) = if team {
-                    let mut team = events::object(&view.full_team(id))?;
-                    events::webhook_team(&mut team);
-                    ("requested_team", team)
-                } else {
-                    ("requested_reviewer", events::object(&view.user(id))?)
-                };
-                Ok(Map::from_iter([(key.to_owned(), reviewer)]))
-            })?;
-        }
-    }
+    let (tx, git) = ctx.tx_mut_and_git()?;
+    let issue = hubdouble_api_pulls::change_reviewers(tx, git, &issue, sender, &ids, add)?;
     Reply::json(&view::rest_view(ctx)?.pull(&issue)?)
 }

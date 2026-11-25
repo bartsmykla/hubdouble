@@ -143,12 +143,12 @@ fn writes(tx: &Tx, repo: &Repo, user: i64) -> bool {
     hubdouble_auth::repo_role(tx, user, repo) >= Some(RepoRole::Write)
 }
 
-fn team_of<'t>(tx: &'t Tx, repo: &Repo, name: &str) -> Option<&'t Team> {
+pub(crate) fn team_of<'t>(tx: &'t Tx, repo: &Repo, name: &str) -> Option<&'t Team> {
     let (org, slug) = name.split_once('/')?;
     codeowners::owning_team(tx, repo, org, slug)
 }
 
-fn owner_users(tx: &Tx, repo: &Repo, owner: &str) -> Vec<i64> {
+pub(crate) fn owner_users(tx: &Tx, repo: &Repo, owner: &str) -> Vec<i64> {
     let accounts = tx.table::<Accounts>();
     let users: Vec<i64> = match owner.strip_prefix('@') {
         Some(name) if name.contains('/') => team_of(tx, repo, name)

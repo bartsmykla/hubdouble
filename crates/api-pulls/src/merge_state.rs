@@ -34,6 +34,25 @@ pub(crate) fn owner_groups(tx: &Tx, issue: &Issue) -> Vec<Vec<String>> {
         .map_or_else(Vec::new, |f| groups_of(tx, issue.repo_id, &f.owners))
 }
 
+/// [`owner_groups`] of the base tip and the head as they are now.
+pub(crate) fn current_owner_groups(
+    tx: &Tx,
+    git: &Git,
+    issue: &Issue,
+) -> Result<Vec<Vec<String>>, ApiError> {
+    let p = crate::state::pull(issue)?;
+    let at = (base_tip(git, tx, p)?, p.head.sha.parse()?);
+    let owners = owners(
+        git,
+        tx,
+        issue.repo_id,
+        at,
+        &mut OwnersFile::default(),
+        Owners::default(),
+    )?;
+    Ok(groups_of(tx, issue.repo_id, &owners))
+}
+
 fn groups_of(tx: &Tx, repo: i64, owners: &Owners) -> Vec<Vec<String>> {
     let (Some(text), Some(repo)) = (owners.file.as_deref(), tx.table::<Repos>().get(repo)) else {
         return Vec::new();

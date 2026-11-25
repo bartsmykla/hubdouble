@@ -21,7 +21,14 @@ async fn server_where(extra: &[Value], edit: impl Fn(&mut Value)) -> TestServer 
     let mut entries = fixture::seed();
     for entry in &mut entries {
         if entry["kind"] == "app" {
-            entry["events"] = json!(["pull_request_review", "push", "create", "delete", "status"]);
+            entry["events"] = json!([
+                "pull_request",
+                "pull_request_review",
+                "push",
+                "create",
+                "delete",
+                "status"
+            ]);
             entry["permissions"]["statuses"] = json!("read");
         }
         if entry["kind"] == "installation" {
@@ -1285,6 +1292,82 @@ async fn a_code_owner_line_that_the_errors_endpoint_reports_owns_nothing() {
         approve_as(&server, fixture::CAROL_TOKEN).await;
         let merged = merge_pull(&alice).await;
         assert_eq!(merged.status, StatusCode::OK, "{case}: {}", merged.json());
+    }
+}
+
+#[tokio::test]
+async fn a_ready_pull_request_requests_its_code_owners_and_a_draft_waits_until_it_is_ready() {
+    for draft in [false, true] {
+        // Given a CODEOWNERS file that gives src/ to alice, carol and a team of bob
+        let server = server_where(&[owner_team("Owners", "closed", "bob")], |repo| {
+            repo["files"][".github/CODEOWNERS"] =
+                json!("* @bob\n/src/ @alice @carol @acme/owners\n");
+            repo["collaborators"] = json!([{"login": "bob", "permission": "write"},
+                                           {"login": "carol", "permission": "write"}]);
+        })
+        .await;
+        let alice = client(&server, ALICE_TOKEN);
+        deliveries(&server).await;
+        // When alice opens a pull request of feature, which changes src/feature.txt, ready or
+        // as a draft that she then marks ready
+        let opened = alice
+            .post(
+                &format!("{REPO}/pulls"),
+                &json!({"title": "feature", "head": "feature", "base": "main", "draft": draft}),
+            )
+            .await;
+        assert_eq!(opened.status, StatusCode::CREATED, "{}", opened.json());
+        let mut pull = opened.json();
+        if draft {
+            assert_eq!(pull["requested_reviewers"], json!([]));
+            assert_eq!(pull["requested_teams"], json!([]));
+            let ready = Graphql::new(alice.clone())
+                .query(
+                    "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) \
+                     { pullRequest { isDraft } } }",
+                    &json!({"id": pull["node_id"]}),
+                )
+                .await
+                .json();
+            assert_eq!(
+                ready["data"]["markPullRequestReadyForReview"]["pullRequest"]["isDraft"], false,
+                "{ready}"
+            );
+            pull = alice
+                .get(&format!("{REPO}/pulls/{}", pull["number"]))
+                .await
+                .json();
+        }
+        // Then GitHub requests carol and the team, the owners of src/feature.txt other than
+        // alice, with one review_requested event each
+        let logins: Vec<&Value> = pull["requested_reviewers"]
+            .as_array()
+            .map_or_default(|r| r.iter().map(|r| &r["login"]).collect());
+        let slugs: Vec<&Value> = pull["requested_teams"]
+            .as_array()
+            .map_or_default(|t| t.iter().map(|t| &t["slug"]).collect());
+        assert_eq!(logins, [&json!("carol")], "{draft}");
+        assert_eq!(slugs, [&json!("owners")], "{draft}");
+        let requested: Vec<(Value, Value)> = deliveries(&server)
+            .await
+            .iter()
+            .map(Delivery::json)
+            .filter(|d| d["action"] == "review_requested")
+            .map(|d| {
+                (
+                    d["requested_reviewer"]["login"].clone(),
+                    d["requested_team"]["slug"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            requested,
+            [
+                (json!("carol"), Value::Null),
+                (Value::Null, json!("owners"))
+            ],
+            "{draft}"
+        );
     }
 }
 

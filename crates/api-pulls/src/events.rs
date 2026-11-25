@@ -19,8 +19,12 @@ pub(crate) fn emit(
             "pull request event fields must be an object",
         ));
     };
+    let mut pull_request = json!(pull_request);
+    if let Some(teams) = pull_request["requested_teams"].as_array_mut() {
+        teams.iter_mut().for_each(webhook_team);
+    }
     payload.insert("number".into(), json!(issue.number));
-    payload.insert("pull_request".into(), json!(pull_request));
+    payload.insert("pull_request".into(), pull_request);
     let org_id = tx
         .table::<Repos>()
         .get(issue.repo_id)
@@ -41,4 +45,18 @@ pub(crate) fn emit(
         },
     );
     Ok(())
+}
+
+pub(crate) fn webhook_team(team: &mut Value) {
+    without_ids(team);
+    if let Some(parent) = team.get_mut("parent") {
+        without_ids(parent);
+    }
+}
+
+fn without_ids(team: &mut Value) {
+    if let Some(fields) = team.as_object_mut() {
+        fields.remove("type");
+        fields.remove("organization_id");
+    }
 }
