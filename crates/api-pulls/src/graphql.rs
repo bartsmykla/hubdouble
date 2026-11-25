@@ -149,14 +149,19 @@ fn by_id(cx: &Ctx<'_>, id: i64) -> Result<Resolved, GqlError> {
 fn by_number(cx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
     let repo = obj.get::<Repo>()?;
     check_read(cx, repo.id)?;
-    match args.int("number")? {
-        Some(Int::Fits(number)) => Ok(pull_object(state::numbered(cx.tx, repo.id, number)?)),
-        Some(Int::Past(_)) => Err(ApiError::not_found().into()),
-        None => Err(GqlError::new(
-            ErrorType::Unprocessable,
-            "argument number is required",
-        )),
-    }
+    let number = args
+        .int("number")?
+        .ok_or_else(|| GqlError::new(ErrorType::Unprocessable, "argument number is required"))?;
+    let held = match number {
+        Int::Fits(n) => state::numbered(cx.tx, repo.id, n).ok(),
+        Int::Past(_) => None,
+    };
+    held.map(pull_object).ok_or_else(|| {
+        GqlError::new(
+            ErrorType::NotFound,
+            format!("Could not resolve to a PullRequest with the number of {number}."),
+        )
+    })
 }
 
 fn repository(cx: &Ctx<'_>, id: Option<i64>) -> Result<Resolved, GqlError> {

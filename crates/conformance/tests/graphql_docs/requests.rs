@@ -565,6 +565,34 @@ async fn a_wide_int_in_an_input_object_reads_as_the_largest_i64() {
 }
 
 #[tokio::test]
+async fn a_missing_node_ends_its_message_with_a_period_only_for_a_legacy_id() {
+    // Given ids that name no node: free text, a next id and a legacy id
+    let server = server().await;
+    let api = Graphql::new(client(&server, fixture::ALICE_TOKEN));
+    for (id, end) in [
+        ("nope", ""),
+        ("I_kwDOAAAAAAAAAAAA", ""),
+        ("MDU6SXNzdWUw", "."),
+    ] {
+        // When
+        let answer = api
+            .query(
+                "query($id: ID!) { node(id: $id) { id } }",
+                &json!({"id":id}),
+            )
+            .await
+            .json();
+
+        // Then
+        assert_eq!(answer["errors"][0]["type"], "NOT_FOUND", "{id}");
+        assert_eq!(
+            answer["errors"][0]["message"],
+            format!("Could not resolve to a node with the global id of '{id}'{end}"),
+        );
+    }
+}
+
+#[tokio::test]
 async fn invalid_documents_and_mutation_inputs_return_graphql_request_errors() {
     let server = server().await;
     let api = Graphql::new(client(&server, fixture::ALICE_TOKEN));
