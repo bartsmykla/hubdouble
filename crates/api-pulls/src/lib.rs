@@ -40,9 +40,11 @@ const WRITE: Requirement = repo_requirement(&[Grant::write("pull_requests")]);
 const CONTENTS_WRITE: Requirement = repo_requirement(&[Grant::write("contents")]);
 
 /// Registers the tables that [`association`], [`mergeable_state`] and [`change_reviewers`]
-/// read, for a server that serves another track's routes without [`register`].
+/// read or write, [`StateEvents`] included, for a server that serves another track's routes
+/// without [`register`].
 pub fn register_tables(b: &mut StoreBuilder) {
-    b.register_table::<state::PullBases>()
+    b.register_table::<StateEvents>()
+        .register_table::<state::PullBases>()
         .register_table::<merge_state::MergeStates>()
         .register_table::<reviewing::LastPushes>()
         .register_table::<reviewing::ReviewOrder>()
@@ -50,7 +52,6 @@ pub fn register_tables(b: &mut StoreBuilder) {
 }
 
 pub fn register(r: &mut Registrar<'_>) {
-    r.store.register_table::<StateEvents>();
     register_tables(r.store);
     mergeability::register(r);
     r.rest.handle("pulls/list", READ, read::list);

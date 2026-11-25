@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use hubdouble_api_pulls::{StateEvent, StateEvents, StateKind};
+use hubdouble_api_pulls::{Reviewer, StateEvent, StateEvents, StateKind};
 use hubdouble_git::ObjectId;
 use hubdouble_model::{ApiError, Issue, IssueState, StateReason, Timestamp, node_id};
+use hubdouble_render::{self as r, Urls};
 use hubdouble_rest::{Ctx, Reply};
-use hubdouble_store::{Entity, Issues, Repos, Rows, TxMut};
+use hubdouble_store::{Accounts, Entity, Issues, Repos, Rows, Teams, Tx, TxMut};
 use serde_json::{Value, json};
 
 use crate::shared::{full_name, integration, user};
@@ -41,6 +42,11 @@ pub(crate) enum What {
     },
     Locked(Option<String>),
     Unlocked,
+    ReviewRequest {
+        name: &'static str,
+        reviewer: Reviewer,
+    },
+    ForcePushed(String),
 }
 
 impl What {
@@ -54,10 +60,11 @@ impl What {
             What::Unassigned(_) => "unassigned",
             What::Renamed { .. } => "renamed",
             What::Merged(_) => "merged",
-            What::PullRef(name) => name,
+            What::PullRef(name) | What::ReviewRequest { name, .. } => name,
             What::ReviewDismissed { .. } => "review_dismissed",
             What::Locked(_) => "locked",
             What::Unlocked => "unlocked",
+            What::ForcePushed(_) => "head_ref_force_pushed",
         }
     }
 
@@ -71,7 +78,7 @@ impl What {
             What::Unassigned(_) => "UAE",
             What::Renamed { .. } => "RTE",
             What::Merged(_) => "ME",
-            What::PullRef(_) => "",
+            What::PullRef(_) | What::ReviewRequest { .. } | What::ForcePushed(_) => "",
             What::ReviewDismissed { .. } => "RDE",
             What::Locked(_) => "LOE",
             What::Unlocked => "UNLOE",
@@ -207,6 +214,13 @@ fn pull_event(e: &Arc<StateEvent>) -> IssueEvent {
                 message: message.clone(),
                 commit: commit.clone(),
             },
+            StateKind::ReviewRequested(reviewer) | StateKind::ReviewRequestRemoved(reviewer) => {
+                What::ReviewRequest {
+                    name: e.kind.name(),
+                    reviewer: *reviewer,
+                }
+            }
+            StateKind::HeadRefForcePushed { commit } => What::ForcePushed(commit.clone()),
             other => What::PullRef(other.name()),
         },
         created_at: e.created_at,
@@ -236,7 +250,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let full = full_name(tx, &repo);
     ctx.page(&events, |e| {
         let (commit_id, commit_url) = match &e.what {
-            What::Merged(Some(sha)) => (
+            What::Merged(Some(sha)) | What::ForcePushed(sha) => (
                 Some(sha.clone()),
                 Some(format!("{}/repos/{full}/commits/{sha}", urls.api)),
             ),
@@ -260,56 +274,74 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             "created_at": e.created_at,
             "performed_via_github_app": integration(tx, urls, e.via_app),
         });
-        let extra = match &e.what {
-            What::Labeled { name, color } | What::Unlabeled { name, color } => vec![
-                ("label", json!({"name": name, "color": color})),
-                ("intent", Value::Null),
-            ],
-            What::Assigned(id) => vec![
-                ("assignee", json!(user(tx, urls, *id))),
-                ("assigner", json!(user(tx, urls, e.actor_id))),
-                ("intent", Value::Null),
-            ],
-            What::Unassigned(id) => vec![
-                ("assignee", json!(user(tx, urls, *id))),
-                ("assigner", json!(user(tx, urls, e.actor_id))),
-            ],
-            What::Renamed { from, to } => vec![("rename", json!({"from": from, "to": to}))],
-            What::Closed(reason) => vec![
-                (
-                    "state_reason",
-                    json!(
-                        reason
-                            .filter(|r| *r != StateReason::Completed)
-                            .map(StateReason::as_str)
-                    ),
-                ),
-                ("intent", Value::Null),
-            ],
-            What::CommitClosed { .. } => {
-                vec![("state_reason", Value::Null), ("intent", Value::Null)]
-            }
-            What::Reopened => vec![("state_reason", json!("reopened"))],
-            What::Locked(reason) => vec![("lock_reason", json!(reason))],
-            What::Merged(_) | What::PullRef(_) | What::Unlocked => vec![],
-            What::ReviewDismissed {
-                review_id,
-                state,
-                message,
-                commit,
-            } => vec![(
-                "dismissed_review",
-                json!({
-                    "state": state,
-                    "review_id": review_id,
-                    "dismissal_message": message,
-                    "dismissal_commit_id": commit,
-                }),
-            )],
-        };
-        for (k, value) in extra {
+        for (k, value) in fields_of(tx, urls, e) {
             v[k] = value;
         }
         v
     })
+}
+
+fn fields_of(tx: &Tx, urls: &Urls, e: &IssueEvent) -> Vec<(&'static str, Value)> {
+    match &e.what {
+        What::Labeled { name, color } | What::Unlabeled { name, color } => vec![
+            ("label", json!({"name": name, "color": color})),
+            ("intent", Value::Null),
+        ],
+        What::Assigned(id) => vec![
+            ("assignee", json!(user(tx, urls, *id))),
+            ("assigner", json!(user(tx, urls, e.actor_id))),
+            ("intent", Value::Null),
+        ],
+        What::Unassigned(id) => vec![
+            ("assignee", json!(user(tx, urls, *id))),
+            ("assigner", json!(user(tx, urls, e.actor_id))),
+        ],
+        What::Renamed { from, to } => vec![("rename", json!({"from": from, "to": to}))],
+        What::Closed(reason) => vec![
+            (
+                "state_reason",
+                json!(
+                    reason
+                        .filter(|r| *r != StateReason::Completed)
+                        .map(StateReason::as_str)
+                ),
+            ),
+            ("intent", Value::Null),
+        ],
+        What::CommitClosed { .. } => {
+            vec![("state_reason", Value::Null), ("intent", Value::Null)]
+        }
+        What::Reopened => vec![("state_reason", json!("reopened"))],
+        What::Locked(reason) => vec![("lock_reason", json!(reason))],
+        What::Merged(_) | What::PullRef(_) | What::Unlocked | What::ForcePushed(_) => vec![],
+        What::ReviewRequest { reviewer, .. } => vec![
+            ("review_requester", json!(user(tx, urls, e.actor_id))),
+            match reviewer {
+                Reviewer::User(id) => ("requested_reviewer", json!(user(tx, urls, *id))),
+                Reviewer::Team(id) => ("requested_team", json!(team(tx, urls, *id))),
+            },
+        ],
+        What::ReviewDismissed {
+            review_id,
+            state,
+            message,
+            commit,
+        } => vec![(
+            "dismissed_review",
+            json!({
+                "state": state,
+                "review_id": review_id,
+                "dismissal_message": message,
+                "dismissal_commit_id": commit,
+            }),
+        )],
+    }
+}
+
+fn team(tx: &Tx, urls: &Urls, id: i64) -> Option<r::Team> {
+    let teams = tx.table::<Teams>();
+    let team = teams.get(id)?;
+    let org = tx.table::<Accounts>().get(team.org_id)?;
+    let parent = team.parent_id.and_then(|id| teams.get(id)).map(Arc::as_ref);
+    Some(r::Team::new(urls, team, org, parent))
 }

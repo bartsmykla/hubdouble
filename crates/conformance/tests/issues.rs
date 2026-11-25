@@ -61,7 +61,6 @@ fn pull_repository(cx: &Ctx<'_>, o: &Obj, _: &Args) -> Result<Resolved, GqlError
 }
 
 fn stand_ins(r: &mut Registrar<'_>) {
-    r.store.register_table::<hubdouble_api_pulls::StateEvents>();
     hubdouble_api_pulls::register_tables(r.store);
     r.gql.object::<Repo>("Repository");
     r.gql.object::<Account>("User");

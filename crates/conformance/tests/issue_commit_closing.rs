@@ -249,10 +249,7 @@ async fn each_ref_write_closes_issues_from_commit_messages() {
         .register(hubdouble_api_gitdata::register)
         .register(hubdouble_api_repos::register)
         .register(hubdouble_api_issues::register)
-        .register(|r| {
-            r.store.register_table::<hubdouble_api_pulls::StateEvents>();
-            hubdouble_api_pulls::register_tables(r.store);
-        })
+        .register(|r| hubdouble_api_pulls::register_tables(r.store))
         .start()
         .await;
     let client = GoGithub::new(&server).with_token(ALICE_TOKEN);

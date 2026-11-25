@@ -110,8 +110,8 @@ fn change(ctx: &mut Ctx<'_>, add: bool) -> Result<Reply, ApiError> {
             })?;
         ids.push(Reviewer::Team(team.id));
     }
-    let sender = view::author(ctx.actor())?;
+    let who = (view::author(ctx.actor())?, view::app(ctx.actor()));
     let (tx, git) = ctx.tx_mut_and_git()?;
-    let issue = hubdouble_api_pulls::change_reviewers(tx, git, &issue, sender, &ids, add)?;
+    let issue = hubdouble_api_pulls::change_reviewers(tx, git, &issue, who, &ids, add)?;
     Reply::json(&view::rest_view(ctx)?.pull(&issue)?)
 }

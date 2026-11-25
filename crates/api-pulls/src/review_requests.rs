@@ -6,6 +6,7 @@ use hubdouble_render::{SimpleUser, Team, Urls};
 use hubdouble_store::{Accounts, Issues, Repos, Teams, Tx, TxMut};
 use serde_json::{Value, json};
 
+use crate::timeline::{self, StateKind};
 use crate::{events, merge_state, reviewing, state};
 
 /// A requested reviewer of a pull request: a user or a team, by id.
@@ -16,8 +17,9 @@ pub enum Reviewer {
 }
 
 /// Adds the reviewers that the pull request does not have yet, or removes those it has, and
-/// sends one `review_requested` or `review_request_removed` event for each that changed.
-/// Answers the pull request as it is after the change.
+/// records and sends one `review_requested` or `review_request_removed` event for each that
+/// changed. `who` is the sender and the app it acts through. Answers the pull request as it is
+/// after the change.
 ///
 /// # Errors
 ///
@@ -26,7 +28,7 @@ pub fn change_reviewers(
     tx: &mut TxMut<'_>,
     git: &Git,
     issue: &Arc<Issue>,
-    sender: i64,
+    who: (i64, Option<i64>),
     reviewers: &[Reviewer],
     add: bool,
 ) -> Result<Arc<Issue>, ApiError> {
@@ -59,11 +61,17 @@ pub fn change_reviewers(
     };
     let urls = Urls::new(tx.config(), "");
     for reviewer in changed {
+        let kind = if add {
+            StateKind::ReviewRequested(reviewer)
+        } else {
+            StateKind::ReviewRequestRemoved(reviewer)
+        };
+        timeline::record_at(tx, &updated, who, kind, git.now())?;
         let extra = match reviewer {
             Reviewer::User(id) => json!({"requested_reviewer": user(tx, &urls, id)?}),
             Reviewer::Team(id) => json!({"requested_team": team(tx, &urls, id)?}),
         };
-        events::emit(tx, git, &updated, sender, action, extra)?;
+        events::emit(tx, git, &updated, who.0, action, extra)?;
     }
     Ok(updated)
 }
@@ -75,13 +83,13 @@ pub(crate) fn request_code_owners(
     tx: &mut TxMut<'_>,
     git: &Git,
     issue: &Arc<Issue>,
-    sender: i64,
+    who: (i64, Option<i64>),
 ) -> Result<Arc<Issue>, ApiError> {
     if state::pull(issue)?.draft {
         return Ok(issue.clone());
     }
     let reviewers = code_owners(tx, git, issue)?;
-    change_reviewers(tx, git, issue, sender, &reviewers, true)
+    change_reviewers(tx, git, issue, who, &reviewers, true)
 }
 
 fn code_owners(tx: &Tx, git: &Git, issue: &Issue) -> Result<Vec<Reviewer>, ApiError> {

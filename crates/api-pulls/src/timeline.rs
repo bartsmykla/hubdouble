@@ -2,6 +2,8 @@ use hubdouble_auth::Actor;
 use hubdouble_model::{ApiError, Issue, Timestamp, node_id};
 use hubdouble_store::{Entity, Rows, TxMut};
 
+use crate::review_requests::Reviewer;
+
 /// What a [`StateEvent`] records, as GitHub names the issue event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateKind {
@@ -26,6 +28,16 @@ pub enum StateKind {
         message: Option<String>,
         commit: Option<String>,
     },
+    /// A review requested by the actor of the event.
+    ReviewRequested(Reviewer),
+    /// A review request that the actor of the event removed.
+    ReviewRequestRemoved(Reviewer),
+    ReadyForReview,
+    ConvertToDraft,
+    /// A push to the head that the old head is not an ancestor of: `commit` is the new head.
+    HeadRefForcePushed {
+        commit: String,
+    },
 }
 
 impl StateKind {
@@ -43,6 +55,11 @@ impl StateKind {
             StateKind::HeadRefRestored => "head_ref_restored",
             StateKind::BaseRefDeleted => "base_ref_deleted",
             StateKind::ReviewDismissed { .. } => "review_dismissed",
+            StateKind::ReviewRequested(_) => "review_requested",
+            StateKind::ReviewRequestRemoved(_) => "review_request_removed",
+            StateKind::ReadyForReview => "ready_for_review",
+            StateKind::ConvertToDraft => "convert_to_draft",
+            StateKind::HeadRefForcePushed { .. } => "head_ref_force_pushed",
         }
     }
 
@@ -58,6 +75,11 @@ impl StateKind {
             StateKind::HeadRefRestored => "HRRE",
             StateKind::BaseRefDeleted => "BRDE",
             StateKind::ReviewDismissed { .. } => "RDE",
+            StateKind::ReviewRequested(_) => "RRE",
+            StateKind::ReviewRequestRemoved(_) => "RRRE",
+            StateKind::ReadyForReview => "RFRE",
+            StateKind::ConvertToDraft => "CTDE",
+            StateKind::HeadRefForcePushed { .. } => "HRFPE",
         }
     }
 }
@@ -77,10 +99,9 @@ pub fn review_dismissed(
     record_at(tx, issue, actor, kind, at)
 }
 
-/// An issue event that T5 records for a pull request: a `reopened` one from any path, and the
-/// `closed`, `renamed`, `base_ref_changed`, `automatic_base_change_succeeded`,
-/// `automatic_base_change_failed`, `head_ref_deleted`, `head_ref_restored` and `base_ref_deleted` ones of T5's own writes and
-/// of branch deletions and restores. T7 records the other closes itself, and its
+/// An issue event of a [`StateKind`] that T5 records for a pull request, from its own writes,
+/// from branch pushes, deletions and restores, and a `reopened` one from any path. T7 records
+/// the other closes itself, and its
 /// `GET .../issues/{n}/events` lists these rows with its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateEvent {

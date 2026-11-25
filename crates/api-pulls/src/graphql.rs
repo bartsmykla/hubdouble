@@ -11,6 +11,7 @@ use hubdouble_store::{Issues, Labels, Repos};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::timeline::{self, StateKind};
 use crate::{
     CONTENTS_WRITE, READ, WRITE, change, events, mergeability, merging, render, reviewing, state,
 };
@@ -477,10 +478,18 @@ fn draft(cx: &mut MutCtx<'_>, args: &Args, draft: bool) -> Result<Resolved, GqlE
     if issue.state == IssueState::Closed {
         return Err(ApiError::unprocessable("The pull request is closed").into());
     }
-    let (type_name, action) = if draft {
-        ("ConvertPullRequestToDraftPayload", "converted_to_draft")
+    let (type_name, action, kind) = if draft {
+        (
+            "ConvertPullRequestToDraftPayload",
+            "converted_to_draft",
+            StateKind::ConvertToDraft,
+        )
     } else {
-        ("MarkPullRequestReadyForReviewPayload", "ready_for_review")
+        (
+            "MarkPullRequestReadyForReviewPayload",
+            "ready_for_review",
+            StateKind::ReadyForReview,
+        )
     };
     if p.draft != draft {
         let mut updated = Issue::clone(&issue);
@@ -491,11 +500,11 @@ fn draft(cx: &mut MutCtx<'_>, args: &Args, draft: bool) -> Result<Resolved, GqlE
             .table_mut::<Issues>()
             .replace(issue.clone())
             .map_err(ApiError::from)?;
-        let sender = change::sender(cx.actor)?;
-        events::emit(&mut cx.tx, cx.git, &issue, sender, action, json!({}))?;
+        let who = (change::sender(cx.actor)?, timeline::via_app(cx.actor));
+        timeline::record(&mut cx.tx, &issue, who, kind)?;
+        events::emit(&mut cx.tx, cx.git, &issue, who.0, action, json!({}))?;
         if !draft {
-            issue =
-                crate::review_requests::request_code_owners(&mut cx.tx, cx.git, &issue, sender)?;
+            issue = crate::review_requests::request_code_owners(&mut cx.tx, cx.git, &issue, who)?;
         }
     }
     Ok(Resolved::Object {

@@ -96,9 +96,10 @@ pub(crate) fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         return Err(validation("head", "invalid"));
     }
     let actor = (sender(ctx.actor())?, ctx.now());
+    let who = (actor.0, timeline::via_app(ctx.actor()));
     let (tx, git) = ctx.tx_mut_and_git()?;
     let created = open(tx, git, &repo, &head, input, actor, None)?;
-    let created = crate::review_requests::request_code_owners(tx, git, &created, actor.0)?;
+    let created = crate::review_requests::request_code_owners(tx, git, &created, who)?;
     let rendered = render::detail(ctx.git(), ctx.tx(), ctx.urls(), &created)?;
     Reply::json(&rendered)?
         .status(StatusCode::CREATED)

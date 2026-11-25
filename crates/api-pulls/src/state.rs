@@ -278,6 +278,7 @@ fn update_refs(
     let old_base = p.base.sha.parse()?;
     let old_mergeable = p.mergeable;
     let moved = head_changed && change.new.is_some_and(|id| p.head.sha != id.to_string());
+    let old_head = p.head.sha.parse::<ObjectId>().ok().filter(|_| moved);
     if let Some(id) = change.new.filter(|_| moved) {
         p.head.sha = id.to_string();
     }
@@ -332,6 +333,16 @@ fn update_refs(
         crate::reviewing::pushed(tx, git, &issue, change)?;
     }
     if moved && let Some(after) = change.new {
+        if let Some(old_head) = old_head
+            && git
+                .is_ancestor(tx, repo_id, old_head, after)
+                .is_ok_and(|reaches| !reaches)
+        {
+            let kind = StateKind::HeadRefForcePushed {
+                commit: after.to_string(),
+            };
+            timeline::record_at(tx, &issue, (change.sender, None), kind, now)?;
+        }
         let before = change.old.unwrap_or(ObjectId::NULL);
         events::emit(
             tx,
