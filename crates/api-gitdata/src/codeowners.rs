@@ -9,7 +9,7 @@ use serde::Serialize;
 /// Where GitHub looks for a CODEOWNERS file, in order; the first one found is used.
 pub const LOCATIONS: [&str; 3] = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"];
 
-/// GitHub loads no CODEOWNERS file larger than 3 MB.
+/// GitHub loads a CODEOWNERS file only when it is under 3 MB, taken as 3 MiB.
 pub const MAX_FILE_BYTES: usize = 3 * 1024 * 1024;
 
 /// One rule of a CODEOWNERS file: a pattern and its owners, each token with its 1-based column.
@@ -103,7 +103,7 @@ pub fn owners_of<'l, 't>(rules: &'l [Line<'t>], path: &str) -> Option<&'l [(usiz
 }
 
 /// The CODEOWNERS file at a commit or ref: its location and text. `None` when there is none,
-/// or when the first one found is over [`MAX_FILE_BYTES`], which GitHub does not load.
+/// or when the first one found is not under [`MAX_FILE_BYTES`], which GitHub does not load.
 ///
 /// # Errors
 ///
@@ -118,7 +118,7 @@ pub fn file_at(
         match git.expression(tx, repo, &format!("{at}:{path}")) {
             Ok(o) => {
                 if let ObjectData::Blob(data) = o.data {
-                    return Ok((data.len() <= MAX_FILE_BYTES)
+                    return Ok((data.len() < MAX_FILE_BYTES)
                         .then(|| (path, String::from_utf8_lossy(&data).into_owned())));
                 }
             }

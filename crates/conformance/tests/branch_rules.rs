@@ -1289,13 +1289,14 @@ async fn a_code_owner_line_that_the_errors_endpoint_reports_owns_nothing() {
 }
 
 #[tokio::test]
-async fn a_codeowners_file_over_three_megabytes_is_not_loaded() {
-    // Given a CODEOWNERS file of more than 3 MB that gives every file to carol, and a main that
-    // needs code owner reviews
+async fn a_codeowners_file_of_three_megabytes_is_not_loaded() {
+    // Given a CODEOWNERS file of exactly 3 MiB, which is not under 3 MB, that gives every file
+    // to carol, and a main that needs code owner reviews
     let mut file = String::from("* @carol\n");
-    while file.len() <= 3 * 1024 * 1024 {
-        file.push_str("# a comment line that pads the file past the size GitHub loads\n");
+    while file.len() < 3 * 1024 * 1024 {
+        file.push_str("# a comment line that pads the file to the size GitHub does not load\n");
     }
+    file.truncate(3 * 1024 * 1024);
     let rules = on_main(&json!([owners_rule()]));
     let server = server_where(&[rules, computed_at_once(), pull_request()], |repo| {
         repo["files"][".github/CODEOWNERS"] = json!(file);
