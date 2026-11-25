@@ -280,12 +280,10 @@ fn judge(rounds: &[Round], row: &Row, side: fn(&Round) -> &[Row]) -> Judged {
             continue;
         };
         let scaled = if row.scaled {
-            factor(side(round))
-                .or_else(|| factor(&round.head))
-                .map(|f| match row.goal {
-                    Goal::Above(_) => value * f,
-                    _ => value / f,
-                })
+            factor(side(round)).map(|f| match row.goal {
+                Goal::Above(_) => value * f,
+                _ => value / f,
+            })
         } else {
             Some(value)
         };

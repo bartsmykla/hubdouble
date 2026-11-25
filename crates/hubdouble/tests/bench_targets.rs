@@ -293,6 +293,40 @@ fn a_scaled_target_is_judged_on_the_reference_runner_and_a_raw_one_as_measured()
 }
 
 #[test]
+fn a_round_side_without_a_positive_calibration_misses_a_scaled_target() {
+    // Given a scaled row that misses its target on a runner other than the reference, with the
+    // head calibrated and main calibrated the same or at zero
+    let latency = Measure {
+        name: "scaled latency",
+        target: 100.0,
+        scaled: true,
+        ..LATENCY
+    };
+    let rows = [(&latency, Some(180.0))];
+    let judge = |base_calibration: f64| {
+        let dir = TempDir::new().unwrap();
+        for n in 1..=5 {
+            write(
+                &dir.path().join(format!("rounds/head-{n}.json")),
+                &report(&rows, Some(0.5 * REFERENCE_CALIBRATION_US)),
+            );
+            write(
+                &dir.path().join(format!("rounds/base-{n}.json")),
+                &report(&rows, Some(base_calibration)),
+            );
+        }
+        compare_on(dir.path(), "another runner")
+    };
+
+    // When the gate judges both
+    let calibrated = judge(0.5 * REFERENCE_CALIBRATION_US);
+    let zero = judge(0.0);
+
+    // Then main without a positive calibration cannot show that the runner misses too
+    assert_eq!(zero, calibrated + 1);
+}
+
+#[test]
 fn the_targets_gate_needs_every_section_9_measure_in_every_report_of_each_side() {
     // Given five paired reports with every section 9 measure on both sides
     let judge = |head: &dyn Fn(u32) -> Value, base: &dyn Fn(u32) -> Value| {
