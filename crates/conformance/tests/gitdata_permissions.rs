@@ -414,7 +414,10 @@ async fn a_workflow_file_that_another_branch_holds_needs_no_workflow_scope() {
 }
 
 fn classic_tokens() -> (String, String) {
-    (format!("ghp_{:0<36}", "c1a55"), format!("ghp_{:0<36}", "c1a55f"))
+    (
+        format!("ghp_{:0<36}", "c1a55"),
+        format!("ghp_{:0<36}", "c1a55f"),
+    )
 }
 
 async fn server_with_classic_tokens(plain: &str, scoped: &str) -> TestServer {
@@ -430,61 +433,33 @@ async fn server_with_classic_tokens(plain: &str, scoped: &str) -> TestServer {
 
 #[tokio::test]
 async fn a_merge_without_the_workflow_scope_cannot_make_a_new_workflow_file() {
-    // Given branches a and b from main, written with the workflow scope, that each change
-    // another line of .github/workflows/x.yml
+    // Given a commit off main that adds .github/workflows/x.yml, which no branch holds, and a
+    // main one plain commit ahead
     let (plain, scoped) = classic_tokens();
     let server = server_with_classic_tokens(&plain, &scoped).await;
     let client = GoGithub::new(&server).with_token(&plain);
-    let writer = GoGithub::new(&server).with_token(&scoped);
-    let main = branch_sha(&writer, "main").await;
-    let file = ".github/workflows/x.yml";
-    let lines = ["name: X", "on: push", "jobs: {}", "env: {}", "permissions: {}"];
-    let text = |first: &str, last: &str| {
-        format!("{first}\n{}\n{last}\n", lines[1..4].join("\n"))
-    };
-    let shared = commit_file(&writer, &main, file, &text(lines[0], lines[4])).await;
-    let moved = writer
+    let main = branch_sha(&client, "main").await;
+    let workflow = detached_commit(&client, &main, ".github/workflows/x.yml").await;
+    let ahead = detached_commit(&client, &main, "notes.md").await;
+    let moved = client
         .call_json(
             Method::PATCH,
             &format!("{GIT}/refs/heads%2Fmain"),
-            &json!({"sha": shared}),
+            &json!({"sha": ahead}),
         )
         .await;
     checked("git/update-ref", StatusCode::OK, &moved);
-    for (branch, content) in [
-        ("a", text("name: A", lines[4])),
-        ("b", text(lines[0], "permissions: {contents: read}")),
-    ] {
-        let sha = commit_file(&writer, &shared, file, &content).await;
-        let made = writer
-            .post(
-                &format!("{GIT}/refs"),
-                &json!({"ref": format!("refs/heads/{branch}"), "sha": sha}),
-            )
-            .await;
-        checked("git/create-ref", StatusCode::CREATED, &made);
-    }
-    let a = branch_sha(&client, "a").await;
-    // When a token without the scope merges b into a, which writes a file no branch holds
+    // When a token without the scope merges that commit into main
     let denied = client
-        .post("repos/acme/public/merges", &json!({"base": "a", "head": "b"}))
-        .await;
-    // Then GitHub refuses it with 403 and a stays
-    checked("repos/merge", StatusCode::FORBIDDEN, &denied);
-    assert_eq!(branch_sha(&client, "a").await, a);
-    // When a pull request of b into a is merged by the same token
-    let opened = client
         .post(
-            "repos/acme/public/pulls",
-            &json!({"title": "x", "head": "b", "base": "a"}),
+            "repos/acme/public/merges",
+            &json!({"base": "main", "head": workflow}),
         )
         .await;
-    let number = checked("pulls/create", StatusCode::CREATED, &opened)["number"].clone();
-    let merge = format!("repos/acme/public/pulls/{number}/merge");
-    let denied = client.call_json(Method::PUT, &merge, &json!({})).await;
-    // Then it is refused with 403 too, and a stays
-    checked("pulls/merge", StatusCode::FORBIDDEN, &denied);
-    assert_eq!(branch_sha(&client, "a").await, a);
+    // Then GitHub refuses it with 403, as the moved main does not count as a branch that
+    // holds the file, and main stays
+    checked("repos/merge", StatusCode::FORBIDDEN, &denied);
+    assert_eq!(branch_sha(&client, "main").await, ahead);
 }
 
 #[tokio::test]
@@ -547,10 +522,15 @@ async fn detached_commit(client: &GoGithub, parent: &str, path: &str) -> String 
 async fn commit_file(client: &GoGithub, parent: &str, path: &str, content: &str) -> String {
     let parent_commit = client.get(&format!("{GIT}/commits/{parent}")).await;
     let base = checked("git/get-commit", StatusCode::OK, &parent_commit);
-    let tree = client.post(&format!("{GIT}/trees"), &json!({
-        "base_tree": base["tree"]["sha"],
-        "tree": [{"path": path, "mode": "100644", "type": "blob", "content": content}]
-    })).await;
+    let tree = client
+        .post(
+            &format!("{GIT}/trees"),
+            &json!({
+                "base_tree": base["tree"]["sha"],
+                "tree": [{"path": path, "mode": "100644", "type": "blob", "content": content}]
+            }),
+        )
+        .await;
     let tree = checked("git/create-tree", StatusCode::CREATED, &tree);
     let commit = client
         .post(

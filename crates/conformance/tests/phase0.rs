@@ -226,9 +226,14 @@ async fn an_injected_push_has_the_push_form_of_the_repository() {
         .fixture()
         .start()
         .await;
+    let sha = "0".repeat(40);
     let push = json!({"event": "push", "app": APP_SLUG, "installation": INSTALLATION_ID,
         "repository": "acme/public", "sender": "alice",
-        "payload": {"ref": "refs/heads/main"}});
+        "payload": {"ref": "refs/heads/main", "before": sha, "after": sha, "created": false,
+                    "deleted": false, "forced": false, "base_ref": null,
+                    "compare": "https://github.com/acme/public/compare/main",
+                    "commits": [], "head_commit": null,
+                    "pusher": {"name": "alice", "email": "alice@example.com"}}});
 
     // When
     let injected = server.admin(Method::POST, "events", Some(&push)).await;

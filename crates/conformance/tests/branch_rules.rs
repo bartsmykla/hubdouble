@@ -1080,8 +1080,7 @@ async fn a_push_delivery_has_the_push_form_of_the_repository() {
     let push = payload("push");
     let mut keys: Vec<&str> = push
         .as_object()
-        .map(|o| o.keys().map(String::as_str).collect())
-        .unwrap_or_default();
+        .map_or_default(|o| o.keys().map(String::as_str).collect());
     keys.sort_unstable();
     assert_eq!(keys, PUSH_REPOSITORY_KEYS);
     assert_eq!(push["url"], push["html_url"]);
@@ -1134,7 +1133,12 @@ async fn a_pull_request_merge_of_each_method_sends_push_before_closed() {
         let sent = deliveries(&server).await;
         let order: Vec<(String, Value)> = sent
             .iter()
-            .map(|d| (d.header("x-github-event").to_owned(), d.json()["action"].clone()))
+            .map(|d| {
+                (
+                    d.header("x-github-event").to_owned(),
+                    d.json()["action"].clone(),
+                )
+            })
             .filter(|(event, action)| event == "push" || action == "closed")
             .collect();
         assert_eq!(
@@ -1148,8 +1152,7 @@ async fn a_pull_request_merge_of_each_method_sends_push_before_closed() {
         let closed = sent
             .iter()
             .find(|d| d.json()["action"] == "closed")
-            .map(Delivery::json)
-            .unwrap_or_default();
+            .map_or_default(Delivery::json);
         let now = server.clock.now().to_string();
         assert_eq!(closed["repository"]["pushed_at"], now, "{method}");
         assert_eq!(alice.get(REPO).await.json()["pushed_at"], now, "{method}");
@@ -1275,8 +1278,7 @@ async fn a_code_owner_line_that_the_errors_endpoint_reports_owns_nothing() {
         // falls to the * line and the merge waits for carol
         let lines: Vec<&Value> = reported["errors"]
             .as_array()
-            .map(|e| e.iter().map(|e| &e["line"]).collect())
-            .unwrap_or_default();
+            .map_or_default(|e| e.iter().map(|e| &e["line"]).collect());
         assert_eq!(lines, [&json!(2)], "{case}: {reported}");
         assert_refused(&merge_pull(&alice).await, 405, Some(PULL_MERGE_DOCS), case);
         assert_eq!(tip(&alice, "main").await, main, "{case}");
