@@ -159,7 +159,10 @@ fn owners(
     if kept.at == Some(at) {
         return Ok(kept);
     }
-    let rules: Vec<_> = codeowners::lines(text).collect();
+    let Some(repo_row) = tx.table::<Repos>().get(repo) else {
+        return Ok(Owners::default());
+    };
+    let rules = codeowners::valid_lines(text, &codeowners::RepoOwners { tx, repo: repo_row });
     let paths = match git.changed_paths(tx, repo, at.0, at.1) {
         Ok(paths) => paths,
         Err(GitError::NotFound) => Vec::new(),

@@ -1,14 +1,13 @@
 use std::collections::{BTreeMap, HashMap};
 
 use hubdouble_api_gitdata::branch_rules::{self, MergeMethod, Via, diff_state, flag, parameter};
+use hubdouble_api_gitdata::codeowners;
 use hubdouble_auth::Actor;
 use hubdouble_git::{Git, ObjectId, RefChange};
 use hubdouble_model::{
     AccountKind, ApiError, Issue, Pull, Repo, RepoRole, ReviewState, Rule, Team,
 };
-use hubdouble_store::{
-    Accounts, Entity, Repos, ReviewThreads, Reviews, Rows, Table, Teams, Tx, TxMut,
-};
+use hubdouble_store::{Accounts, Entity, Repos, ReviewThreads, Reviews, Rows, Table, Tx, TxMut};
 use serde_json::Value;
 
 pub(crate) type LastPushes = Rows<LastPush>;
@@ -146,15 +145,7 @@ fn writes(tx: &Tx, repo: &Repo, user: i64) -> bool {
 
 fn team_of<'t>(tx: &'t Tx, repo: &Repo, name: &str) -> Option<&'t Team> {
     let (org, slug) = name.split_once('/')?;
-    let org = tx.table::<Accounts>().by_login(org)?;
-    tx.table::<Teams>()
-        .by_slug(org.id, slug)
-        .map(AsRef::as_ref)
-        .filter(|t| {
-            t.repos
-                .iter()
-                .any(|r| r.repo_id == repo.id && r.role >= RepoRole::Write)
-        })
+    codeowners::owning_team(tx, repo, org, slug)
 }
 
 fn owner_users(tx: &Tx, repo: &Repo, owner: &str) -> Vec<i64> {

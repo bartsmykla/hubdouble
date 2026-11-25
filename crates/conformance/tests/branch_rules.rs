@@ -1239,6 +1239,74 @@ async fn a_code_owner_review_rule_waits_for_an_owner_of_every_changed_file() {
     assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
 }
 
+fn owner_team(name: &str, privacy: &str, member: &str) -> Value {
+    json!({"kind": "team", "org": "acme", "name": name, "privacy": privacy,
+           "members": [{"login": member}],
+           "repositories": [{"repository": "acme/public", "permission": "write"}]})
+}
+
+#[tokio::test]
+async fn a_code_owner_line_that_the_errors_endpoint_reports_owns_nothing() {
+    for (case, file) in [
+        ("secret team", "* @acme/core\n/src/ @acme/hidden\n"),
+        ("unknown user", "* @acme/core\n/src/ @bob @nobody\n"),
+    ] {
+        // Given a CODEOWNERS file whose src/ line names bob through a secret team or next to
+        // an unknown user, a visible core team of carol for every other file, and pull request
+        // 1 that changes src/feature.txt
+        let extra = [
+            on_main(&json!([owners_rule()])),
+            computed_at_once(),
+            pull_request(),
+            owner_team("Core", "closed", "carol"),
+            owner_team("Hidden", "secret", "bob"),
+        ];
+        let server = server_where(&extra, |repo| {
+            repo["files"][".github/CODEOWNERS"] = json!(file);
+        })
+        .await;
+        let alice = client(&server, ALICE_TOKEN);
+        let main = tip(&alice, "main").await;
+        let reported = alice.get(&format!("{REPO}/codeowners/errors")).await.json();
+        // When bob approves
+        approve_as(&server, BOB_TOKEN).await;
+        // Then the errors endpoint reports the src/ line, which GitHub skips, so the file
+        // falls to core and the merge waits for carol
+        let lines: Vec<&Value> = reported["errors"]
+            .as_array()
+            .map(|e| e.iter().map(|e| &e["line"]).collect())
+            .unwrap_or_default();
+        assert_eq!(lines, [&json!(2)], "{case}: {reported}");
+        assert_refused(&merge_pull(&alice).await, 405, Some(PULL_MERGE_DOCS), case);
+        assert_eq!(tip(&alice, "main").await, main, "{case}");
+        approve_as(&server, fixture::CAROL_TOKEN).await;
+        let merged = merge_pull(&alice).await;
+        assert_eq!(merged.status, StatusCode::OK, "{case}: {}", merged.json());
+    }
+}
+
+#[tokio::test]
+async fn a_codeowners_file_over_three_megabytes_is_not_loaded() {
+    // Given a CODEOWNERS file of more than 3 MB that gives every file to carol, and a main that
+    // needs code owner reviews
+    let mut file = String::from("* @carol\n");
+    while file.len() <= 3 * 1024 * 1024 {
+        file.push_str("# a comment line that pads the file past the size GitHub loads\n");
+    }
+    let rules = on_main(&json!([owners_rule()]));
+    let server = server_where(&[rules, computed_at_once(), pull_request()], |repo| {
+        repo["files"][".github/CODEOWNERS"] = json!(file);
+        repo["collaborators"] = json!([{"login": "bob", "permission": "write"},
+                                       {"login": "carol", "permission": "write"}]);
+    })
+    .await;
+    let alice = client(&server, ALICE_TOKEN);
+    // When alice merges pull request 1 with no review
+    let merged = merge_pull(&alice).await;
+    // Then GitHub does not load the file, so no code owner review is needed
+    assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
+}
+
 #[tokio::test]
 async fn a_merge_waits_for_the_code_owners_of_the_base_before_the_merge() {
     for method in ["merge", "squash", "rebase"] {
