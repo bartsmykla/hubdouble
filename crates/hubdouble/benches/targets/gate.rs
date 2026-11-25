@@ -137,19 +137,24 @@ fn section_9(rounds: &[Round], out: &mut String) -> usize {
     for (target, measure, names) in &checks {
         for row in rounds.iter().flat_map(|r| &r.head) {
             if !names(&row.measure)
-                || (row.goal == measure.goal && row.unit == measure.unit)
+                || (row.goal == measure.goal
+                    && row.unit == measure.unit
+                    && row.scaled == measure.scaled)
                 || !judged.insert(row.measure.as_str())
             {
                 continue;
             }
             failed += 1;
             let wanted = Row::new("", None, measure.unit, measure.goal);
+            let scaling = |scaled| if scaled { "scaled" } else { "raw" };
             let _ = writeln!(
                 out,
-                "WRONG    section 9 {target}: {} reports target {}, the plan's is {}",
+                "WRONG    section 9 {target}: {} reports target {} {}, the plan's is {} {}",
                 row.measure,
                 row.target(),
-                wanted.target()
+                scaling(row.scaled),
+                wanted.target(),
+                scaling(measure.scaled)
             );
         }
     }

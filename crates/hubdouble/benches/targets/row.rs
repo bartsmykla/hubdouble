@@ -39,17 +39,23 @@ pub(crate) fn inventory_documents() -> std::io::Result<Vec<String>> {
     Ok(names)
 }
 
-/// One target of plan section 9: the rows that measure it, and the goal and unit each of
-/// those rows must report, so the gate judges the plan's target and not the report's.
+/// One target of plan section 9: the rows that measure it, and the goal, unit and scaling each
+/// of those rows must report, so the gate judges the plan's target and not the report's.
 pub(crate) struct Section9 {
     pub(crate) target: &'static str,
     pub(crate) prefix: &'static str,
     pub(crate) suffix: &'static str,
     pub(crate) goal: Goal,
     pub(crate) unit: &'static str,
+    pub(crate) scaled: bool,
 }
 
 impl Section9 {
+    const fn scaled(mut self) -> Section9 {
+        self.scaled = true;
+        self
+    }
+
     pub(crate) fn names(&self, measure: &str) -> bool {
         measure.len() >= self.prefix.len() + self.suffix.len()
             && measure.starts_with(self.prefix)
@@ -69,6 +75,7 @@ const fn exact(
         suffix: "",
         goal,
         unit,
+        scaled: false,
     }
 }
 
@@ -79,7 +86,8 @@ pub(crate) const SECTION_9: [Section9; 11] = [
         "Start to ready, fixture seed",
         Goal::Below(200.0),
         "ms",
-    ),
+    )
+    .scaled(),
     exact(
         "Idle memory",
         "Idle RSS, client seed",
@@ -92,6 +100,7 @@ pub(crate) const SECTION_9: [Section9; 11] = [
         suffix: " routes",
         goal: Goal::Below(100.0),
         unit: "µs",
+        scaled: true,
     },
     Section9 {
         target: "REST GET p99",
@@ -99,6 +108,7 @@ pub(crate) const SECTION_9: [Section9; 11] = [
         suffix: " routes",
         goal: Goal::Below(1000.0),
         unit: "µs",
+        scaled: true,
     },
     Section9 {
         target: INVENTORY_TARGET,
@@ -106,6 +116,7 @@ pub(crate) const SECTION_9: [Section9; 11] = [
         suffix: " p99",
         goal: Goal::Below(3.0),
         unit: "ms",
+        scaled: false,
     },
     Section9 {
         target: "Push to a base branch with 100 open pull requests",
@@ -113,6 +124,7 @@ pub(crate) const SECTION_9: [Section9; 11] = [
         suffix: " open pull requests",
         goal: Goal::Below(3.0),
         unit: "ms",
+        scaled: false,
     },
     Section9 {
         target: "REST read of a pull request, the first after each such push",
@@ -120,19 +132,22 @@ pub(crate) const SECTION_9: [Section9; 11] = [
         suffix: " open pull requests",
         goal: Goal::Below(1000.0),
         unit: "µs",
+        scaled: true,
     },
     exact(
         "Mixed inventory load, reads and writes",
         "Mixed inventory load, reads and writes",
         Goal::Above(5000.0),
         "req/s",
-    ),
+    )
+    .scaled(),
     exact(
         "Webhook enqueue",
         "Webhook enqueue per event",
         Goal::Below(20.0),
         "µs",
-    ),
+    )
+    .scaled(),
     exact("Runner calibration", CALIBRATION, Goal::Report, "µs"),
 ];
 pub(crate) const REFERENCE_CALIBRATION_US: f64 = 54.8;

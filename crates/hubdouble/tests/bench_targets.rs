@@ -59,10 +59,12 @@ fn section_9_rows(without: Option<&str>) -> Vec<Value> {
             };
             middles.into_iter().map(move |middle| {
                 let name = format!("{}{middle}{}", m.prefix, m.suffix);
-                let mut row = Row::new(name, None, m.unit, m.goal).json();
+                let mut row = Row::new(name, None, m.unit, m.goal);
+                row.scaled = m.scaled;
+                let mut row = row.json();
                 row["value"] = json!(match m.goal {
-                    Goal::Below(t) => t / 2.0,
-                    Goal::Above(t) => t * 2.0,
+                    Goal::Below(t) => t / 4.0,
+                    Goal::Above(t) => t * 4.0,
                     Goal::Report => 1.0,
                 });
                 row
@@ -280,10 +282,14 @@ fn a_scaled_target_is_judged_on_the_reference_runner_and_a_raw_one_as_measured()
     let faster = judge(Some(0.5 * REFERENCE_CALIBRATION_US));
     let uncalibrated = judge(None);
 
-    // Then the slower runner meets the scaled rows, the faster one misses them, and so does no calibration, which both sides also miss as a section 9 row
+    // Then the slower runner meets the scaled rows, the faster one misses them, and so does no calibration, which both sides also miss as a section 9 row, with every scaled section 9 row
+    let scaled_section_9 = section_9_rows(None)
+        .iter()
+        .filter(|row| row["scaled"] == true)
+        .count();
     assert_eq!(slower, 1);
     assert_eq!(faster, 3);
-    assert_eq!(uncalibrated, 5);
+    assert_eq!(uncalibrated, 5 + scaled_section_9);
 }
 
 #[test]
@@ -351,9 +357,9 @@ fn the_targets_gate_needs_every_section_9_measure_in_every_report_of_each_side()
 }
 
 #[test]
-fn a_section_9_row_must_report_the_goal_and_unit_of_the_plan() {
+fn a_section_9_row_must_report_the_goal_unit_and_scaling_of_the_plan() {
     // Given five paired reports with every section 9 measure, where the head's REST GET p99
-    // row reports no target, a looser target, or another unit
+    // row reports no target, a looser target, another unit, or no scaling
     let p99 = |r: &&mut Value| {
         r["measure"]
             .as_str()
@@ -383,9 +389,13 @@ fn a_section_9_row_must_report_the_goal_and_unit_of_the_plan() {
     });
     let looser = judge(&|row| row["target"] = json!(1_000_000.0));
     let other_unit = judge(&|row| row["unit"] = json!("ms"));
-    // Then only the plan's goal and unit pass
+    let raw = judge(&|row| row["scaled"] = json!(false));
+    // Then only the plan's goal, unit and scaling pass
     assert_eq!(kept, 0);
-    assert_eq!([report_goal, looser, other_unit].map(|n| n > 0), [true; 3]);
+    assert_eq!(
+        [report_goal, looser, other_unit, raw].map(|n| n > 0),
+        [true; 4]
+    );
 }
 
 #[test]
