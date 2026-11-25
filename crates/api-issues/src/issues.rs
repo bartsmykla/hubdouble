@@ -419,6 +419,7 @@ pub(crate) fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         pull: None,
     })?;
     emit_issue(tx, &repo, &issue, "opened", who.account.id, Vec::new())?;
+    hubdouble_api_pulls::record_mentions(tx, &issue, (None, issue.body.as_deref()), now)?;
     let change = Change {
         repo: &repo,
         who: &who,
@@ -635,6 +636,14 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         }
         let extra = vec![("changes", Value::Object(wrapped))];
         emit_issue(tx, &repo, &issue, "edited", sender, extra)?;
+    }
+    if issue.body != old.body {
+        hubdouble_api_pulls::record_mentions(
+            tx,
+            &issue,
+            (old.body.as_deref(), issue.body.as_deref()),
+            now,
+        )?;
     }
     let change = Change {
         repo: &repo,

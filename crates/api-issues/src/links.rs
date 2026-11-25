@@ -102,9 +102,7 @@ pub(crate) fn ref_updated(
         return Ok(());
     };
     let default = repo.default_branch == name;
-    if default {
-        close_from_commits(tx, git, change)?;
-    }
+    from_commits(tx, git, change, default)?;
     let issues = tx.table::<Issues>();
     let done = tx.table::<MergeCloses>();
     let merged: Vec<Arc<Issue>> = issues
@@ -130,36 +128,88 @@ pub(crate) fn ref_updated(
     Ok(())
 }
 
-fn close_from_commits(tx: &mut TxMut<'_>, git: &Git, change: &RefChange) -> Result<(), ApiError> {
+fn references(text: &str) -> impl Iterator<Item = (&str, i64)> {
+    text.split_whitespace().filter_map(|word| {
+        let target = word
+            .trim_start_matches('(')
+            .trim_end_matches(['.', ',', ';', ':', ')', '!', '?']);
+        let (qualifier, digits) = target.split_once('#')?;
+        if !qualifier.is_empty() && qualifier.matches('/').count() != 1 {
+            return None;
+        }
+        Some((qualifier, digits.parse().ok()?))
+    })
+}
+
+fn from_commits(
+    tx: &mut TxMut<'_>,
+    git: &Git,
+    change: &RefChange,
+    default: bool,
+) -> Result<(), ApiError> {
     let source = change.repo_id;
     let sender = change.sender;
+    let via_app = tx.table::<Accounts>().get(sender).and_then(|a| a.app_id);
     let now = git.now();
     for (sha, commit) in git.newly_reachable_commits(tx, change)? {
-        let mut refs = closing_references(&commit.message);
-        let Some(first) = refs.next() else {
-            continue;
+        let closed = if default {
+            let Some(closed) = close_from(tx, (source, sender, now), sha, &commit.message)? else {
+                continue;
+            };
+            closed
+        } else {
+            Vec::new()
         };
-        let key = format!("{source}/{sha}");
-        if tx.table::<CommitCloses>().by_key(&key).is_some() {
-            continue;
-        }
-        let mut issues: Vec<_> = std::iter::once(first)
-            .chain(refs)
-            .filter_map(|(qualifier, number)| referenced_issue(tx, source, qualifier, number))
-            .filter(|i| i.state == IssueState::Open)
-            .filter(|i| i.repo_id == source || can_push(tx, sender, i.repo_id))
+        let mut named: Vec<Arc<Issue>> = references(&commit.message)
+            .filter_map(|(qualifier, number)| named_issue(tx, source, qualifier, number))
+            .filter(|i| !closed.contains(&i.id))
             .cloned()
             .collect();
-        issues.sort_unstable_by_key(|i| i.id);
-        issues.dedup_by_key(|i| i.id);
-        let id = tx.next_id();
-        tx.table_mut::<CommitCloses>()
-            .insert(CommitClose { id, key })?;
-        for issue in issues {
-            close(tx, &issue, sender, now, Some((source, sha)))?;
+        named.sort_unstable_by_key(|i| i.id);
+        named.dedup_by_key(|i| i.id);
+        for issue in named {
+            hubdouble_api_pulls::referenced(
+                tx,
+                &issue,
+                (sender, via_app),
+                (source, sha.to_string()),
+                now,
+            )?;
         }
     }
     Ok(())
+}
+
+fn close_from(
+    tx: &mut TxMut<'_>,
+    (source, sender, now): (i64, i64, Timestamp),
+    sha: ObjectId,
+    message: &str,
+) -> Result<Option<Vec<i64>>, ApiError> {
+    let mut refs = closing_references(message);
+    let Some(first) = refs.next() else {
+        return Ok(Some(Vec::new()));
+    };
+    let key = format!("{source}/{sha}");
+    if tx.table::<CommitCloses>().by_key(&key).is_some() {
+        return Ok(None);
+    }
+    let mut issues: Vec<_> = std::iter::once(first)
+        .chain(refs)
+        .filter_map(|(qualifier, number)| referenced_issue(tx, source, qualifier, number))
+        .filter(|i| i.state == IssueState::Open)
+        .filter(|i| i.repo_id == source || can_push(tx, sender, i.repo_id))
+        .cloned()
+        .collect();
+    issues.sort_unstable_by_key(|i| i.id);
+    issues.dedup_by_key(|i| i.id);
+    let id = tx.next_id();
+    tx.table_mut::<CommitCloses>()
+        .insert(CommitClose { id, key })?;
+    for issue in &issues {
+        close(tx, issue, sender, now, Some((source, sha)))?;
+    }
+    Ok(Some(issues.iter().map(|i| i.id).collect()))
 }
 
 fn can_push(tx: &Tx, sender: i64, repo_id: i64) -> bool {
@@ -215,14 +265,21 @@ fn referenced_issue<'a>(
     qualifier: &str,
     number: i64,
 ) -> Option<&'a Arc<Issue>> {
+    named_issue(tx, source, qualifier, number).filter(|i| i.pull.is_none())
+}
+
+fn named_issue<'a>(
+    tx: &'a Tx,
+    source: i64,
+    qualifier: &str,
+    number: i64,
+) -> Option<&'a Arc<Issue>> {
     let repo = if qualifier.is_empty() {
         source
     } else {
         lookup_repo(tx, qualifier)?.id
     };
-    tx.table::<Issues>()
-        .by_number(repo, number)
-        .filter(|i| i.pull.is_none())
+    tx.table::<Issues>().by_number(repo, number)
 }
 
 fn close(

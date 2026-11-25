@@ -6,6 +6,7 @@ mod association;
 mod change;
 mod events;
 mod graphql;
+mod mentions;
 mod merge_state;
 mod mergeability;
 mod merging;
@@ -19,12 +20,13 @@ mod timeline;
 
 pub use association::association;
 pub use change::kept;
+pub use mentions::record_mentions;
 pub use merge_state::mergeable_state;
 pub use reopen::{reopen, reopened};
 pub use review_requests::{Reviewer, change_reviewers};
 pub use reviewing::{review_decision, review_submitted};
 pub use state::sync_refs;
-pub use timeline::{StateEvent, StateEvents, StateKind, review_dismissed};
+pub use timeline::{StateEvent, StateEvents, StateKind, referenced, review_dismissed};
 
 const fn repo_requirement(grants: &'static [Grant]) -> Requirement {
     Requirement {

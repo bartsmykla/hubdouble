@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use http::{Method, StatusCode};
 use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
-use hubdouble_testkit::fixture::{self, ALICE_ID, ALICE_TOKEN, PUBLIC_REPO_ID};
+use hubdouble_testkit::fixture::{self, ALICE_ID, ALICE_TOKEN, BOB_TOKEN, PUBLIC_REPO_ID};
 use hubdouble_testkit::{GoGithub, Graphql, TestServer};
 use serde_json::{Value, json};
 
@@ -39,7 +39,12 @@ const TEAM_KEYS: [&str; 15] = [
 ];
 
 async fn server() -> TestServer {
+    server_with(&[]).await
+}
+
+async fn server_with(extra: &[Value]) -> TestServer {
     let mut entries = fixture::seed();
+    entries.extend(extra.iter().cloned());
     for entry in &mut entries {
         if entry["kind"] == "repository" && entry["name"] == fixture::PUBLIC_REPO {
             entry["collaborators"] = json!([{"login": "bob", "permission": "write"}]);
@@ -257,6 +262,16 @@ async fn converting_a_ready_pull_request_to_a_draft_records_convert_to_draft() {
 }
 
 fn commit(server: &TestServer, branch: &str, parent: ObjectId, path: &str) -> ObjectId {
+    commit_in(server, PUBLIC_REPO_ID, branch, parent, path)
+}
+
+fn commit_in(
+    server: &TestServer,
+    repo: i64,
+    branch: &str,
+    parent: ObjectId,
+    path: &str,
+) -> ObjectId {
     let services = server.server.services();
     let sig = Signature::seed();
     services
@@ -264,7 +279,7 @@ fn commit(server: &TestServer, branch: &str, parent: ObjectId, path: &str) -> Ob
         .update(|tx| {
             Ok(services.git.commit(
                 tx,
-                PUBLIC_REPO_ID,
+                repo,
                 ALICE_ID,
                 branch,
                 Some(parent),
@@ -283,7 +298,11 @@ fn commit(server: &TestServer, branch: &str, parent: ObjectId, path: &str) -> Ob
 }
 
 async fn tip(client: &GoGithub, branch: &str) -> ObjectId {
-    let answer = client.get(&format!("{REPO}/git/ref/heads/{branch}")).await;
+    tip_in(client, REPO, branch).await
+}
+
+async fn tip_in(client: &GoGithub, repo: &str, branch: &str) -> ObjectId {
+    let answer = client.get(&format!("{repo}/git/ref/heads/{branch}")).await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.json());
     answer.json()["object"]["sha"]
         .as_str()
@@ -330,4 +349,111 @@ async fn a_head_push_that_drops_the_old_head_records_head_ref_force_pushed_at_th
         url.ends_with(&format!("/repos/acme/public/commits/{rewrite}")),
         "{url}"
     );
+}
+
+#[tokio::test]
+async fn a_force_push_to_a_fork_head_names_the_fork_in_its_commit_url() {
+    // Given an open pull request from bob's fork
+    const FORK_ID: i64 = 3100;
+    let fork = json!({"kind": "repository", "id": FORK_ID, "owner": "bob", "name": "public",
+        "fork_of": "acme/public",
+        "commits": [{"branch": "fork-work", "message": "fork change",
+                     "files": {"fork.txt": "fork\n"}}]});
+    let pull = json!({"kind": "pull_request", "repository": "acme/public", "user": "bob",
+        "title": "fork work", "head": "bob:fork-work", "base": "main"});
+    let server = server_with(&[fork, pull]).await;
+    let alice = alice(&server);
+    let bob = GoGithub::enterprise(&server).with_token(BOB_TOKEN);
+    let listed = alice.get(&format!("{REPO}/pulls?head=bob:fork-work")).await;
+    let number = listed.json()[0]["number"].clone();
+    // When bob forces the fork head to a commit on the fork's main that drops it
+    let fork_repo = "repos/bob/public";
+    let fork_main = tip_in(&bob, fork_repo, "main").await;
+    let created = bob
+        .post(
+            &format!("{fork_repo}/git/refs"),
+            &json!({"ref": "refs/heads/rewrite", "sha": fork_main.to_string()}),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.json());
+    let rewrite = commit_in(&server, FORK_ID, "rewrite", fork_main, "b.txt");
+    let forced = bob
+        .call_json(
+            Method::PATCH,
+            &format!("{fork_repo}/git/refs/heads/fork-work"),
+            &json!({"sha": rewrite.to_string(), "force": true}),
+        )
+        .await;
+    assert_eq!(forced.status, StatusCode::OK, "{}", forced.json());
+    // Then head_ref_force_pushed names the commit in the head repository, as live GitHub does
+    // for rust-lang/rust pull 166526 (event 37297689504, 2026-11-25)
+    let recorded = events(&alice, &number).await;
+    let found = named(&recorded, "head_ref_force_pushed");
+    assert_eq!(found.len(), 1, "{recorded:?}");
+    assert_eq!(found[0]["commit_id"], json!(rewrite.to_string()));
+    let url = found[0]["commit_url"].as_str().unwrap_or_default();
+    assert!(
+        url.ends_with(&format!("/repos/bob/public/commits/{rewrite}")),
+        "{url}"
+    );
+}
+
+#[tokio::test]
+async fn a_mention_records_mentioned_and_subscribed_once_and_a_team_mention_only_subscribed() {
+    // Given an issue whose body mentions carol, and code that names dave
+    let server = server().await;
+    let alice = alice(&server);
+    let opened = alice
+        .post(
+            &format!("{REPO}/issues"),
+            &json!({"title": "A fault", "body": "@carol please look, not `@dave`"}),
+        )
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED, "{}", opened.json());
+    let number = opened.json()["number"].clone();
+    // When a comment mentions the reviewers team and carol again, and an edit mentions carol
+    let commented = alice
+        .post(
+            &format!("{REPO}/issues/{number}/comments"),
+            &json!({"body": "cc @acme/reviewers and @carol"}),
+        )
+        .await;
+    assert_eq!(
+        commented.status,
+        StatusCode::CREATED,
+        "{}",
+        commented.json()
+    );
+    let edited = alice
+        .call_json(
+            Method::PATCH,
+            &format!("{REPO}/issues/{number}"),
+            &json!({"body": "@carol, @carol please look"}),
+        )
+        .await;
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.json());
+    // Then carol is mentioned and subscribed once, and bob of the team only subscribed
+    let recorded = events(&alice, &number).await;
+    let seen: Vec<(&Value, &Value)> = recorded
+        .iter()
+        .filter(|e| e["event"] == "mentioned" || e["event"] == "subscribed")
+        .map(|e| (&e["event"], &e["actor"]["login"]))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (&json!("mentioned"), &json!("carol")),
+            (&json!("subscribed"), &json!("carol")),
+            (&json!("subscribed"), &json!("bob")),
+        ]
+    );
+    for event in named(&recorded, "mentioned")
+        .into_iter()
+        .chain(named(&recorded, "subscribed"))
+    {
+        assert_eq!(keys(event), keys_with(&[]));
+        assert_eq!(event["commit_id"], Value::Null);
+    }
+    assert_eq!(prefix(named(&recorded, "mentioned")[0]), Some("MEE"));
+    assert_eq!(prefix(named(&recorded, "subscribed")[0]), Some("SE"));
 }

@@ -229,6 +229,7 @@ fn open(
     let issue = tx.table_mut::<Issues>().insert(issue)?;
     state::sync_refs(tx, git, &issue)?;
     events::emit(tx, git, &issue, sender, "opened", json!({}))?;
+    crate::mentions::record_mentions(tx, &issue, (None, issue.body.as_deref()), now)?;
     mergeability::start(tx, git, &issue, sender)?;
     let id = issue.id;
     tx.table::<Issues>()
@@ -300,6 +301,7 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let via_app = timeline::via_app(ctx.actor());
     let now = ctx.now();
     let (tx, git) = ctx.tx_mut_and_git()?;
+    let old_body = issue.body.clone();
     let edited = edit(tx, git, &mut issue, input, author, now)?;
     if before != issue.state
         || !edited.changes.is_empty()
@@ -313,6 +315,14 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         state::sync_refs(tx, git, &issue)?;
     }
     let who = (author, via_app);
+    if old_body != issue.body {
+        crate::mentions::record_mentions(
+            tx,
+            &issue,
+            (old_body.as_deref(), issue.body.as_deref()),
+            now,
+        )?;
+    }
     if let Some((from, to)) = edited.renamed {
         timeline::record(tx, &issue, who, StateKind::Renamed { from, to })?;
     }

@@ -115,10 +115,13 @@ async fn assert_commit_closed(
         &client.get(&format!("{issue_path}/events")).await,
         StatusCode::OK,
     );
-    let events = events
+    let events: Vec<&Value> = events
         .as_array()
-        .unwrap_or_else(|| panic!("expected a list of events: {events}"));
-    assert_eq!(events.len(), 1);
+        .unwrap_or_else(|| panic!("expected a list of events: {events}"))
+        .iter()
+        .filter(|e| e["event"] != "referenced")
+        .collect();
+    assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0]["event"], "closed");
     assert_eq!(events[0]["actor"]["login"], "alice");
     assert_eq!(events[0]["state_reason"], Value::Null);
@@ -239,7 +242,10 @@ async fn a_merge_closes_issues_from_new_commit_messages_once() {
         .iter()
         .map(|e| &e["event"])
         .collect();
-    assert_eq!(kinds, [&json!("closed"), &json!("reopened")]);
+    assert_eq!(
+        kinds,
+        [&json!("referenced"), &json!("closed"), &json!("reopened")]
+    );
 }
 
 #[tokio::test]
@@ -385,4 +391,87 @@ async fn a_merged_event_has_no_close_reason_or_intent_as_github_gives_it() {
     };
     assert_eq!(keys("merged"), (None, None));
     assert_eq!(keys("closed"), (Some(Value::Null), Some(Value::Null)));
+}
+
+#[tokio::test]
+async fn a_pushed_commit_that_names_an_issue_without_closing_it_records_referenced_once() {
+    // Given two open issues, and a branch at main
+    let server = TestServer::builder()
+        .fixture()
+        .frame(hubdouble_api::register_all)
+        .start()
+        .await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let (named, named_path) = open_issue(&alice, PUBLIC).await;
+    let (fixed, fixed_path) = open_issue(&alice, PUBLIC).await;
+    let base = head(&server, MAIN);
+    checked(
+        &alice
+            .post(
+                &format!("{PUBLIC}/git/refs"),
+                &json!({"ref": "refs/heads/topic", "sha": base}),
+            )
+            .await,
+        StatusCode::CREATED,
+    );
+    // When a commit that names one issue twice and fixes the other goes to the branch, and
+    // then main moves to it
+    let named_twice = commit(
+        &server,
+        base,
+        &format!("Touch #{named} (see #{named}), fixes #{fixed}"),
+    );
+    push(&server, "refs/heads/topic", base, named_twice);
+    push(&server, MAIN, base, named_twice);
+    // Then the named issue has one referenced event at the commit, by the pusher
+    let events = checked(
+        &alice.get(&format!("{named_path}/events")).await,
+        StatusCode::OK,
+    );
+    let referenced: Vec<&Value> = events
+        .as_array()
+        .map_or_default(|a| a.iter().filter(|e| e["event"] == "referenced").collect());
+    assert_eq!(referenced.len(), 1, "{events}");
+    let event = referenced[0];
+    let mut keys: Vec<&String> = event.as_object().map_or_default(|o| o.keys().collect());
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "actor",
+            "commit_id",
+            "commit_url",
+            "created_at",
+            "event",
+            "id",
+            "node_id",
+            "performed_via_github_app",
+            "url"
+        ]
+    );
+    assert!(
+        event["node_id"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("REFE_")),
+        "{event}"
+    );
+    assert_eq!(event["actor"]["login"], "alice");
+    assert_eq!(event["commit_id"], json!(named_twice));
+    assert_eq!(
+        event["commit_url"],
+        format!("{}/{PUBLIC}/commits/{named_twice}", server.base)
+    );
+    assert_eq!(
+        checked(&alice.get(&named_path).await, StatusCode::OK)["state"],
+        "open"
+    );
+    // And the fixed issue, which the commit closes on main, is referenced only from the branch
+    let fixed_events = checked(
+        &alice.get(&format!("{fixed_path}/events")).await,
+        StatusCode::OK,
+    );
+    let kinds: Vec<&Value> = fixed_events
+        .as_array()
+        .map_or_default(|a| a.iter().map(|e| &e["event"]).collect());
+    assert_eq!(kinds, [&json!("referenced"), &json!("closed")]);
 }

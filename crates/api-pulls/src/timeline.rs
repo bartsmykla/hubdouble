@@ -34,9 +34,20 @@ pub enum StateKind {
     ReviewRequestRemoved(Reviewer),
     ReadyForReview,
     ConvertToDraft,
-    /// A push to the head that the old head is not an ancestor of: `commit` is the new head.
+    /// A push to the head that the old head is not an ancestor of: `commit` is the new head and
+    /// `repo_id` the head repository, `None` for the repository of the pull request.
     HeadRefForcePushed {
         commit: String,
+        repo_id: Option<i64>,
+    },
+    /// The actor was `@` mentioned in the body or a comment.
+    Mentioned,
+    /// The actor subscribed to notifications, as a mention of the actor or a team does.
+    Subscribed,
+    /// A pushed commit of the repository `repo_id` names the issue without closing it.
+    Referenced {
+        commit: String,
+        repo_id: i64,
     },
 }
 
@@ -60,6 +71,9 @@ impl StateKind {
             StateKind::ReadyForReview => "ready_for_review",
             StateKind::ConvertToDraft => "convert_to_draft",
             StateKind::HeadRefForcePushed { .. } => "head_ref_force_pushed",
+            StateKind::Mentioned => "mentioned",
+            StateKind::Subscribed => "subscribed",
+            StateKind::Referenced { .. } => "referenced",
         }
     }
 
@@ -80,8 +94,35 @@ impl StateKind {
             StateKind::ReadyForReview => "RFRE",
             StateKind::ConvertToDraft => "CTDE",
             StateKind::HeadRefForcePushed { .. } => "HRFPE",
+            StateKind::Mentioned => "MEE",
+            StateKind::Subscribed => "SE",
+            StateKind::Referenced { .. } => "REFE",
         }
     }
+}
+
+/// Records the `referenced` issue event of a pushed commit of the repository `repo_id` that
+/// names `issue`, once per commit.
+///
+/// # Errors
+///
+/// A store error.
+pub fn referenced(
+    tx: &mut TxMut<'_>,
+    issue: &Issue,
+    actor: (i64, Option<i64>),
+    (repo_id, commit): (i64, String),
+    at: Timestamp,
+) -> Result<(), ApiError> {
+    let kind = StateKind::Referenced { commit, repo_id };
+    if tx
+        .table::<StateEvents>()
+        .children(issue.id)
+        .any(|e| e.kind == kind)
+    {
+        return Ok(());
+    }
+    record_at(tx, issue, actor, kind, at)
 }
 
 /// Records the `review_dismissed` issue event of a dismissal by `actor` at `at`.

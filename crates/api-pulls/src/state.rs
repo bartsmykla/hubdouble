@@ -340,6 +340,7 @@ fn update_refs(
         {
             let kind = StateKind::HeadRefForcePushed {
                 commit: after.to_string(),
+                repo_id: issue.pull.as_ref().and_then(|p| p.head.repo_id),
             };
             timeline::record_at(tx, &issue, (change.sender, None), kind, now)?;
         }

@@ -46,7 +46,11 @@ pub(crate) enum What {
         name: &'static str,
         reviewer: Reviewer,
     },
-    ForcePushed(String),
+    AtCommit {
+        name: &'static str,
+        repo_id: Option<i64>,
+        sha: String,
+    },
 }
 
 impl What {
@@ -60,11 +64,12 @@ impl What {
             What::Unassigned(_) => "unassigned",
             What::Renamed { .. } => "renamed",
             What::Merged(_) => "merged",
-            What::PullRef(name) | What::ReviewRequest { name, .. } => name,
+            What::PullRef(name)
+            | What::ReviewRequest { name, .. }
+            | What::AtCommit { name, .. } => name,
             What::ReviewDismissed { .. } => "review_dismissed",
             What::Locked(_) => "locked",
             What::Unlocked => "unlocked",
-            What::ForcePushed(_) => "head_ref_force_pushed",
         }
     }
 
@@ -78,7 +83,7 @@ impl What {
             What::Unassigned(_) => "UAE",
             What::Renamed { .. } => "RTE",
             What::Merged(_) => "ME",
-            What::PullRef(_) | What::ReviewRequest { .. } | What::ForcePushed(_) => "",
+            What::PullRef(_) | What::ReviewRequest { .. } | What::AtCommit { .. } => "",
             What::ReviewDismissed { .. } => "RDE",
             What::Locked(_) => "LOE",
             What::Unlocked => "UNLOE",
@@ -220,7 +225,16 @@ fn pull_event(e: &Arc<StateEvent>) -> IssueEvent {
                     reviewer: *reviewer,
                 }
             }
-            StateKind::HeadRefForcePushed { commit } => What::ForcePushed(commit.clone()),
+            StateKind::HeadRefForcePushed { commit, repo_id } => What::AtCommit {
+                name: e.kind.name(),
+                repo_id: *repo_id,
+                sha: commit.clone(),
+            },
+            StateKind::Referenced { commit, repo_id } => What::AtCommit {
+                name: e.kind.name(),
+                repo_id: Some(*repo_id),
+                sha: commit.clone(),
+            },
             other => What::PullRef(other.name()),
         },
         created_at: e.created_at,
@@ -250,16 +264,20 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let full = full_name(tx, &repo);
     ctx.page(&events, |e| {
         let (commit_id, commit_url) = match &e.what {
-            What::Merged(Some(sha)) | What::ForcePushed(sha) => (
+            What::Merged(Some(sha))
+            | What::AtCommit {
+                repo_id: None, sha, ..
+            } => (
                 Some(sha.clone()),
                 Some(format!("{}/repos/{full}/commits/{sha}", urls.api)),
             ),
+            What::AtCommit {
+                repo_id: Some(repo_id),
+                sha,
+                ..
+            } => (Some(sha.clone()), commit_url(tx, urls, *repo_id, sha)),
             What::CommitClosed { repo_id, sha } => {
-                let url = tx.table::<Repos>().get(*repo_id).map(|source| {
-                    let source = full_name(tx, source);
-                    format!("{}/repos/{source}/commits/{sha}", urls.api)
-                });
-                (Some(sha.to_string()), url)
+                (Some(sha.to_string()), commit_url(tx, urls, *repo_id, sha))
             }
             _ => (None, None),
         };
@@ -313,7 +331,7 @@ fn fields_of(tx: &Tx, urls: &Urls, e: &IssueEvent) -> Vec<(&'static str, Value)>
         }
         What::Reopened => vec![("state_reason", json!("reopened"))],
         What::Locked(reason) => vec![("lock_reason", json!(reason))],
-        What::Merged(_) | What::PullRef(_) | What::Unlocked | What::ForcePushed(_) => vec![],
+        What::Merged(_) | What::PullRef(_) | What::Unlocked | What::AtCommit { .. } => vec![],
         What::ReviewRequest { reviewer, .. } => vec![
             ("review_requester", json!(user(tx, urls, e.actor_id))),
             match reviewer {
@@ -336,6 +354,15 @@ fn fields_of(tx: &Tx, urls: &Urls, e: &IssueEvent) -> Vec<(&'static str, Value)>
             }),
         )],
     }
+}
+
+fn commit_url(tx: &Tx, urls: &Urls, repo_id: i64, sha: impl std::fmt::Display) -> Option<String> {
+    let repo = tx.table::<Repos>().get(repo_id)?;
+    Some(format!(
+        "{}/repos/{}/commits/{sha}",
+        urls.api,
+        full_name(tx, repo)
+    ))
 }
 
 fn team(tx: &Tx, urls: &Urls, id: i64) -> Option<r::Team> {
