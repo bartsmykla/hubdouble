@@ -289,6 +289,35 @@ async fn an_authenticated_graphql_read_answers_the_introspection_of_the_served_s
     assert_eq!(html.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
+#[tokio::test]
+async fn a_head_of_the_graphql_endpoint_answers_the_headers_of_its_read() {
+    // Given a user and an anonymous client of the GraphQL endpoint
+    let server = whole_server(&[]).await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let anonymous = GoGithub::new(&server);
+
+    // When each sends HEAD to /graphql, and the user also to /api/graphql
+    let read = alice.call(Method::GET, "graphql").await;
+    let head = alice.call(Method::HEAD, "graphql").await;
+    let api_head = alice.call(Method::HEAD, "api/graphql").await;
+    let anonymous_head = anonymous.call(Method::HEAD, "graphql").await;
+
+    // Then the user gets 200 with no body, as live GitHub answered on 2026-11-25, and the
+    // anonymous client its 403 without the body
+    for answer in [&head, &api_head] {
+        assert_eq!(answer.status, StatusCode::OK);
+        assert!(answer.body.is_empty());
+        assert_eq!(answer.header("x-ratelimit-resource"), "graphql");
+        assert_eq!(
+            answer.header("x-github-media-type"),
+            read.header("x-github-media-type")
+        );
+    }
+    assert_eq!(anonymous_head.status, StatusCode::FORBIDDEN);
+    assert!(anonymous_head.body.is_empty());
+    assert_eq!(anonymous_head.header("x-ratelimit-resource"), "graphql");
+}
+
 const LIVE_INTROSPECTION_QUERY: &str = r#"query { __typename t: __type(name: "Nope") { name } input: __type(name: "RepositoryRulesetBypassActorInput") { ...T inputFields { name } all: inputFields(includeDeprecated: true) { name isDeprecated deprecationReason defaultValue type { kind name ofType { name } } } } __schema { description subscriptionType { name } queryType { __typename kind isOneOf ofType { name } } directives { name isRepeatable onField args { name defaultValue } } } enum: __type(name: "IssueState") { enumValues(includeDeprecated: true) { name isDeprecated } kind @include(if: false) } } fragment T on __Type { name kind isOneOf specifiedByURL }"#;
 
 const LIVE_INTROSPECTION_ANSWER: &str = r#"{"data":{"__typename":"Query","t":null,"input":{"name":"RepositoryRulesetBypassActorInput","kind":"INPUT_OBJECT","isOneOf":false,"specifiedByURL":null,"inputFields":[{"name":"actorId"},{"name":"repositoryRoleDatabaseId"},{"name":"organizationAdmin"},{"name":"enterpriseOwner"},{"name":"enterpriseRoleDatabaseId"},{"name":"deployKey"},{"name":"bypassMode"}],"all":[{"name":"actorId","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"SCALAR","name":"ID","ofType":null}},{"name":"repositoryRoleDatabaseId","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"SCALAR","name":"Int","ofType":null}},{"name":"organizationAdmin","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"SCALAR","name":"Boolean","ofType":null}},{"name":"enterpriseOwner","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"SCALAR","name":"Boolean","ofType":null}},{"name":"enterpriseRole","isDeprecated":true,"deprecationReason":"Use enterpriseRoleDatabaseId.","defaultValue":null,"type":{"kind":"SCALAR","name":"Boolean","ofType":null}},{"name":"enterpriseRoleDatabaseId","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"SCALAR","name":"BigInt","ofType":null}},{"name":"deployKey","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"SCALAR","name":"Boolean","ofType":null}},{"name":"bypassMode","isDeprecated":false,"deprecationReason":null,"defaultValue":null,"type":{"kind":"NON_NULL","name":null,"ofType":{"name":"RepositoryRulesetBypassActorBypassMode"}}}]},"__schema":{"description":null,"subscriptionType":null,"queryType":{"__typename":"__Type","kind":"OBJECT","isOneOf":false,"ofType":null},"directives":[{"name":"deprecated","isRepeatable":false,"onField":false,"args":[{"name":"reason","defaultValue":"\"No longer supported\""}]},{"name":"include","isRepeatable":false,"onField":true,"args":[{"name":"if","defaultValue":null}]},{"name":"oneOf","isRepeatable":false,"onField":false,"args":[]},{"name":"skip","isRepeatable":false,"onField":true,"args":[{"name":"if","defaultValue":null}]},{"name":"specifiedBy","isRepeatable":false,"onField":false,"args":[{"name":"url","defaultValue":null}]}]},"enum":{"enumValues":[{"name":"OPEN","isDeprecated":false},{"name":"CLOSED","isDeprecated":false}]}}}"#;
@@ -298,6 +327,13 @@ const CLASSIC_INTROSPECTION_QUERY: &str = "query IntrospectionQuery { __schema {
 const AUTHENTICATED_VARY: &str =
     "Accept, Authorization, Cookie, X-GitHub-OTP,Accept-Encoding, Accept, X-Requested-With";
 const ANONYMOUS_VARY: &str = "Accept,Accept-Encoding, Accept, X-Requested-With";
+/// What live GitHub leaves out of an authenticated `304` and `412` (2026-11-25).
+const BARE_TO_A_TOKEN: [&str; 4] = [
+    "x-github-media-type",
+    "x-oauth-scopes",
+    "x-accepted-oauth-scopes",
+    "link",
+];
 const PLAIN_VARY: &str = "Accept-Encoding, Accept, X-Requested-With";
 
 fn tagged(tag: &str, extra: &[(&'static str, &'static str)]) -> HeaderMap {
@@ -361,6 +397,9 @@ async fn rest_reads_answer_githubs_cache_vary_and_etag_headers() {
     assert_eq!(again.header("vary"), AUTHENTICATED_VARY);
     assert_eq!(again.header("etag"), strong);
     assert_eq!(again.header("content-type"), "");
+    for name in BARE_TO_A_TOKEN {
+        assert!(!again.headers.contains_key(name), "{name}");
+    }
 
     // Then an anonymous read is public, and its 304 keeps the content type
     assert_eq!(
@@ -427,6 +466,7 @@ async fn a_failed_precondition_of_a_user_read_answers_412_as_github_does() {
     // When each reads it with the preconditions that live GitHub answered on 2026-11-25
     let cases = [
         (vec![("if-match", "\"other\"")], 412),
+        (vec![("if-match", "")], 412),
         (vec![("if-match", weak.as_str())], 412),
         (vec![("if-match", strong.as_str())], 200),
         (vec![("if-match", listed.as_str())], 200),
@@ -486,6 +526,15 @@ async fn a_failed_precondition_of_a_user_read_answers_412_as_github_does() {
         )
         .await;
     assert_eq!(issues.status, StatusCode::PRECONDITION_FAILED);
+    let schema = alice
+        .call_headers(Method::GET, "graphql", with(&[("if-match", "\"other\"")]))
+        .await;
+    assert_eq!(schema.status, StatusCode::PRECONDITION_FAILED);
+    for answer in [&issues, &schema] {
+        for name in BARE_TO_A_TOKEN {
+            assert!(!answer.headers.contains_key(name), "{name}");
+        }
+    }
 
     // Then an anonymous read ignores both preconditions, as GitHub's does
     for pairs in [[("if-match", "\"other\"")], [("if-unmodified-since", old)]] {

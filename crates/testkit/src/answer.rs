@@ -69,6 +69,16 @@ const EVERY_ANSWER: [&str; 7] = [
     "x-ratelimit-resource",
 ];
 
+/// What an authenticated `304` or `412` leaves out on live GitHub: `gh api -i
+/// 'repos/cli/cli/issues?per_page=1'` with its `ETag` in `If-None-Match` and with `If-Match:
+/// "other"`, and `gh api -i graphql -H 'If-Match: "other"'` (2026-11-25).
+const BARE_ON_LIVE_GITHUB: [&str; 4] = [
+    "x-github-media-type",
+    "x-oauth-scopes",
+    "x-accepted-oauth-scopes",
+    "link",
+];
+
 enum Segment {
     Literal(String),
     One,
@@ -261,7 +271,9 @@ pub fn api_path(path: &str) -> &str {
 ///   `X-RateLimit-*` headers, `X-RateLimit-Remaining` never `0`
 ///   (<https://docs.github.com/en/rest/using-the-rest-api/getting-started-with-the-rest-api#about-the-response-code-and-headers>,
 ///   <https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#checking-the-status-of-your-rate-limit>,
-///   plan section 4.7), and `Location` where the operation documents it.
+///   plan section 4.7), and `Location` where the operation documents it. An authenticated
+///   `304` or `412` has no `X-GitHub-Media-Type`, `X-OAuth-Scopes`, `X-Accepted-OAuth-Scopes`
+///   or `Link`, as live GitHub answered on 2026-11-25.
 ///   `X-GitHub-Api-Version-Selected` names the selected version unless GitHub rejects the version.
 /// - A non-JSON body answers only a documented media type or the one `Accept` asked for.
 /// - Routes outside the bundle are checked against their own docs: `/_blobs/{id}` (plan
@@ -377,9 +389,20 @@ fn check_operation(
     registered: &dyn Fn(&str) -> bool,
 ) -> Result<u16, Vec<String>> {
     let mut errors = Vec::new();
+    let bare = matches!(x.status, 304 | 412) && x.request_headers.contains_key("authorization");
     for name in EVERY_ANSWER {
-        if header(x.headers, name).is_empty() {
+        if header(x.headers, name).is_empty() && !(bare && name == "x-github-media-type") {
             errors.push(format!("{}: no {name} header", op.id));
+        }
+    }
+    if bare {
+        for name in BARE_ON_LIVE_GITHUB {
+            if x.headers.contains_key(name) {
+                errors.push(format!(
+                    "{}: {name} on an authenticated {}",
+                    op.id, x.status
+                ));
+            }
         }
     }
     if let Some(error) = version_error(x, op.id) {
@@ -463,12 +486,15 @@ fn precondition_failed(x: &Exchange<'_>, id: &str) -> Vec<String> {
     if x.method != "GET" && x.method != "HEAD" {
         errors.push(format!("{id}: 412 for a {}", x.method));
     }
-    if header(x.request_headers, "if-match").is_empty()
-        && header(x.request_headers, "if-unmodified-since").is_empty()
+    if !x.request_headers.contains_key("if-match")
+        && !x.request_headers.contains_key("if-unmodified-since")
     {
         errors.push(format!(
             "{id}: 412 for a request without If-Match or If-Unmodified-Since"
         ));
+    }
+    if header(x.request_headers, "authorization").is_empty() {
+        errors.push(format!("{id}: 412 for an anonymous read"));
     }
     if !x.body.is_empty() {
         errors.push(format!("{id}: 412 with a body"));
@@ -1019,6 +1045,71 @@ mod tests {
             ..exchange("GET", "/repos/o/r/labels", 200, &headers, b"[]")
         };
         assert!(check(&right, &yes).is_ok());
+    }
+
+    #[test]
+    fn a_412_answers_only_an_authenticated_read_with_a_failed_precondition() {
+        // Given a 412 with an empty body to a read with If-Match, with and without a token, and
+        // with an empty If-Match, which live GitHub answers 412 (2026-11-25)
+        let yes = |_: &str| true;
+        let mut headers = github_headers();
+        headers.remove("x-github-media-type");
+        let if_match = (http::header::IF_MATCH, "\"x\"".parse().unwrap());
+        let empty = (http::header::IF_MATCH, "".parse().unwrap());
+        let token = (http::header::AUTHORIZATION, "token t".parse().unwrap());
+        let authenticated = HeaderMap::from_iter([if_match.clone(), token.clone()]);
+        let empty = HeaderMap::from_iter([empty, token.clone()]);
+        let anonymous = HeaderMap::from_iter([if_match]);
+        let unconditional = HeaderMap::from_iter([token]);
+        let answer = |request_headers| Exchange {
+            request_headers,
+            ..exchange("GET", "/repos/o/r/labels", 412, &headers, b"")
+        };
+        // When each is checked
+        // Then GitHub answers an authenticated read with the header so, and no other request
+        assert!(check(&answer(&authenticated), &yes).is_ok());
+        assert!(check(&answer(&empty), &yes).is_ok());
+        assert!(check(&answer(&anonymous), &yes).is_err());
+        assert!(check(&answer(&unconditional), &yes).is_err());
+    }
+
+    #[test]
+    fn an_authenticated_304_or_412_has_no_media_type_scopes_or_link() {
+        // Given an authenticated conditional read, as live GitHub answered it on 2026-11-25
+        let yes = |_: &str| true;
+        let request_headers = HeaderMap::from_iter([
+            (http::header::IF_MATCH, "\"x\"".parse().unwrap()),
+            (http::header::IF_NONE_MATCH, "\"x\"".parse().unwrap()),
+            (http::header::AUTHORIZATION, "token t".parse().unwrap()),
+        ]);
+        for status in [304, 412] {
+            let mut bare = github_headers();
+            bare.remove("x-github-media-type");
+            // When the answer has none of the four headers, or one of them
+            let without = Exchange {
+                request_headers: &request_headers,
+                ..exchange("GET", "/repos/o/r/labels", status, &bare, b"")
+            };
+            // Then only the answer without them passes
+            assert!(check(&without, &yes).is_ok(), "{status}");
+            for (name, value) in [
+                ("x-github-media-type", "github.v3; format=json"),
+                ("x-oauth-scopes", "repo"),
+                ("x-accepted-oauth-scopes", "repo"),
+                (
+                    "link",
+                    r#"<https://api.github.com/repositories/212613049/labels?per_page=1&page=2>; rel="next""#,
+                ),
+            ] {
+                let mut with = bare.clone();
+                with.insert(name, value.parse().unwrap());
+                let answer = Exchange {
+                    request_headers: &request_headers,
+                    ..exchange("GET", "/repos/o/r/labels", status, &with, b"")
+                };
+                assert!(check(&answer, &yes).is_err(), "{status} {name}");
+            }
+        }
     }
 
     #[test]

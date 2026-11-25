@@ -422,6 +422,46 @@ async fn ask(api: &GoGithub, query: &str, n: &str, as_variable: bool) -> Value {
 }
 
 #[tokio::test]
+async fn variables_nest_255_levels_and_a_deeper_body_answers_an_empty_500() {
+    let server = server().await;
+    let api = client(&server, fixture::ALICE_TOKEN);
+    let body = |levels: usize, unused: usize| {
+        let nested = |n: usize| format!("{}1{}", "[".repeat(n), "]".repeat(n));
+        format!(
+            r#"{{"query":"{{ viewer {{ login }} }}","x":{},"variables":{{"a":{}}}}}"#,
+            nested(unused),
+            nested(levels - 1)
+        )
+    };
+    // Given variables of 255 levels, the variables object included, and a member that the
+    // body does not use nested 300 levels
+    for (levels, unused) in [(255, 0), (1, 300)] {
+        // When the body is posted
+        let answer = api
+            .call_bytes(Method::POST, "graphql", body(levels, unused).into_bytes())
+            .await;
+        // Then the query runs, as on live GitHub on 2026-11-25
+        assert_eq!(answer.status, StatusCode::OK, "{levels} {unused}");
+        assert_eq!(
+            answer.json(),
+            json!({"data":{"viewer":{"login":fixture::ALICE}}})
+        );
+    }
+    // When the variables nest 256 levels
+    let answer = api
+        .call_bytes(Method::POST, "graphql", body(256, 0).into_bytes())
+        .await;
+    // Then GitHub answers 500 with an empty JSON body and its usual headers
+    assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(answer.body.is_empty());
+    assert_eq!(
+        answer.header("content-type"),
+        "application/json; charset=utf-8"
+    );
+    assert_eq!(answer.header("x-ratelimit-resource"), "graphql");
+}
+
+#[tokio::test]
 async fn an_int_past_64_bits_keeps_its_digits() {
     // Given an issue next to the pulls, and integers past 64 bits, past 128 bits and past the
     // range of a double
@@ -661,13 +701,7 @@ async fn a_missing_node_ends_its_message_with_a_period_when_its_id_decodes() {
     let update = "mutation($id: ID!) { updateRefs(input: {repositoryId: $id, refUpdates: []}) \
                   { clientMutationId } }";
     for (id, end) in ids {
-        for (document, repository_id) in [
-            ("query($id: ID!) { node(id: $id) { id } }", false),
-            (update, true),
-        ] {
-            if repository_id && !id.starts_with(['R', 'M']) {
-                continue;
-            }
+        for document in ["query($id: ID!) { node(id: $id) { id } }", update] {
             // When the id is looked up as a node, and as the repository of updateRefs
             let answer = api.query(document, &json!({"id":id})).await.json();
 

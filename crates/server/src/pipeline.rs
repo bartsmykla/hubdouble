@@ -35,6 +35,12 @@ const ARCHIVED_WRITES: [&str; 7] = [
     "activity/unstar-repo-for-authenticated-user",
 ];
 const RATE_LIMIT: u32 = 5000;
+const WITHOUT_A_BODY_TO_A_TOKEN: [&str; 4] = [
+    "link",
+    "x-oauth-scopes",
+    "x-accepted-oauth-scopes",
+    "x-github-media-type",
+];
 const MEDIA_DOCS: &str = "https://docs.github.com/v3/media";
 const RATE_LIMIT_DOCS: &str =
     "https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting";
@@ -122,7 +128,8 @@ impl Inner {
         } else {
             &self.root_urls
         };
-        let graphql_read = parts.method == Method::GET && api_path == "/graphql";
+        let graphql_read = (parts.method == Method::GET || parts.method == Method::HEAD)
+            && (api_path == "/graphql" || parts.uri.path() == "/api/graphql");
         if (graphql || graphql_read) && self.anonymous(&parts.headers) {
             return self.graphql_rate_limited(&parts, peer);
         }
@@ -344,17 +351,28 @@ impl Inner {
         urls: &Urls,
         version: &'static str,
     ) -> HttpResponse {
-        let Some(request) = GraphqlBody::parse(body) else {
-            let e = ApiError::bad_request("Problems parsing JSON");
-            return self.finish(error_call(parts, "graphql", "graphql", version, e));
+        let request = match GraphqlBody::parse(body) {
+            Ok(request) => Some(request),
+            Err(Unread::TooDeep) => None,
+            Err(Unread::NotJson) => {
+                let e = ApiError::bad_request("Problems parsing JSON");
+                return self.finish(error_call(parts, "graphql", "graphql", version, e));
+            }
         };
-        let operation = request.operation_name.as_deref().unwrap_or("graphql");
+        let operation = request
+            .as_ref()
+            .and_then(|r| r.operation_name.as_deref())
+            .unwrap_or("graphql");
         if let Some(fault) = self.fault(parts, operation).await {
             return self.faulted(parts, "graphql", "graphql", version, fault);
         }
         let services = &self.services;
         let mut who = Who::default();
-        let variables = request.variables.unwrap_or_default();
+        let mut request = request;
+        let variables = request
+            .as_mut()
+            .and_then(|r| r.variables.take())
+            .unwrap_or_default();
         let result = catch_unwind(AssertUnwindSafe(|| {
             let actor = services.store.view(|tx| {
                 hubdouble_auth::authenticate(tx, services.clock.as_ref(), &parts.headers)
@@ -369,6 +387,10 @@ impl Inner {
             if let Some(unsupported) = unsupported_accept(&parts.headers, &[]) {
                 return Err(unsupported);
             }
+            let Some(request) = &request else {
+                return Ok(Reply::raw(hubdouble_rest::JSON, Vec::new())
+                    .status(StatusCode::INTERNAL_SERVER_ERROR));
+            };
             let response = hubdouble_gql::execute(
                 &self.gql,
                 &services.store,
@@ -470,7 +492,7 @@ impl Inner {
             set(&mut reply.headers, name, "0");
         }
         self.record(parts, "graphql", None, reply.status);
-        to_response(reply, false)
+        to_response(reply, parts.method == Method::HEAD)
     }
 
     async fn fault(&self, parts: &RequestParts, operation: &str) -> Option<Fault> {
@@ -562,6 +584,11 @@ impl Inner {
                 }
                 None => {}
             }
+            if who.authenticated && reply.status != StatusCode::OK {
+                for name in WITHOUT_A_BODY_TO_A_TOKEN {
+                    reply.headers.remove(name);
+                }
+            }
             set(&mut reply.headers, "etag", &strong);
             tag = Some(strong);
         }
@@ -641,27 +668,99 @@ struct GraphqlBody<V> {
     variables: Option<V>,
 }
 
+#[derive(Debug, PartialEq)]
+enum Unread {
+    NotJson,
+    TooDeep,
+}
+
+const MAX_VARIABLES_DEPTH: usize = 255;
+
 impl GraphqlBody<hubdouble_gql::Variables> {
-    fn parse(body: &[u8]) -> Option<Self> {
-        let read = serde_json::from_slice::<GraphqlBody<serde_json::Map<_, _>>>(body).ok();
+    fn parse(body: &[u8]) -> Result<Self, Unread> {
+        if variables_depth(body) > MAX_VARIABLES_DEPTH {
+            return Err(Unread::TooDeep);
+        }
+        let read = unbounded::<GraphqlBody<serde_json::Map<_, _>>>(body);
         if let Some(read) = read.filter(|r| {
             !r.variables
                 .as_ref()
                 .is_some_and(hubdouble_gql::Variables::may_be_wide)
         }) {
-            return Some(read.with(hubdouble_gql::Variables::from));
+            return Ok(read.with(hubdouble_gql::Variables::from));
         }
-        let raw = serde_json::from_slice::<GraphqlBody<&serde_json::value::RawValue>>(body).ok()?;
+        let raw =
+            unbounded::<GraphqlBody<&serde_json::value::RawValue>>(body).ok_or(Unread::NotJson)?;
         let variables = raw
             .variables
             .map(|v| hubdouble_gql::Variables::parse(v.get()))
             .transpose()
-            .ok()?;
-        Some(GraphqlBody {
+            .map_err(|_| Unread::NotJson)?;
+        Ok(GraphqlBody {
             query: raw.query,
             operation_name: raw.operation_name,
             variables,
         })
+    }
+}
+
+fn unbounded<'de, T: Deserialize<'de>>(body: &'de [u8]) -> Option<T> {
+    let mut de = serde_json::Deserializer::from_slice(body);
+    de.disable_recursion_limit();
+    let read = T::deserialize(&mut de).ok()?;
+    de.end().ok()?;
+    Some(read)
+}
+
+/// The nesting of the deepest top-level `variables` member of a body, its own object or array
+/// counted as level 1, found without a parse. [`GraphqlBody::parse`] reads a body without
+/// `serde_json`'s recursion limit only after this bounds the one member that it reads into
+/// nested values; it skips every other member without recursion.
+fn variables_depth(body: &[u8]) -> usize {
+    let (mut depth, mut deepest, mut i) = (0usize, 0usize, 0usize);
+    let (mut key_is_variables, mut inside) = (false, false);
+    while let Some(&byte) = body.get(i) {
+        match byte {
+            b'"' => {
+                let start = i;
+                i += 1;
+                while let Some(&c) = body.get(i) {
+                    match c {
+                        b'\\' => i += 2,
+                        b'"' => break,
+                        _ => i += 1,
+                    }
+                }
+                let is_key = body
+                    .get(i + 1..)
+                    .and_then(|rest| rest.iter().find(|c| !c.is_ascii_whitespace()))
+                    == Some(&b':');
+                if depth == 1 && is_key {
+                    key_is_variables = body.get(start..=i).is_some_and(names_variables);
+                }
+            }
+            b'{' | b'[' => {
+                depth += 1;
+                if depth == 2 {
+                    inside = key_is_variables;
+                }
+                if inside {
+                    deepest = deepest.max(depth - 1);
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    deepest
+}
+
+fn names_variables(quoted: &[u8]) -> bool {
+    if quoted.contains(&b'\\') {
+        serde_json::from_slice::<String>(quoted).is_ok_and(|key| key == "variables")
+    } else {
+        quoted == b"\"variables\""
     }
 }
 
@@ -1250,34 +1349,57 @@ mod unit {
     }
 
     #[test]
-    fn a_body_with_a_wide_int_nests_as_deep_as_serde_json_reads_a_body() {
-        for arrays in 120..=130 {
-            // Given bodies that nest `arrays` arrays in a variable, with a small or a wide int
-            let read = serde_json::from_str::<serde_json::Value>(&nested_body(arrays, "1")).is_ok();
-            for leaf in ["1", "18446744073709551616", &"9".repeat(400)] {
-                // When the body is parsed
-                let parsed = GraphqlBody::parse(nested_body(arrays, leaf).as_bytes());
-                // Then it parses exactly when serde_json reads the body
-                assert_eq!(
-                    parsed.is_some(),
-                    read,
-                    "{arrays} arrays around {}",
-                    &leaf[..1]
-                );
-            }
+    fn variables_parse_up_to_255_levels_on_both_paths() {
+        for leaf in ["1", "18446744073709551616", &"9".repeat(400)] {
+            // Given variables of 255 and 256 levels, the variables object and `a` counted
+            let (fits, deeper) = (nested_body(254, leaf), nested_body(255, leaf));
+            // When the bodies are parsed
+            let (fits, deeper) = (
+                GraphqlBody::parse(fits.as_bytes()),
+                GraphqlBody::parse(deeper.as_bytes()),
+            );
+            // Then 255 levels parse and 256 are too deep, around a small or a wide int
+            assert!(fits.is_ok(), "{}", &leaf[..1]);
+            assert_eq!(deeper.err(), Some(Unread::TooDeep), "{}", &leaf[..1]);
         }
     }
 
     #[test]
-    fn a_body_nested_far_past_the_limit_is_refused_on_both_paths() {
+    fn a_body_nested_far_past_the_limit_is_too_deep() {
         for leaf in ["1", "18446744073709551616"] {
             // Given a variable nested 100 000 arrays deep, around a small or a wide int
             let body = nested_body(100_000, leaf);
             // When the body is parsed
             let parsed = GraphqlBody::parse(body.as_bytes());
-            // Then it is refused without overflowing the stack
-            assert!(parsed.is_none(), "{leaf}");
+            // Then it is too deep, without overflowing the stack
+            assert_eq!(parsed.err(), Some(Unread::TooDeep), "{leaf}");
         }
+    }
+
+    #[test]
+    fn a_deep_member_that_the_body_does_not_use_parses() {
+        // Given a body with a member nested 100 000 levels that is not variables, and quotes,
+        // escapes and brackets in strings
+        let deep = format!("{}1{}", r#"{"v":["#.repeat(100_000), "]}".repeat(100_000));
+        let body = format!(
+            r#"{{"x":{deep},"variables2":[[[]]],"query":"q \"[{{\\\\","variables":{{"a":[1]}}}}"#
+        );
+        // When the body is parsed
+        let parsed = GraphqlBody::parse(body.as_bytes());
+        // Then it parses with its query and variables
+        let parsed = parsed.ok().map(|b| (b.query, b.variables.is_some()));
+        assert_eq!(parsed, Some((r#"q "[{\\"#.to_owned(), true)));
+    }
+
+    #[test]
+    fn an_escaped_variables_key_is_counted() {
+        // Given a variables key written with an escape, nested 256 levels
+        let body =
+            nested_body(255, "1").replacen("variables", &format!("vari{}u0061bles", '\\'), 1);
+        // When the body is parsed
+        let parsed = GraphqlBody::parse(body.as_bytes());
+        // Then it is too deep
+        assert_eq!(parsed.err(), Some(Unread::TooDeep));
     }
 
     #[test]
