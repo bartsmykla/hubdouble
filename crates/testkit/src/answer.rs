@@ -251,7 +251,9 @@ pub fn api_path(path: &str) -> &str {
 ///   `401` for invalid credentials
 ///   (<https://docs.github.com/en/rest/authentication/authenticating-to-the-rest-api>). Live
 ///   GitHub also answers `415` to an `Accept` header without a range it serves (GET reads of
-///   2026-11-24, `github/rest-api-description` issue 4427).
+///   2026-11-24, `github/rest-api-description` issue 4427), and `412` with an empty body to an
+///   authenticated `GET` whose `If-Match` or `If-Unmodified-Since` fails (2026-11-25, RFC 9110
+///   section 13.1).
 /// - Every error body has `message`, `documentation_url` and `status` as text, and on a `422`
 ///   each of `errors` has `resource`, `code`, and `field` unless the code is `custom` (plan
 ///   section 4.7, the troubleshooting page's "Validation failed").
@@ -407,6 +409,7 @@ fn check_operation(
                 errors.extend(error_body(x, op.id));
             }
         }
+        None if x.status == 412 => errors.extend(precondition_failed(x, op.id)),
         None if PROSE_REDIRECTS.contains(&x.status) => errors.extend(redirect(x, op.id)),
         None => errors.push(format!(
             "{}: {} is neither documented for the operation nor by the docs prose",
@@ -451,6 +454,24 @@ fn not_modified(x: &Exchange<'_>, id: &str) -> Vec<String> {
     }
     if !x.body.is_empty() {
         errors.push(format!("{id}: 304 with a body"));
+    }
+    errors
+}
+
+fn precondition_failed(x: &Exchange<'_>, id: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    if x.method != "GET" && x.method != "HEAD" {
+        errors.push(format!("{id}: 412 for a {}", x.method));
+    }
+    if header(x.request_headers, "if-match").is_empty()
+        && header(x.request_headers, "if-unmodified-since").is_empty()
+    {
+        errors.push(format!(
+            "{id}: 412 for a request without If-Match or If-Unmodified-Since"
+        ));
+    }
+    if !x.body.is_empty() {
+        errors.push(format!("{id}: 412 with a body"));
     }
     errors
 }

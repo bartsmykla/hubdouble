@@ -399,6 +399,104 @@ async fn rest_reads_answer_githubs_cache_vary_and_etag_headers() {
 }
 
 #[tokio::test]
+async fn a_failed_precondition_of_a_user_read_answers_412_as_github_does() {
+    // Given a user and an anonymous caller of a public repository, and its strong tag
+    let server = whole_server(&[]).await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let anonymous = GoGithub::new(&server);
+    let plain = headers(&[("accept-encoding", "identity")]);
+    let strong = alice
+        .call_headers(Method::GET, REPO, plain)
+        .await
+        .header("etag")
+        .to_owned();
+    let weak = format!("W/{strong}");
+    let listed = format!("\"other\", {strong}");
+    let (old, future) = (
+        "Mon, 01 Jan 2001 00:00:00 GMT",
+        "Fri, 01 Jan 2100 00:00:00 GMT",
+    );
+    let with = |pairs: &[(&'static str, &str)]| {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, HeaderValue::from_str(value).unwrap());
+        }
+        map
+    };
+
+    // When each reads it with the preconditions that live GitHub answered on 2026-11-25
+    let cases = [
+        (vec![("if-match", "\"other\"")], 412),
+        (vec![("if-match", weak.as_str())], 412),
+        (vec![("if-match", strong.as_str())], 200),
+        (vec![("if-match", listed.as_str())], 200),
+        (vec![("if-match", "*")], 200),
+        (vec![("if-unmodified-since", old)], 412),
+        (vec![("if-unmodified-since", future)], 200),
+        (vec![("if-unmodified-since", "garbage")], 200),
+        (
+            vec![("if-match", strong.as_str()), ("if-unmodified-since", old)],
+            412,
+        ),
+        (
+            vec![
+                ("if-match", "\"other\""),
+                ("if-none-match", strong.as_str()),
+            ],
+            304,
+        ),
+        (
+            vec![
+                ("if-unmodified-since", old),
+                ("if-none-match", strong.as_str()),
+            ],
+            304,
+        ),
+        (
+            vec![("if-unmodified-since", old), ("if-modified-since", future)],
+            304,
+        ),
+        (
+            vec![("if-match", "\"other\""), ("if-modified-since", future)],
+            412,
+        ),
+    ];
+    for (pairs, status) in cases {
+        let answer = alice.call_headers(Method::GET, REPO, with(&pairs)).await;
+        // Then each answers as GitHub did
+        assert_eq!(answer.status.as_u16(), status, "{pairs:?}");
+        if status == 412 {
+            // Then a 412 has no body, an HTML type, the strong tag and a user's cache headers
+            assert!(answer.body.is_empty(), "{pairs:?}");
+            assert_eq!(answer.header("content-type"), "text/html;charset=utf-8");
+            assert_eq!(answer.header("etag"), strong);
+            assert_ne!(answer.header("last-modified"), "");
+            assert_eq!(
+                answer.header("cache-control"),
+                "private, max-age=60, s-maxage=60"
+            );
+            assert_eq!(answer.header("vary"), AUTHENTICATED_VARY);
+        }
+    }
+    let issues = alice
+        .call_headers(
+            Method::GET,
+            &format!("{REPO}/issues"),
+            with(&[("if-match", "\"other\"")]),
+        )
+        .await;
+    assert_eq!(issues.status, StatusCode::PRECONDITION_FAILED);
+
+    // Then an anonymous read ignores both preconditions, as GitHub's does
+    for pairs in [[("if-match", "\"other\"")], [("if-unmodified-since", old)]] {
+        let answer = anonymous
+            .call_headers(Method::GET, REPO, with(&pairs))
+            .await;
+        assert_eq!(answer.status, StatusCode::OK, "{pairs:?}");
+    }
+}
+
+#[tokio::test]
 async fn rest_reads_answer_last_modified_and_if_modified_since_as_github_does() {
     // Given a user of a seeded repository
     let server = whole_server(&[]).await;

@@ -544,12 +544,23 @@ impl Inner {
                 Some(t) => t.trim_start_matches("W/").to_owned(),
                 None => etag(&media, &reply.body),
             };
-            if not_modified(&parts.headers, reply.modified, &strong) {
-                reply.status = StatusCode::NOT_MODIFIED;
-                reply.body = Bytes::new();
-                if who.authenticated {
-                    reply.headers.remove(header::CONTENT_TYPE);
+            match precondition(&parts.headers, reply.modified, &strong, who.authenticated) {
+                Some(StatusCode::NOT_MODIFIED) => {
+                    reply.status = StatusCode::NOT_MODIFIED;
+                    reply.body = Bytes::new();
+                    if who.authenticated {
+                        reply.headers.remove(header::CONTENT_TYPE);
+                    }
                 }
+                Some(status) => {
+                    reply.status = status;
+                    reply.body = Bytes::new();
+                    reply.headers.insert(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("text/html;charset=utf-8"),
+                    );
+                }
+                None => {}
             }
             set(&mut reply.headers, "etag", &strong);
             tag = Some(strong);
@@ -1045,7 +1056,10 @@ const UNCOMPRESSED: [&str; 1] = ["repos/get-content"];
 const GZIP_MIN_BYTES: usize = 20;
 
 fn cache_headers(reply: &mut Reply, operation_id: &str, read: bool, authenticated: bool) {
-    let cached = reply.status == StatusCode::OK || reply.status == StatusCode::NOT_MODIFIED;
+    let cached = matches!(
+        reply.status,
+        StatusCode::OK | StatusCode::NOT_MODIFIED | StatusCode::PRECONDITION_FAILED
+    );
     let vary = if read && cached {
         let spaced = SPACED_VARY.contains(&operation_id);
         if !reply.headers.contains_key(header::CACHE_CONTROL) {
@@ -1144,17 +1158,48 @@ fn if_none_match(headers: &HeaderMap, tag: &str) -> bool {
         .any(|t| t.trim() == "*" || strip(t) == tag)
 }
 
-fn not_modified(request: &HeaderMap, modified: Option<Timestamp>, tag: &str) -> bool {
-    if request.contains_key(header::IF_NONE_MATCH) {
-        return if_none_match(request, tag);
+fn if_match(headers: &HeaderMap, tag: &str) -> bool {
+    headers
+        .get_all(header::IF_MATCH)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|t| t.trim() == "*" || t.trim() == tag)
+}
+
+fn date_header(request: &HeaderMap, name: HeaderName) -> Option<Timestamp> {
+    request
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| Timestamp::parse_http_date(v).ok())
+}
+
+fn precondition(
+    request: &HeaderMap,
+    modified: Option<Timestamp>,
+    tag: &str,
+    authenticated: bool,
+) -> Option<StatusCode> {
+    let has_none_match = request.contains_key(header::IF_NONE_MATCH);
+    if has_none_match && if_none_match(request, tag) {
+        return Some(StatusCode::NOT_MODIFIED);
     }
-    modified.is_some_and(|modified| {
-        request
-            .get(header::IF_MODIFIED_SINCE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| Timestamp::parse_http_date(v).ok())
-            .is_some_and(|since| modified <= since)
-    })
+    if authenticated && request.contains_key(header::IF_MATCH) && !if_match(request, tag) {
+        return Some(StatusCode::PRECONDITION_FAILED);
+    }
+    if !has_none_match
+        && let Some(modified) = modified
+        && date_header(request, header::IF_MODIFIED_SINCE).is_some_and(|since| modified <= since)
+    {
+        return Some(StatusCode::NOT_MODIFIED);
+    }
+    if authenticated
+        && let Some(modified) = modified
+        && date_header(request, header::IF_UNMODIFIED_SINCE).is_some_and(|since| modified > since)
+    {
+        return Some(StatusCode::PRECONDITION_FAILED);
+    }
+    None
 }
 
 fn set(headers: &mut HeaderMap, name: &'static str, value: &str) {
