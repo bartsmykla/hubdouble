@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 flate2.workspace = true
 foldhash.workspace = true
+git2.workspace = true
 gix-actor.workspace = true
 gix-hash = { workspace = true, features = ["sha1"] }
 gix-object = { workspace = true, features = ["sha1"] }

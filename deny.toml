@@ -29,6 +29,14 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
+exceptions = [
+    { allow = ["GPL-2.0-only WITH GCC-exception-2.0"], crate = "libgit2-sys" },
+]
+
+[[licenses.clarify]]
+crate = "libgit2-sys"
+expression = "(MIT OR Apache-2.0) AND GPL-2.0-only WITH GCC-exception-2.0"
+license-files = []
 
 [licenses.private]
 ignore = true

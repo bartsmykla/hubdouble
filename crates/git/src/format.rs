@@ -1,8 +1,11 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::sync::Arc;
 
+use flate2::read::ZlibDecoder;
 use flate2::{Compress, Compression, FlushCompress, Status};
+use git2::{DiffBinary, DiffBinaryFile, DiffBinaryKind, DiffDelta, DiffOptions, Repository};
 use hubdouble_model::civil_from_days;
 
 use crate::contract::{Commit, EntryMode, GitError, ObjectId, Signature};
@@ -179,10 +182,12 @@ impl File {
                 .map_or_else(|| "/dev/null".to_owned(), |s| quote(prefix, &s.path))
         };
         if self.binary && binary_patch {
-            out.push_str("GIT binary patch\n");
             let empty: &[u8] = &[];
-            literal(out, self.new.as_ref().map_or(empty, |s| &s.data));
-            literal(out, self.old.as_ref().map_or(empty, |s| &s.data));
+            binary_body(
+                out,
+                self.old.as_ref().map_or(empty, |s| &s.data),
+                self.new.as_ref().map_or(empty, |s| &s.data),
+            );
         } else if self.binary {
             let _ = writeln!(
                 out,
@@ -475,9 +480,67 @@ pub(crate) fn diff_text(files: &[File], abbrev: usize, binary_patch: bool) -> St
     out
 }
 
-fn literal(out: &mut String, data: &[u8]) {
-    let _ = writeln!(out, "literal {}", data.len());
-    for chunk in deflated(data).chunks(BINARY_LINE) {
+fn binary_body(out: &mut String, old: &[u8], new: &[u8]) {
+    out.push_str("GIT binary patch\n");
+    let (forward, reverse) = if old.is_empty() || new.is_empty() {
+        (None, None)
+    } else {
+        libgit2_deltas(old, new).unwrap_or_default()
+    };
+    side(out, new, forward);
+    side(out, old, reverse);
+}
+
+fn side(out: &mut String, target: &[u8], delta: Option<Vec<u8>>) {
+    let literal = deflated(target);
+    match delta.map(|d| (d.len(), deflated(&d))) {
+        Some((len, z)) if z.len() < literal.len() => block(out, "delta", len, &z),
+        _ => block(out, "literal", target.len(), &literal),
+    }
+}
+
+type Deltas = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+fn libgit2_deltas(old: &[u8], new: &[u8]) -> Option<Deltas> {
+    let odb = git2::Odb::new().ok()?;
+    odb.add_new_mempack_backend(1).ok()?;
+    let repo = Repository::from_odb(odb).ok()?;
+    let a = repo.find_blob(repo.blob(old).ok()?).ok()?;
+    let b = repo.find_blob(repo.blob(new).ok()?).ok()?;
+    let mut opts = DiffOptions::new();
+    opts.show_binary(true).force_binary(true);
+    let mut found = None;
+    let mut on_binary = |_: DiffDelta<'_>, binary: DiffBinary<'_>| {
+        found = Some((delta(&binary.new_file()), delta(&binary.old_file())));
+        true
+    };
+    repo.diff_blobs(
+        Some(&a),
+        None,
+        Some(&b),
+        None,
+        Some(&mut opts),
+        None,
+        Some(&mut on_binary),
+        None,
+        None,
+    )
+    .ok()?;
+    found
+}
+
+fn delta(file: &DiffBinaryFile<'_>) -> Option<Vec<u8>> {
+    if !matches!(file.kind(), DiffBinaryKind::Delta) {
+        return None;
+    }
+    let mut raw = Vec::with_capacity(file.inflated_len());
+    ZlibDecoder::new(file.data()).read_to_end(&mut raw).ok()?;
+    Some(raw)
+}
+
+fn block(out: &mut String, kind: &str, len: usize, deflated: &[u8]) {
+    let _ = writeln!(out, "{kind} {len}");
+    for chunk in deflated.chunks(BINARY_LINE) {
         let n = u8::try_from(chunk.len()).unwrap_or(0);
         out.push(char::from(if n <= 26 {
             b'A' + n - 1
@@ -742,27 +805,49 @@ mod tests {
         out
     }
 
+    const CODICON_OLD: &[u8] =
+        include_bytes!("../testdata/vscode-codicons-45fc3f549ceb-codicon-old.ttf");
+    const CODICON_NEW: &[u8] =
+        include_bytes!("../testdata/vscode-codicons-45fc3f549ceb-codicon-new.ttf");
+    const LIVE_CODICON: &str =
+        include_str!("../testdata/vscode-codicons-45fc3f549ceb-codicon.patch");
+
     #[test]
-    fn a_literal_writes_the_bytes_live_github_writes() {
-        // Given both sides of topics/git/git.png in github/explore 9d47da0, as the live
-        // patch carries them: zlib 1.2.12 at level 1 streams of 9007 and 11761 bytes
+    fn a_binary_patch_writes_the_literals_live_github_writes() {
+        // Given both sides of topics/git/git.png in github/explore 9d47da0, which the live
+        // patch carries as literals: zlib 1.2.12 level 1 streams of 9007 and 11761 bytes
         let body = LIVE_PNG.strip_prefix("GIT binary patch\n").unwrap();
-        let blocks: Vec<&str> = body.split_terminator("\n\n").collect();
-        assert_eq!(blocks.len(), 2);
-        for block in blocks {
-            let lines: Vec<&str> = block.lines().skip(1).collect();
-            let mut data = Vec::new();
-            flate2::read::ZlibDecoder::new(base85_lines(&lines).as_slice())
-                .read_to_end(&mut data)
-                .unwrap();
+        let sides: Vec<Vec<u8>> = body
+            .split_terminator("\n\n")
+            .map(|block| {
+                let lines: Vec<&str> = block.lines().skip(1).collect();
+                let mut data = Vec::new();
+                ZlibDecoder::new(base85_lines(&lines).as_slice())
+                    .read_to_end(&mut data)
+                    .unwrap();
+                data
+            })
+            .collect();
+        assert_eq!(sides.len(), 2);
 
-            // When hubdouble writes the side as a literal
-            let mut out = String::new();
-            literal(&mut out, &data);
+        // When hubdouble writes the binary patch of the change
+        let mut out = String::new();
+        binary_body(&mut out, &sides[1], &sides[0]);
 
-            // Then it writes the live lines byte for byte
-            assert_eq!(out, format!("{block}\n\n"));
-        }
+        // Then it writes the live lines byte for byte
+        assert_eq!(out, LIVE_PNG);
+    }
+
+    #[test]
+    fn a_binary_patch_writes_the_deltas_live_github_writes() {
+        // Given dist/codicon.ttf in microsoft/vscode-codicons 45fc3f549ceb, a change that
+        // live GitHub wrote as delta 638 and delta 642
+        // When hubdouble writes the binary patch of the change
+        let mut out = String::new();
+        binary_body(&mut out, CODICON_OLD, CODICON_NEW);
+
+        // Then it writes the live lines byte for byte
+        assert_eq!(out, LIVE_CODICON);
     }
 
     #[test]
