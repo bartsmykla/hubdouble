@@ -666,9 +666,9 @@ pub(crate) fn merge_pull(
             } else {
                 merging::rebase(tx, git, (repo.id, merger), (base, head))?
             };
+            state::merged_as(tx, git, issue.id, commit, sender)?;
             let name = format!("refs/heads/{}", p.base.ref_name);
             git.update_ref(tx, repo.id, sender, &name, Some(base), Some(commit), false)?;
-            state::merged_as(tx, git, issue.id, commit, sender)?;
             commit
         }
     };

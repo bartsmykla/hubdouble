@@ -916,6 +916,31 @@ async fn every_branch_and_tag_write_moves_pushed_at_and_leaves_updated_at() {
     assert_eq!(read["data"]["repository"]["pushedAt"], now, "{read}");
 }
 
+#[tokio::test]
+async fn a_pull_request_merge_of_each_method_is_a_pr_merge_activity() {
+    for method in ["merge", "squash", "rebase"] {
+        // Given pull request 1 from feature to main
+        let server = server_with_pull(&[computed_at_once()]).await;
+        let alice = client(&server, ALICE_TOKEN);
+        // When alice merges it with this method
+        let merged = alice
+            .call_json(
+                Method::PUT,
+                &format!("{PULL}/merge"),
+                &json!({"merge_method": method}),
+            )
+            .await;
+        assert_eq!(merged.status, StatusCode::OK, "{method}: {}", merged.json());
+        // Then the activity of main names the move to the merge as pr_merge
+        let activity = alice
+            .get(&format!("{REPO}/activity?ref=main&per_page=1"))
+            .await
+            .json();
+        assert_eq!(activity[0]["activity_type"], "pr_merge", "{method}");
+        assert_eq!(activity[0]["after"], merged.json()["sha"], "{method}");
+    }
+}
+
 fn owners_rule() -> Value {
     let mut rule = reviews_rule(0, false, false);
     rule["parameters"]["require_code_owner_review"] = json!(true);
