@@ -866,6 +866,32 @@ mod tests {
         assert_eq!(out, LIVE_CODICON);
     }
 
+    const BETWEEN_CAPS_OLD: &[u8] = include_bytes!("../testdata/delta-between-caps-old.bin");
+    const BETWEEN_CAPS_NEW: &[u8] = include_bytes!("../testdata/delta-between-caps-new.bin");
+    const GIT_BETWEEN_CAPS: &str = include_str!("../testdata/delta-between-caps-git.patch");
+
+    #[test]
+    fn a_delta_between_the_libgit2_and_git_caps_is_written_as_a_literal() {
+        // Given a pair whose forward delta `git diff --binary` writes, with a raw size past
+        // the new side deflated at level 6, libgit2's cap, and below it at level 1, git's cap
+        let git_side = GIT_BETWEEN_CAPS.lines().nth(1).unwrap();
+        let raw: usize = git_side.strip_prefix("delta ").unwrap().parse().unwrap();
+        let deflated_at = |level| {
+            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), Compression::new(level));
+            std::io::Write::write_all(&mut z, BETWEEN_CAPS_NEW).unwrap();
+            z.finish().unwrap().len()
+        };
+        assert!(deflated_at(6) < raw && raw < deflated_at(1), "{raw}");
+
+        // When hubdouble writes the binary patch of the change
+        let mut out = String::new();
+        binary_body(&mut out, BETWEEN_CAPS_OLD, BETWEEN_CAPS_NEW).unwrap();
+
+        // Then the forward side is a literal, because libgit2 makes no delta past its cap
+        let literal = format!("literal {}", BETWEEN_CAPS_NEW.len());
+        assert_eq!(out.lines().nth(1), Some(literal.as_str()));
+    }
+
     #[test]
     fn a_long_subject_folds_at_78_columns() {
         let mut out = String::from("Subject: [PATCH] ");
