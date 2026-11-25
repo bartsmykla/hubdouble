@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 
 use super::{Exec, QUERY};
 use crate::contract::{Ctx, ErrorType, Obj, Registry, Request, Response, ResponseError};
+use crate::data::Data;
 use crate::request_errors::locations;
 
 pub(crate) fn execute(
@@ -81,7 +82,7 @@ pub(crate) fn execute(
         m
     });
     Ok(Response {
-        data: (!ex.omit_data).then(|| data.map_or(Value::Null, Value::Object)),
+        data: (!ex.omit_data).then(|| data.map_or(Data::NULL, Data::Object)),
         errors: ex.errors,
         extensions,
     })

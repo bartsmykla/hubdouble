@@ -15,10 +15,6 @@ use crate::selection::included;
 const MAX_DEPTH: usize = 25;
 const MAX_NODES: usize = 500_000;
 
-#[expect(
-    clippy::result_large_err,
-    reason = "the error is the response error the request answers at once, built once per request"
-)]
 pub(crate) fn check(
     doc: &ExecutableDocument,
     op: &Operation,

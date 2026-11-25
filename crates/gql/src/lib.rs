@@ -1,6 +1,7 @@
 mod answer;
 mod connection;
 mod contract;
+mod data;
 mod exec;
 #[cfg(test)]
 mod introspection;
@@ -19,5 +20,6 @@ mod validate;
 
 pub use answer::AnswerError;
 pub use contract::*;
+pub use data::Data;
 pub use pin::schema_sdl;
 pub use schema::Schema;

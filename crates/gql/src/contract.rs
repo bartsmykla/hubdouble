@@ -461,7 +461,7 @@ pub struct ResponseError {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Response {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
+    pub data: Option<crate::Data>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<ResponseError>,
     #[serde(skip_serializing_if = "Option::is_none")]

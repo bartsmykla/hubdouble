@@ -19,6 +19,7 @@ use crate::contract::{
     Args, Ctx, Edge, ErrorType, GqlError, MutCtx, Obj, PageInfo, Registry, Request, Resolved,
     ResponseError,
 };
+use crate::data::Data;
 use crate::request_errors::locations;
 use crate::selection::included;
 
@@ -79,6 +80,7 @@ enum Out<'v> {
 }
 
 type Fields<'d> = [&'d Node<Field>];
+type Object = Vec<(String, Data)>;
 type Groups<'d> = IndexMap<&'d str, Vec<&'d Node<Field>>>;
 
 struct Exec<'r> {
@@ -95,12 +97,7 @@ impl<'r> Exec<'r> {
         &self.registry.schema.inner
     }
 
-    fn root(
-        &mut self,
-        cx: &Ctx<'_>,
-        root: &Obj,
-        set: &'r SelectionSet,
-    ) -> Result<Map<String, Value>, Null> {
+    fn root(&mut self, cx: &Ctx<'_>, root: &Obj, set: &'r SelectionSet) -> Result<Object, Null> {
         let mut groups = Groups::default();
         self.collect(root.type_name, set, &mut groups, &mut Vec::new());
         self.set(cx, Parent::Obj(root), root.type_name, &groups, None)
@@ -113,10 +110,10 @@ impl<'r> Exec<'r> {
         actor: &Actor,
         request: &Request<'_>,
         set: &'r SelectionSet,
-    ) -> Result<Map<String, Value>, Null> {
+    ) -> Result<Object, Null> {
         let mut groups = Groups::default();
         self.collect(MUTATION, set, &mut groups, &mut Vec::new());
-        let mut map = Map::new();
+        let mut map = Vec::with_capacity(groups.len());
         let mut nulled = false;
         for (key, fields) in &groups {
             let path = Path {
@@ -124,9 +121,7 @@ impl<'r> Exec<'r> {
                 seg: Seg::Key(key),
             };
             match self.mutation(store, git, actor, request, fields, &path) {
-                Ok(v) => {
-                    map.insert((*key).to_owned(), v);
-                }
+                Ok(v) => map.push(((*key).to_owned(), v)),
                 Err(Null) => nulled = true,
             }
         }
@@ -141,11 +136,11 @@ impl<'r> Exec<'r> {
         request: &Request<'_>,
         fields: &Fields<'r>,
         path: &Path<'_>,
-    ) -> Result<Value, Null> {
+    ) -> Result<Data, Null> {
         let f = fields[0];
         let name = f.name.as_str();
         if name == "__typename" {
-            return Ok(Value::String(MUTATION.to_owned()));
+            return Ok(Data::Leaf(Value::String(MUTATION.to_owned())));
         }
         let Ok(def) = self.schema().type_field(MUTATION, name) else {
             self.error(
@@ -246,8 +241,8 @@ impl<'r> Exec<'r> {
         type_name: &str,
         groups: &Groups<'r>,
         path: Option<&Path<'_>>,
-    ) -> Result<Map<String, Value>, Null> {
-        let mut map = Map::new();
+    ) -> Result<Object, Null> {
+        let mut map = Vec::with_capacity(groups.len());
         let mut serde = None;
         let mut nulled = false;
         for (key, fields) in groups {
@@ -257,9 +252,7 @@ impl<'r> Exec<'r> {
             };
             let errors_before = self.errors.len();
             match self.field(cx, parent, type_name, fields, &path, &mut serde) {
-                Ok(v) => {
-                    map.insert((*key).to_owned(), v);
-                }
+                Ok(v) => map.push(((*key).to_owned(), v)),
                 Err(Null) if matches!(parent, Parent::InvalidPageInfo(_)) => return Err(Null),
                 Err(Null) => {
                     nulled = true;
@@ -286,11 +279,11 @@ impl<'r> Exec<'r> {
         fields: &Fields<'r>,
         path: &Path<'_>,
         serde: &mut Option<Value>,
-    ) -> Result<Value, Null> {
+    ) -> Result<Data, Null> {
         let f = fields[0];
         let name = f.name.as_str();
         if name == "__typename" {
-            return Ok(Value::String(type_name.to_owned()));
+            return Ok(Data::Leaf(Value::String(type_name.to_owned())));
         }
         if type_name == QUERY && path.parent.is_none() && matches!(name, "__schema" | "__type") {
             return self.introspect(fields, path);
@@ -430,11 +423,11 @@ fn leaf(v: impl Into<Value>) -> Out<'static> {
     Out::R(Resolved::Leaf(v.into()))
 }
 
-fn nulled(ty: &Type) -> Result<Value, Null> {
+fn nulled(ty: &Type) -> Result<Data, Null> {
     if ty.is_non_null() {
         Err(Null)
     } else {
-        Ok(Value::Null)
+        Ok(Data::NULL)
     }
 }
 

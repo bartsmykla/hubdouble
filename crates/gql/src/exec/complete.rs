@@ -10,6 +10,7 @@ use serde_json::Value;
 use super::{Exec, Fields, Groups, Null, Out, Parent, Path, Seg};
 use crate::connection::{IncompletePage, PartialConnection};
 use crate::contract::{Conn, Ctx, ErrorType, GqlError, Obj, Resolved};
+use crate::data::Data;
 
 impl<'r> Exec<'r> {
     pub(super) fn is_leaf(&self, name: &str) -> bool {
@@ -27,13 +28,13 @@ impl<'r> Exec<'r> {
         out: Out<'_>,
         fields: &Fields<'r>,
         path: &Path<'_>,
-    ) -> Result<Value, Null> {
+    ) -> Result<Data, Null> {
         let v = self.complete_nullable(cx, parent_type, ty, out, fields, path);
         if !ty.is_non_null() {
-            return Ok(v.unwrap_or(Value::Null));
+            return Ok(v.unwrap_or(Data::NULL));
         }
         match v {
-            Ok(Value::Null) => {
+            Ok(d) if d.is_null() => {
                 let message = format!(
                     "Cannot return null for non-nullable field {parent_type}.{}",
                     fields[0].name
@@ -53,9 +54,9 @@ impl<'r> Exec<'r> {
         out: Out<'_>,
         fields: &Fields<'r>,
         path: &Path<'_>,
-    ) -> Result<Value, Null> {
+    ) -> Result<Data, Null> {
         if matches!(out, Out::R(Resolved::Null | Resolved::Leaf(Value::Null))) {
-            return Ok(Value::Null);
+            return Ok(Data::NULL);
         }
         if let Type::List(item) | Type::NonNullList(item) = ty {
             let items: Vec<Out<'_>> = match out {
@@ -82,13 +83,13 @@ impl<'r> Exec<'r> {
             return if nulled {
                 Err(Null)
             } else {
-                Ok(Value::Array(list))
+                Ok(Data::List(list))
             };
         }
         let named = ty.inner_named_type().as_str();
         if self.is_leaf(named) {
             return match out {
-                Out::R(Resolved::Leaf(v)) => Ok(v),
+                Out::R(Resolved::Leaf(v)) => Ok(Data::Leaf(v)),
                 _ => self.internal("a scalar field resolved to an object", fields, path),
             };
         }
@@ -129,7 +130,7 @@ impl<'r> Exec<'r> {
         type_name: &str,
         fields: &Fields<'r>,
         path: &Path<'_>,
-    ) -> Result<Value, Null> {
+    ) -> Result<Data, Null> {
         if matches!(parent, Parent::Unpaged(_)) {
             let mut visited = HashSet::new();
             if fields
@@ -149,7 +150,7 @@ impl<'r> Exec<'r> {
             self.collect(type_name, &f.selection_set, &mut groups, &mut visited);
         }
         self.set(cx, parent, type_name, &groups, Some(path))
-            .map(Value::Object)
+            .map(Data::Object)
     }
 
     fn selects_page_fields(&self, set: &'r SelectionSet, visited: &mut HashSet<&'r str>) -> bool {
@@ -209,7 +210,7 @@ impl<'r> Exec<'r> {
         message: &str,
         fields: &Fields<'r>,
         path: &Path<'_>,
-    ) -> Result<Value, Null> {
+    ) -> Result<Data, Null> {
         self.error(ErrorType::Internal, message.to_owned(), fields[0], path);
         Err(Null)
     }
