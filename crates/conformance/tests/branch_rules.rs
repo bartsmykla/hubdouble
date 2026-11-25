@@ -1412,26 +1412,31 @@ async fn a_code_owner_team_that_loses_write_access_hands_its_files_to_the_rule_b
 }
 
 #[tokio::test]
-async fn a_codeowners_file_of_three_megabytes_is_not_loaded() {
-    // Given a CODEOWNERS file of exactly 3 MiB, which is not under 3 MB, that gives every file
-    // to carol, and a main that needs code owner reviews
-    let mut file = String::from("* @carol\n");
-    while file.len() < 3 * 1024 * 1024 {
-        file.push_str("# a comment line that pads the file to the size GitHub does not load\n");
+async fn a_codeowners_file_loads_only_while_it_is_under_three_megabytes() {
+    for (size, status) in [
+        (3 * 1024 * 1024 - 1, StatusCode::METHOD_NOT_ALLOWED),
+        (3 * 1024 * 1024, StatusCode::OK),
+    ] {
+        // Given a CODEOWNERS file of one byte under 3 MiB, or of exactly 3 MiB, that gives every
+        // file to carol, and a main that needs code owner reviews
+        let mut file = String::from("* @carol\n");
+        while file.len() < size {
+            file.push_str("# a comment line that pads the file to the size of the limit\n");
+        }
+        file.truncate(size);
+        let rules = on_main(&json!([owners_rule()]));
+        let server = server_where(&[rules, computed_at_once(), pull_request()], |repo| {
+            repo["files"][".github/CODEOWNERS"] = json!(file);
+            repo["collaborators"] = json!([{"login": "bob", "permission": "write"},
+                                           {"login": "carol", "permission": "write"}]);
+        })
+        .await;
+        let alice = client(&server, ALICE_TOKEN);
+        // When alice merges pull request 1 with no review
+        let merged = merge_pull(&alice).await;
+        // Then the smaller file loads and needs carol's review, and the 3 MiB one does not load
+        assert_eq!(merged.status, status, "{size}: {}", merged.json());
     }
-    file.truncate(3 * 1024 * 1024);
-    let rules = on_main(&json!([owners_rule()]));
-    let server = server_where(&[rules, computed_at_once(), pull_request()], |repo| {
-        repo["files"][".github/CODEOWNERS"] = json!(file);
-        repo["collaborators"] = json!([{"login": "bob", "permission": "write"},
-                                       {"login": "carol", "permission": "write"}]);
-    })
-    .await;
-    let alice = client(&server, ALICE_TOKEN);
-    // When alice merges pull request 1 with no review
-    let merged = merge_pull(&alice).await;
-    // Then GitHub does not load the file, so no code owner review is needed
-    assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
 }
 
 #[tokio::test]
