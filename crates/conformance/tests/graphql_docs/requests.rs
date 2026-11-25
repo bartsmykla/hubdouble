@@ -643,30 +643,42 @@ async fn an_id_takes_an_integer_of_any_size() {
 }
 
 #[tokio::test]
-async fn a_missing_node_ends_its_message_with_a_period_only_for_a_legacy_id() {
-    // Given ids that name no node: free text, a next id and a legacy id
+async fn a_missing_node_ends_its_message_with_a_period_when_its_id_decodes() {
+    // Given ids that name no node, with the end of the message live GitHub gave each on
+    // 2026-11-25: free text, an id with bytes past its value, an unknown type, a next and a
+    // legacy repository id, and next pull request ids of another shape
     let server = server().await;
     let api = Graphql::new(client(&server, fixture::ALICE_TOKEN));
-    for (id, end) in [
+    let ids = [
         ("nope", ""),
         ("I_kwDOAAAAAAAAAAAA", ""),
+        ("ZZ_kgDO_____w", ""),
+        ("R_kgDO_____w", "."),
+        ("MDEwOlJlcG9zaXRvcnk5OTk5OTk5OTk5OQ==", "."),
         ("MDU6SXNzdWUw", "."),
-    ] {
-        // When
-        let answer = api
-            .query(
-                "query($id: ID!) { node(id: $id) { id } }",
-                &json!({"id":id}),
-            )
-            .await
-            .json();
+        ("PR_kwDOAAAAAc4AAAAB", "."),
+    ];
+    let update = "mutation($id: ID!) { updateRefs(input: {repositoryId: $id, refUpdates: []}) \
+                  { clientMutationId } }";
+    for (id, end) in ids {
+        for (document, repository_id) in [
+            ("query($id: ID!) { node(id: $id) { id } }", false),
+            (update, true),
+        ] {
+            if repository_id && !id.starts_with(['R', 'M']) {
+                continue;
+            }
+            // When the id is looked up as a node, and as the repository of updateRefs
+            let answer = api.query(document, &json!({"id":id})).await.json();
 
-        // Then
-        assert_eq!(answer["errors"][0]["type"], "NOT_FOUND", "{id}");
-        assert_eq!(
-            answer["errors"][0]["message"],
-            format!("Could not resolve to a node with the global id of '{id}'{end}"),
-        );
+            // Then both answer the same NOT_FOUND
+            assert_eq!(answer["errors"][0]["type"], "NOT_FOUND", "{id} {document}");
+            assert_eq!(
+                answer["errors"][0]["message"],
+                format!("Could not resolve to a node with the global id of '{id}'{end}"),
+                "{document}"
+            );
+        }
     }
 }
 

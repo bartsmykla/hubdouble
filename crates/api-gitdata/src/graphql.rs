@@ -6,7 +6,7 @@ use hubdouble_git::{
     SignatureNode, TagNode, TreeEntryNode, TreeNode,
 };
 use hubdouble_gql::{Args, Ctx, ErrorType, GqlError, MutCtx, Obj, Resolved, Target, connection};
-use hubdouble_model::{ApiError, Repo, node_id};
+use hubdouble_model::{ApiError, Repo};
 use hubdouble_store::Repos;
 use serde::Deserialize;
 use serde_json::json;
@@ -604,24 +604,7 @@ fn optional_oid(text: &str) -> Result<Option<ObjectId>, GqlError> {
 
 pub(crate) fn update_refs(m: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, GqlError> {
     let input: UpdateRefsInput = required(args, "input")?;
-    let legacy = node_id::decode_legacy(&input.repository_id);
-    let repo_id = node_id::entity_id(node_id::REPOSITORY, &input.repository_id)
-        .or_else(|| {
-            legacy
-                .as_ref()
-                .and_then(|(kind, id)| (kind == "Repository").then_some(*id))
-        })
-        .ok_or_else(|| {
-            GqlError::new(
-                ErrorType::NotFound,
-                format!(
-                    "Could not resolve to a node with the global id of '{}'{}",
-                    input.repository_id,
-                    if legacy.is_some() { "." } else { "" },
-                ),
-            )
-        })?;
-    let repo = loaded_repo(m.load(Target::RepoId(repo_id))?)?;
+    let repo = loaded_repo(m.load(Target::Node(&input.repository_id))?)?;
     m.authorize(&WRITE_CONTENTS, &repo)?;
     let sender = m
         .actor

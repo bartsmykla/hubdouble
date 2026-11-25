@@ -70,11 +70,12 @@ pub(crate) fn node(cx: &Ctx<'_>, id: &str) -> Result<(Resolved, Option<String>),
     };
     let nodes = &cx.registry.nodes;
     let (entry, entity, next, end) = if let Some(n) = node_id::decode(id) {
-        let [Part::Int(0), Part::Int(entity)] = n.parts[..] else {
-            return Err(missing(""));
-        };
         let entry = nodes.iter().find(|t| t.prefix == n.prefix);
-        (entry, entity, None, "")
+        let end = if entry.is_some() { "." } else { "" };
+        let [Part::Int(0), Part::Int(entity)] = n.parts[..] else {
+            return Err(missing(end));
+        };
+        (entry, entity, None, end)
     } else if let Some((type_name, entity)) = node_id::decode_legacy(id) {
         let entry: Option<&NodeType> = nodes.iter().find(|t| t.type_name == type_name);
         let next = entry.map(|t| node_id::entity(t.prefix, entity));
