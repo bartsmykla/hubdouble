@@ -1248,21 +1248,22 @@ fn owner_team(name: &str, privacy: &str, member: &str) -> Value {
 #[tokio::test]
 async fn a_code_owner_line_that_the_errors_endpoint_reports_owns_nothing() {
     for (case, file) in [
-        ("secret team", "* @acme/core\n/src/ @acme/hidden\n"),
-        ("unknown user", "* @acme/core\n/src/ @bob @nobody\n"),
+        ("secret team", "* @carol\n/src/ @acme/hidden\n"),
+        ("unknown user", "* @carol\n/src/ @bob @nobody\n"),
     ] {
-        // Given a CODEOWNERS file whose src/ line names bob through a secret team or next to
-        // an unknown user, a visible core team of carol for every other file, and pull request
-        // 1 that changes src/feature.txt
+        // Given a CODEOWNERS file whose src/ line names bob through a secret team with write
+        // access or next to an unknown user, carol for every other file, and pull request 1
+        // that changes src/feature.txt
         let extra = [
             on_main(&json!([owners_rule()])),
             computed_at_once(),
             pull_request(),
-            owner_team("Core", "closed", "carol"),
             owner_team("Hidden", "secret", "bob"),
         ];
         let server = server_where(&extra, |repo| {
             repo["files"][".github/CODEOWNERS"] = json!(file);
+            repo["collaborators"] = json!([{"login": "bob", "permission": "write"},
+                                           {"login": "carol", "permission": "write"}]);
         })
         .await;
         let alice = client(&server, ALICE_TOKEN);
@@ -1271,7 +1272,7 @@ async fn a_code_owner_line_that_the_errors_endpoint_reports_owns_nothing() {
         // When bob approves
         approve_as(&server, BOB_TOKEN).await;
         // Then the errors endpoint reports the src/ line, which GitHub skips, so the file
-        // falls to core and the merge waits for carol
+        // falls to the * line and the merge waits for carol
         let lines: Vec<&Value> = reported["errors"]
             .as_array()
             .map(|e| e.iter().map(|e| &e["line"]).collect())
