@@ -516,15 +516,6 @@ pub(crate) fn create_commit_on_branch(
         )));
     }
     let changes = input.file_changes.unwrap_or_default();
-    if changes
-        .additions
-        .iter()
-        .map(|file| &file.path)
-        .chain(changes.deletions.iter().map(|file| &file.path))
-        .any(|path| path.starts_with(".github/workflows/"))
-    {
-        m.authorize(&crate::WRITE_WORKFLOWS, &repo)?;
-    }
     let mut writes = Vec::with_capacity(changes.additions.len() + changes.deletions.len());
     for d in changes.deletions {
         writes.push(FileChange::Delete { path: d.path });
@@ -560,6 +551,13 @@ pub(crate) fn create_commit_on_branch(
             true,
         )
         .map_err(git_error)?;
+    if let Some(path) = denied_workflow(&m.tx, m.git, m.actor, (&repo, &full), Some(expected), id)?
+    {
+        return Err(GqlError::new(
+            ErrorType::Forbidden,
+            workflow_refusal(m.actor, &path),
+        ));
+    }
     refuse_violations(m, &repo, &full, (Some(expected), Some(id)))?;
     let ObjectData::Commit(commit) = m.git.object(&m.tx, repo.id, id).map_err(git_error)?.data
     else {
@@ -646,7 +644,9 @@ pub(crate) fn update_refs(m: &mut MutCtx<'_>, args: &Args) -> Result<Resolved, G
                 .resolve_ref(&m.tx, repo.id, &u.name)
                 .or_else(|_| m.git.resolve_ref(&m.tx, repo.id, "HEAD"))
                 .ok();
-            if let Some(path) = denied_workflow(&m.tx, m.git, m.actor, &repo, base, target)? {
+            if let Some(path) =
+                denied_workflow(&m.tx, m.git, m.actor, (&repo, &u.name), base, target)?
+            {
                 return Err(unprocessable(workflow_refusal(m.actor, &path)));
             }
         }

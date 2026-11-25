@@ -627,6 +627,7 @@ pub(crate) fn merge_pull(
         .is_some_and(|h| deletes_head(tx, merger, issue, h));
     let who = (sender, timeline::via_app(merger));
     let base = state::branch(git, tx, repo.id, &p.base.ref_name)?;
+    let written = format!("refs/heads/{}", p.base.ref_name);
     let (title, message) = (options.title, options.message);
     let owners = reviewing::owner_violations(tx, merger, issue)?;
     let commit = match options.method {
@@ -638,8 +639,7 @@ pub(crate) fn merge_pull(
                 let merger = (sender, options.author_email.as_deref());
                 let commit =
                     merging::merge_commit(tx, git, (repo.id, merger), (base, head), message)?;
-                let name = format!("refs/heads/{}", p.base.ref_name);
-                git.update_ref(tx, repo.id, sender, &name, Some(base), Some(commit), false)?;
+                git.update_ref(tx, repo.id, sender, &written, Some(base), Some(commit), false)?;
                 commit
             } else {
                 git.merge(tx, repo.id, sender, &p.base.ref_name, &sha, &message)
@@ -667,13 +667,12 @@ pub(crate) fn merge_pull(
                 merging::rebase(tx, git, (repo.id, merger), (base, head))?
             };
             state::merged_as(tx, git, issue.id, commit, sender)?;
-            let name = format!("refs/heads/{}", p.base.ref_name);
-            git.update_ref(tx, repo.id, sender, &name, Some(base), Some(commit), false)?;
+            git.update_ref(tx, repo.id, sender, &written, Some(base), Some(commit), false)?;
             state::emit_closed(tx, git, issue.id, sender)?;
             commit
         }
     };
-    if let Some(path) = denied_workflow(tx, git, merger, repo, Some(base), commit)? {
+    if let Some(path) = denied_workflow(tx, git, merger, (repo, &written), Some(base), commit)? {
         return Err(ApiError::new(403, workflow_refusal(merger, &path)).with_docs(MERGE_DOCS));
     }
     let violations = reviewing::merge_violations(

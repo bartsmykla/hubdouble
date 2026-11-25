@@ -133,7 +133,7 @@ pub(crate) fn create_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         return Err(GitError::RefExists.into());
     }
     let base = ctx.git().resolve_ref(ctx.tx(), repo, "HEAD").ok();
-    check_workflows(ctx, base, sha, "create-a-reference")?;
+    check_workflows(ctx, (&body.name, base), sha, "create-a-reference")?;
     check_rules(ctx, &body.name, (None, Some(sha)), "create-a-reference")?;
     let created = write_ref(ctx, body.name, None, sha, false)?;
     Reply::json(&created)?
@@ -155,7 +155,7 @@ pub(crate) fn update_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         exact_ref(ctx, &name).ok_or_else(|| ApiError::unprocessable("Reference does not exist"))?;
     let body: UpdateRef = ctx.body()?;
     let sha = ref_target(ctx, &body.sha)?;
-    check_workflows(ctx, Some(current), sha, "update-a-reference")?;
+    check_workflows(ctx, (&name, Some(current)), sha, "update-a-reference")?;
     let updated = write_ref(ctx, name.clone(), Some(current), sha, body.force)?;
     if current != sha {
         check_rules(ctx, &name, (Some(current), Some(sha)), "update-a-reference")?;
@@ -189,11 +189,12 @@ fn write_ref(
 
 fn check_workflows(
     ctx: &Ctx<'_>,
-    base: Option<ObjectId>,
+    (written, base): (&str, Option<ObjectId>),
     target: ObjectId,
     operation: &str,
 ) -> Result<(), ApiError> {
-    match denied_workflow(ctx.tx(), ctx.git(), ctx.actor(), ctx.repo()?, base, target)? {
+    let repo = ctx.repo()?;
+    match denied_workflow(ctx.tx(), ctx.git(), ctx.actor(), (repo, written), base, target)? {
         Some(path) => Err(
             ApiError::unprocessable(workflow_refusal(ctx.actor(), &path))
                 .with_docs(format!("{DOCS}#{operation}")),
@@ -216,11 +217,12 @@ pub fn workflow_refusal(actor: &Actor, path: &str) -> String {
     format!("refusing to allow {who} to create or update workflow `{path}` without {right}")
 }
 
-/// The first workflow file that moving a ref from `base` to `target` changes when `actor` may
-/// not write workflows: an App without the `workflows` permission, or a classic or OAuth token
-/// without the `workflow` scope. For such a token, as the OAuth scopes docs say, a file that a
-/// branch already holds at the same path with the same contents does not count; an App gets no
-/// such exception, as live merges by an App without the permission are refused.
+/// The first workflow file that moving the ref `written` from `base` to `target` changes when
+/// `actor` may not write workflows: an App without the `workflows` permission, or a classic or
+/// OAuth token without the `workflow` scope. For such a token, as the OAuth scopes docs say, a
+/// file that another branch already holds at the same path with the same contents does not
+/// count; `written` itself never counts, so a caller may check before or after the ref moves.
+/// An App gets no such exception, as live merges by an App without the permission are refused.
 ///
 /// # Errors
 ///
@@ -229,7 +231,7 @@ pub fn denied_workflow(
     tx: &Tx,
     git: &Git,
     actor: &Actor,
-    repo: &Arc<Repo>,
+    (repo, written): (&Arc<Repo>, &str),
     base: Option<ObjectId>,
     target: ObjectId,
 ) -> Result<Option<String>, ApiError> {
@@ -253,7 +255,7 @@ pub fn denied_workflow(
     }
     let scoped = matches!(actor, Actor::User { token, .. }
         if token.kind == TokenKind::Personal || token.app_id.is_none());
-    trees.changed_path(before, after, WORKFLOWS, scoped)
+    trees.changed_path(before, after, WORKFLOWS, scoped.then_some(written))
 }
 
 struct Trees<'a> {
@@ -287,25 +289,26 @@ impl Trees<'_> {
         }
     }
 
-    /// The first changed path under `prefix`, leaving out, when `elsewhere` holds, a file whose
-    /// new contents a branch already holds at that path.
+    /// The first changed path under `prefix`, leaving out, when `elsewhere` names the written
+    /// ref, a file whose new contents another branch already holds at that path.
     fn changed_path(
         &self,
         before: Option<ObjectId>,
         after: Option<ObjectId>,
         prefix: &str,
-        elsewhere: bool,
+        elsewhere: Option<&str>,
     ) -> Result<Option<String>, ApiError> {
         let mut changed = Vec::new();
         self.changes(before, after, prefix, &mut changed)?;
-        let tips: Vec<ObjectId> = if elsewhere {
-            self.git
+        let tips: Vec<ObjectId> = match elsewhere {
+            Some(written) => self
+                .git
                 .refs(self.tx, self.repo, "refs/heads/")
                 .into_iter()
+                .filter(|r| r.name != written)
                 .map(|r| r.target)
-                .collect()
-        } else {
-            Vec::new()
+                .collect(),
+            None => Vec::new(),
         };
         for (path, new) in changed {
             if let Some(new) = new

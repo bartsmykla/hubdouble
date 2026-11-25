@@ -413,6 +413,125 @@ async fn a_workflow_file_that_another_branch_holds_needs_no_workflow_scope() {
     checked("repos/merge", StatusCode::CREATED, &merged);
 }
 
+fn classic_tokens() -> (String, String) {
+    (format!("ghp_{:0<36}", "c1a55"), format!("ghp_{:0<36}", "c1a55f"))
+}
+
+async fn server_with_classic_tokens(plain: &str, scoped: &str) -> TestServer {
+    TestServer::builder()
+        .frame(hubdouble_api::register_all)
+        .fixture()
+        .entry(json!({"kind": "token", "user": "alice", "token": plain, "scopes": ["repo"]}))
+        .entry(json!({"kind": "token", "user": "alice", "token": scoped,
+                      "scopes": ["repo", "workflow"]}))
+        .start()
+        .await
+}
+
+#[tokio::test]
+async fn a_merge_without_the_workflow_scope_cannot_make_a_new_workflow_file() {
+    // Given branches a and b from main, written with the workflow scope, that each change
+    // another line of .github/workflows/x.yml
+    let (plain, scoped) = classic_tokens();
+    let server = server_with_classic_tokens(&plain, &scoped).await;
+    let client = GoGithub::new(&server).with_token(&plain);
+    let writer = GoGithub::new(&server).with_token(&scoped);
+    let main = branch_sha(&writer, "main").await;
+    let file = ".github/workflows/x.yml";
+    let lines = ["name: X", "on: push", "jobs: {}", "env: {}", "permissions: {}"];
+    let text = |first: &str, last: &str| {
+        format!("{first}\n{}\n{last}\n", lines[1..4].join("\n"))
+    };
+    let shared = commit_file(&writer, &main, file, &text(lines[0], lines[4])).await;
+    let moved = writer
+        .call_json(
+            Method::PATCH,
+            &format!("{GIT}/refs/heads%2Fmain"),
+            &json!({"sha": shared}),
+        )
+        .await;
+    checked("git/update-ref", StatusCode::OK, &moved);
+    for (branch, content) in [
+        ("a", text("name: A", lines[4])),
+        ("b", text(lines[0], "permissions: {contents: read}")),
+    ] {
+        let sha = commit_file(&writer, &shared, file, &content).await;
+        let made = writer
+            .post(
+                &format!("{GIT}/refs"),
+                &json!({"ref": format!("refs/heads/{branch}"), "sha": sha}),
+            )
+            .await;
+        checked("git/create-ref", StatusCode::CREATED, &made);
+    }
+    let a = branch_sha(&client, "a").await;
+    // When a token without the scope merges b into a, which writes a file no branch holds
+    let denied = client
+        .post("repos/acme/public/merges", &json!({"base": "a", "head": "b"}))
+        .await;
+    // Then GitHub refuses it with 403 and a stays
+    checked("repos/merge", StatusCode::FORBIDDEN, &denied);
+    assert_eq!(branch_sha(&client, "a").await, a);
+    // When a pull request of b into a is merged by the same token
+    let opened = client
+        .post(
+            "repos/acme/public/pulls",
+            &json!({"title": "x", "head": "b", "base": "a"}),
+        )
+        .await;
+    let number = checked("pulls/create", StatusCode::CREATED, &opened)["number"].clone();
+    let merge = format!("repos/acme/public/pulls/{number}/merge");
+    let denied = client.call_json(Method::PUT, &merge, &json!({})).await;
+    // Then it is refused with 403 too, and a stays
+    checked("pulls/merge", StatusCode::FORBIDDEN, &denied);
+    assert_eq!(branch_sha(&client, "a").await, a);
+}
+
+#[tokio::test]
+async fn create_commit_on_branch_without_the_workflow_scope_may_add_a_held_workflow_file() {
+    // Given a ci branch, written with the workflow scope, that holds
+    // .github/workflows/check.yml
+    let (plain, scoped) = classic_tokens();
+    let server = server_with_classic_tokens(&plain, &scoped).await;
+    let client = GoGithub::new(&server).with_token(&plain);
+    let writer = GoGithub::new(&server).with_token(&scoped);
+    let main = branch_sha(&writer, "main").await;
+    let ci = detached_commit(&writer, &main, ".github/workflows/check.yml").await;
+    let made = writer
+        .post(
+            &format!("{GIT}/refs"),
+            &json!({"ref": "refs/heads/ci", "sha": ci}),
+        )
+        .await;
+    checked("git/create-ref", StatusCode::CREATED, &made);
+    let input = |head: &str, contents: &str| {
+        json!({"input": {
+            "branch": {"repositoryNameWithOwner": "acme/public", "branchName": "main"},
+            "expectedHeadOid": head,
+            "message": {"headline": "Add a workflow"},
+            "fileChanges": {"additions": [
+                {"path": ".github/workflows/check.yml", "contents": contents}
+            ]}
+        }})
+    };
+    // When a token without the scope commits other contents at that path on main
+    let denied = Graphql::new(client.clone())
+        .query(DOC, &input(&main, "e30K"))
+        .await
+        .json();
+    // Then GitHub refuses it and main stays
+    assert_eq!(denied["errors"][0]["type"], "FORBIDDEN", "{denied}");
+    assert_eq!(branch_sha(&client, "main").await, main);
+    // When it commits the contents that ci holds there
+    let allowed = Graphql::new(client.clone())
+        .query(DOC, &input(&main, "bmFtZTogQ2hlY2sK"))
+        .await
+        .json();
+    // Then main moves, as the OAuth scopes docs allow
+    assert!(allowed.get("errors").is_none(), "{allowed}");
+    assert_ne!(branch_sha(&client, "main").await, main);
+}
+
 async fn branch_sha(client: &GoGithub, branch: &str) -> String {
     let answer = client.get(&format!("{GIT}/ref/heads/{branch}")).await;
     checked("git/get-ref", StatusCode::OK, &answer)["object"]["sha"]
@@ -422,11 +541,15 @@ async fn branch_sha(client: &GoGithub, branch: &str) -> String {
 }
 
 async fn detached_commit(client: &GoGithub, parent: &str, path: &str) -> String {
+    commit_file(client, parent, path, "name: Check\n").await
+}
+
+async fn commit_file(client: &GoGithub, parent: &str, path: &str, content: &str) -> String {
     let parent_commit = client.get(&format!("{GIT}/commits/{parent}")).await;
     let base = checked("git/get-commit", StatusCode::OK, &parent_commit);
     let tree = client.post(&format!("{GIT}/trees"), &json!({
         "base_tree": base["tree"]["sha"],
-        "tree": [{"path": path, "mode": "100644", "type": "blob", "content": "name: Check\n"}]
+        "tree": [{"path": path, "mode": "100644", "type": "blob", "content": content}]
     })).await;
     let tree = checked("git/create-tree", StatusCode::CREATED, &tree);
     let commit = client

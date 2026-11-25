@@ -441,7 +441,7 @@ pub(crate) fn merge(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         Err(e) => return Err(e.into()),
     };
     let (tx, git, actor, repo_row) = (ctx.tx(), ctx.git(), ctx.actor(), ctx.repo()?);
-    if let Some(path) = denied_workflow(tx, git, actor, repo_row, Some(tip), made)? {
+    if let Some(path) = denied_workflow(tx, git, actor, (repo_row, &branch), Some(tip), made)? {
         return Err(ApiError::new(403, workflow_refusal(actor, &path)).with_docs(MERGE_DOCS));
     }
     let guard = Guard {
