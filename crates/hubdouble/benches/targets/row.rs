@@ -12,7 +12,7 @@ const UNITS: [&str; 9] = [
     "req/s",
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Goal {
     Below(f64),
     Above(f64),
@@ -39,10 +39,14 @@ pub(crate) fn inventory_documents() -> std::io::Result<Vec<String>> {
     Ok(names)
 }
 
+/// One target of plan section 9: the rows that measure it, and the goal and unit each of
+/// those rows must report, so the gate judges the plan's target and not the report's.
 pub(crate) struct Section9 {
     pub(crate) target: &'static str,
     pub(crate) prefix: &'static str,
     pub(crate) suffix: &'static str,
+    pub(crate) goal: Goal,
+    pub(crate) unit: &'static str,
 }
 
 impl Section9 {
@@ -53,52 +57,83 @@ impl Section9 {
     }
 }
 
-const fn exact(target: &'static str, measure: &'static str) -> Section9 {
+const fn exact(
+    target: &'static str,
+    measure: &'static str,
+    goal: Goal,
+    unit: &'static str,
+) -> Section9 {
     Section9 {
         target,
         prefix: measure,
         suffix: "",
+        goal,
+        unit,
     }
 }
 
 pub(crate) const SECTION_9: [Section9; 11] = [
-    exact("Image size", "Image size"),
+    exact("Image size", "Image size", Goal::Below(20.0), "MB"),
     exact(
         "Start to ready, fixture seed",
         "Start to ready, fixture seed",
+        Goal::Below(200.0),
+        "ms",
     ),
-    exact("Idle memory", "Idle RSS, client seed"),
+    exact(
+        "Idle memory",
+        "Idle RSS, client seed",
+        Goal::Below(40.0),
+        "MB",
+    ),
     Section9 {
         target: "REST GET p50",
         prefix: "REST GET p50, ",
         suffix: " routes",
+        goal: Goal::Below(100.0),
+        unit: "µs",
     },
     Section9 {
         target: "REST GET p99",
         prefix: "REST GET p99, ",
         suffix: " routes",
+        goal: Goal::Below(1000.0),
+        unit: "µs",
     },
     Section9 {
         target: INVENTORY_TARGET,
         prefix: "GraphQL ",
         suffix: " p99",
+        goal: Goal::Below(3.0),
+        unit: "ms",
     },
     Section9 {
         target: "Push to a base branch with 100 open pull requests",
         prefix: "GraphQL updateRefs p99, main with ",
         suffix: " open pull requests",
+        goal: Goal::Below(3.0),
+        unit: "ms",
     },
     Section9 {
         target: "REST read of a pull request, the first after each such push",
         prefix: "REST pull request read p99, first after a push to main with ",
         suffix: " open pull requests",
+        goal: Goal::Below(1000.0),
+        unit: "µs",
     },
     exact(
         "Mixed inventory load, reads and writes",
         "Mixed inventory load, reads and writes",
+        Goal::Above(5000.0),
+        "req/s",
     ),
-    exact("Webhook enqueue", "Webhook enqueue per event"),
-    exact("Runner calibration", CALIBRATION),
+    exact(
+        "Webhook enqueue",
+        "Webhook enqueue per event",
+        Goal::Below(20.0),
+        "µs",
+    ),
+    exact("Runner calibration", CALIBRATION, Goal::Report, "µs"),
 ];
 pub(crate) const REFERENCE_CALIBRATION_US: f64 = 54.8;
 pub(crate) const REFERENCE_CPU: &str = "Intel(R) Xeon(R) 6975P-C";

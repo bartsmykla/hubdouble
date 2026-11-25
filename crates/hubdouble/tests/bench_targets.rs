@@ -59,7 +59,13 @@ fn section_9_rows(without: Option<&str>) -> Vec<Value> {
             };
             middles.into_iter().map(move |middle| {
                 let name = format!("{}{middle}{}", m.prefix, m.suffix);
-                json!({"measure": name, "goal": "report", "unit": "", "value": 1.0})
+                let mut row = Row::new(name, None, m.unit, m.goal).json();
+                row["value"] = json!(match m.goal {
+                    Goal::Below(t) => t / 2.0,
+                    Goal::Above(t) => t * 2.0,
+                    Goal::Report => 1.0,
+                });
+                row
             })
         })
         .collect()
@@ -342,6 +348,44 @@ fn the_targets_gate_needs_every_section_9_measure_in_every_report_of_each_side()
     ]
     .map(|n| n > 0);
     assert_eq!(failed, [true; 7]);
+}
+
+#[test]
+fn a_section_9_row_must_report_the_goal_and_unit_of_the_plan() {
+    // Given five paired reports with every section 9 measure, where the head's REST GET p99
+    // row reports no target, a looser target, or another unit
+    let p99 = |r: &&mut Value| {
+        r["measure"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("REST GET p99, "))
+    };
+    let judge = |edit: &dyn Fn(&mut Value)| {
+        let dir = TempDir::new().unwrap();
+        for n in 1..=5 {
+            let base = report(&[], Some(REFERENCE_CALIBRATION_US));
+            let mut head = base.clone();
+            if let Some(row) = head["rows"]
+                .as_array_mut()
+                .and_then(|rows| rows.iter_mut().find(p99))
+            {
+                edit(row);
+            }
+            write(&dir.path().join(format!("rounds/base-{n}.json")), &base);
+            write(&dir.path().join(format!("rounds/head-{n}.json")), &head);
+        }
+        compare(dir.path())
+    };
+    // When the gate judges them
+    let kept = judge(&|_| {});
+    let report_goal = judge(&|row| {
+        row["goal"] = json!("report");
+        row["target"] = Value::Null;
+    });
+    let looser = judge(&|row| row["target"] = json!(1_000_000.0));
+    let other_unit = judge(&|row| row["unit"] = json!("ms"));
+    // Then only the plan's goal and unit pass
+    assert_eq!(kept, 0);
+    assert_eq!([report_goal, looser, other_unit].map(|n| n > 0), [true; 3]);
 }
 
 #[test]

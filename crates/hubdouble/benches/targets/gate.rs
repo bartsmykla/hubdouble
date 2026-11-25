@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::row::{
     CALIBRATION, Goal, INVENTORY_TARGET, REFERENCE_CALIBRATION_US, REFERENCE_CPU, Row, SECTION_9,
-    inventory_documents, number,
+    Section9, inventory_documents, number,
 };
 
 const BUDGET: f64 = 0.20;
@@ -120,23 +120,42 @@ fn section_9(rounds: &[Round], out: &mut String) -> usize {
             return 1;
         }
     };
-    let mut checks: Vec<(String, bool, Names<'_>)> = Vec::new();
+    let mut checks: Vec<(String, &Section9, Names<'_>)> = Vec::new();
     for measure in &SECTION_9 {
-        let calibration = measure.prefix == CALIBRATION;
         if measure.target == INVENTORY_TARGET {
             for name in &documents {
                 let row = format!("{}{name}{}", measure.prefix, measure.suffix);
                 let names: Names<'_> = Box::new(move |m| m == row);
-                checks.push((format!("{INVENTORY_TARGET} {name}"), calibration, names));
+                checks.push((format!("{INVENTORY_TARGET} {name}"), measure, names));
             }
         } else {
             let names: Names<'_> = Box::new(|m| measure.names(m));
-            checks.push((measure.target.to_owned(), calibration, names));
+            checks.push((measure.target.to_owned(), measure, names));
         }
     }
-    for (target, calibration, names) in &checks {
+    let mut judged = BTreeSet::new();
+    for (target, measure, names) in &checks {
+        for row in rounds.iter().flat_map(|r| &r.head) {
+            if !names(&row.measure)
+                || (row.goal == measure.goal && row.unit == measure.unit)
+                || !judged.insert(row.measure.as_str())
+            {
+                continue;
+            }
+            failed += 1;
+            let wanted = Row::new("", None, measure.unit, measure.goal);
+            let _ = writeln!(
+                out,
+                "WRONG    section 9 {target}: {} reports target {}, the plan's is {}",
+                row.measure,
+                row.target(),
+                wanted.target()
+            );
+        }
+    }
+    for (target, measure, names) in &checks {
+        let calibration = measure.prefix == CALIBRATION;
         let held = |rows: &[Row]| rows.iter().any(|r| names(&r.measure));
-        let calibration = *calibration;
         for (side, rows) in [
             ("now", side_head as fn(&Round) -> &[Row]),
             ("main", side_base),
