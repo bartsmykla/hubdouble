@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use hubdouble_api_gitdata::branch_rules::{self, CheckResults, MergeMethod, RequiredChecks, Via};
 use hubdouble_api_gitdata::codeowners;
 use hubdouble_git::{Git, GitError, ObjectId};
@@ -20,13 +22,39 @@ pub(crate) struct MergeFacts {
 #[derive(Clone, Default, PartialEq, Eq)]
 struct Owners {
     at: Option<(ObjectId, ObjectId)>,
-    groups: Vec<Vec<String>>,
+    file: Option<Arc<str>>,
+    covering: Vec<Vec<usize>>,
 }
 
-pub(crate) fn owner_groups<'t>(tx: &'t Tx, issue: &Issue) -> &'t [Vec<String>] {
+/// The owners of each changed file, from the last rule that covers it and that names only
+/// owners who can write now, as GitHub skips a rule with an error.
+pub(crate) fn owner_groups(tx: &Tx, issue: &Issue) -> Vec<Vec<String>> {
     tx.table::<MergeStates>()
         .get(issue.id)
-        .map_or(&[], |f| f.owners.groups.as_slice())
+        .map_or_else(Vec::new, |f| groups_of(tx, issue.repo_id, &f.owners))
+}
+
+fn groups_of(tx: &Tx, repo: i64, owners: &Owners) -> Vec<Vec<String>> {
+    let (Some(text), Some(repo)) = (owners.file.as_deref(), tx.table::<Repos>().get(repo)) else {
+        return Vec::new();
+    };
+    let valid = codeowners::valid_lines(text, &codeowners::RepoOwners { tx, repo });
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    for lines in &owners.covering {
+        let Some(rule) = lines.iter().rev().find_map(|n| {
+            valid
+                .binary_search_by_key(n, |l| l.number)
+                .ok()
+                .map(|i| &valid[i])
+        }) else {
+            continue;
+        };
+        let group: Vec<String> = rule.owners.iter().map(|(_, o)| (*o).to_owned()).collect();
+        if !group.is_empty() && !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
+    groups
 }
 
 impl Entity for MergeFacts {
@@ -69,7 +97,7 @@ pub fn mergeable_state(tx: &Tx, issue: &Issue) -> &'static str {
 #[derive(Default)]
 pub(crate) struct OwnersFile {
     at: Option<(i64, ObjectId)>,
-    text: Option<String>,
+    text: Option<Arc<str>>,
 }
 
 impl OwnersFile {
@@ -79,12 +107,12 @@ impl OwnersFile {
         git: &Git,
         repo: i64,
         base: ObjectId,
-    ) -> Result<Option<&str>, ApiError> {
+    ) -> Result<Option<Arc<str>>, ApiError> {
         if self.at != Some((repo, base)) {
-            self.text = codeowners::file_at(tx, git, repo, base)?.map(|(_, text)| text);
+            self.text = codeowners::file_at(tx, git, repo, base)?.map(|(_, text)| text.into());
             self.at = Some((repo, base));
         }
-        Ok(self.text.as_deref())
+        Ok(self.text.clone())
     }
 }
 
@@ -159,28 +187,27 @@ fn owners(
     if kept.at == Some(at) {
         return Ok(kept);
     }
-    let Some(repo_row) = tx.table::<Repos>().get(repo) else {
-        return Ok(Owners::default());
-    };
-    let rules = codeowners::valid_lines(text, &codeowners::RepoOwners { tx, repo: repo_row });
+    let rules: Vec<codeowners::Line<'_>> = codeowners::lines(&text).collect();
     let paths = match git.changed_paths(tx, repo, at.0, at.1) {
         Ok(paths) => paths,
         Err(GitError::NotFound) => Vec::new(),
         Err(e) => return Err(e.into()),
     };
-    let mut groups: Vec<Vec<String>> = Vec::new();
+    let mut covering: Vec<Vec<usize>> = Vec::new();
     for path in paths {
-        let Some(owners) = codeowners::owners_of(&rules, &path).filter(|o| !o.is_empty()) else {
-            continue;
-        };
-        let group: Vec<String> = owners.iter().map(|(_, o)| (*o).to_owned()).collect();
-        if !groups.contains(&group) {
-            groups.push(group);
+        let lines: Vec<usize> = rules
+            .iter()
+            .filter(|l| codeowners::covers(l.pattern.1, &path))
+            .map(|l| l.number)
+            .collect();
+        if !lines.is_empty() && !covering.contains(&lines) {
+            covering.push(lines);
         }
     }
     Ok(Owners {
         at: Some(at),
-        groups,
+        file: Some(text),
+        covering,
     })
 }
 

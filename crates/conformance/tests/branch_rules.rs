@@ -1289,6 +1289,46 @@ async fn a_code_owner_line_that_the_errors_endpoint_reports_owns_nothing() {
 }
 
 #[tokio::test]
+async fn a_code_owner_team_that_loses_write_access_hands_its_files_to_the_rule_before() {
+    // Given a CODEOWNERS file that gives src/ to a team of bob with write access and every
+    // other file to carol, and pull request 1 that changes src/feature.txt, whose merge state
+    // was read once
+    let extra = [
+        on_main(&json!([owners_rule()])),
+        computed_at_once(),
+        pull_request(),
+        owner_team("Owners", "closed", "bob"),
+    ];
+    let server = server_where(&extra, |repo| {
+        repo["files"][".github/CODEOWNERS"] = json!("* @carol\n/src/ @acme/owners\n");
+        repo["collaborators"] = json!([{"login": "bob", "permission": "write"},
+                                       {"login": "carol", "permission": "write"}]);
+    })
+    .await;
+    let alice = client(&server, ALICE_TOKEN);
+    assert_eq!(
+        decision(&alice).await,
+        (json!("blocked"), json!("REVIEW_REQUIRED"))
+    );
+    // When the team keeps only read access and bob approves
+    let lowered = server
+        .admin(
+            Method::PUT,
+            "team/acme/owners/repos/acme/public",
+            Some(&json!({"permission": "read"})),
+        )
+        .await;
+    assert_eq!(lowered.status, StatusCode::NO_CONTENT);
+    approve_as(&server, BOB_TOKEN).await;
+    // Then the src/ rule names an owner who cannot write, so the file falls to the * rule and
+    // the merge waits for carol
+    assert_refused(&merge_pull(&alice).await, 405, Some(PULL_MERGE_DOCS), "bob");
+    approve_as(&server, fixture::CAROL_TOKEN).await;
+    let merged = merge_pull(&alice).await;
+    assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
+}
+
+#[tokio::test]
 async fn a_codeowners_file_of_three_megabytes_is_not_loaded() {
     // Given a CODEOWNERS file of exactly 3 MiB, which is not under 3 MB, that gives every file
     // to carol, and a main that needs code owner reviews
