@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use http::{Method, StatusCode};
 use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
-use hubdouble_model::Repo;
+use hubdouble_model::{Clock, Repo};
 use hubdouble_store::Repos;
 use hubdouble_testkit::fixture::{self, ALICE_ID, ALICE_TOKEN, BOB_ID, BOB_TOKEN, PUBLIC_REPO_ID};
 use hubdouble_testkit::{Answer, Delivery, GoGithub, Graphql, TestServer};
@@ -829,6 +829,91 @@ async fn a_required_check_reads_the_latest_head_and_not_an_older_test_merge() {
     // Then the merge is refused with 405, and main stays
     assert_refused(&merge_pull(&alice).await, 405, Some(PULL_MERGE_DOCS), "ci");
     assert_eq!(tip(&alice, "main").await, main);
+}
+
+#[tokio::test]
+async fn every_branch_and_tag_write_moves_pushed_at_and_leaves_updated_at() {
+    // Given acme/public with pull request 1 from feature to main
+    let server = server_with_pull(&[computed_at_once()]).await;
+    let alice = client(&server, ALICE_TOKEN);
+    let updated = alice.get(REPO).await.json()["updated_at"].clone();
+    let main = tip(&alice, "main").await;
+    let feature = tip(&alice, "feature").await;
+    let writes: Vec<(&str, Method, String, Value)> = vec![
+        (
+            "branch create",
+            Method::POST,
+            "git/refs".into(),
+            json!({"ref": "refs/heads/topic", "sha": main}),
+        ),
+        (
+            "branch update",
+            Method::PATCH,
+            "git/refs/heads/topic".into(),
+            json!({"sha": feature, "force": true}),
+        ),
+        (
+            "tag create",
+            Method::POST,
+            "git/refs".into(),
+            json!({"ref": "refs/tags/v9", "sha": main}),
+        ),
+        (
+            "branch delete",
+            Method::DELETE,
+            "git/refs/heads/topic".into(),
+            json!({}),
+        ),
+        (
+            "pull merge",
+            Method::PUT,
+            "pulls/1/merge".into(),
+            json!({"merge_method": "squash"}),
+        ),
+        (
+            "branch merge",
+            Method::POST,
+            "merges".into(),
+            json!({"base": "main", "head": "feature"}),
+        ),
+    ];
+    for (step, method, path, body) in writes {
+        // When the clock moves on and alice writes a branch or a tag
+        server.clock.advance(60);
+        let answer = alice
+            .call_json(method, &format!("{REPO}/{path}"), &body)
+            .await;
+        assert!(answer.status.is_success(), "{step}: {}", answer.json());
+        // Then pushed_at is the time of the write and updated_at stays
+        let repo = alice.get(REPO).await.json();
+        assert_eq!(repo["pushed_at"], server.clock.now().to_string(), "{step}");
+        assert_eq!(repo["updated_at"], updated, "{step}");
+    }
+    // When createCommitOnBranch writes main
+    server.clock.advance(60);
+    let answer = Graphql::new(alice.clone())
+        .query(
+            "mutation($input: CreateCommitOnBranchInput!) {createCommitOnBranch(input: $input) {commit {oid}}}",
+            &json!({"input": {"branch": {"repositoryNameWithOwner": "acme/public", "branchName": "main"},
+                "expectedHeadOid": tip(&alice, "main").await, "message": {"headline": "direct"},
+                "fileChanges": {"additions": [{"path": "x.txt", "contents": "eAo="}]}}}),
+        )
+        .await
+        .json();
+    assert_eq!(answer["errors"], Value::Null, "{answer}");
+    // Then GraphQL pushedAt and REST pushed_at are its time, and updated_at stays
+    let repo = alice.get(REPO).await.json();
+    let now = server.clock.now().to_string();
+    assert_eq!(repo["pushed_at"], now);
+    assert_eq!(repo["updated_at"], updated);
+    let read = Graphql::new(alice.clone())
+        .query(
+            "{repository(owner: \"acme\", name: \"public\") {pushedAt}}",
+            &json!({}),
+        )
+        .await
+        .json();
+    assert_eq!(read["data"]["repository"]["pushedAt"], now, "{read}");
 }
 
 fn owners_rule() -> Value {

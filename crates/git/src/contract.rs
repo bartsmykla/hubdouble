@@ -3,8 +3,8 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use hubdouble_model::{ApiError, Clock, SystemClock, Timestamp};
-use hubdouble_store::{Accounts, Store, StoreBuilder, Tx, TxMut};
+use hubdouble_model::{ApiError, Clock, Repo, SystemClock, Timestamp};
+use hubdouble_store::{Accounts, Repos, Store, StoreBuilder, Tx, TxMut};
 use parking_lot::{Mutex, RwLock};
 use serde::{Serialize, Serializer};
 
@@ -544,7 +544,8 @@ impl Git {
     /// Every ref change goes through here, and runs the subscribers in the same transaction.
     /// `sender` is the account ID of the actor. `old` is the value the caller expects, `None`
     /// meaning the ref must not exist; `new` `None` deletes the ref. Setting a ref to its
-    /// current value changes nothing.
+    /// current value changes nothing. Each change of a branch or a tag, a delete too, sets the
+    /// repository's `pushed_at` to now and leaves its `updated_at`, as a push on GitHub does.
     ///
     /// # Errors
     ///
@@ -593,6 +594,15 @@ impl Git {
             return Err(GitError::NotFastForward);
         }
         refs::set(tx, repo, name, new);
+        if (name.starts_with("refs/heads/") || name.starts_with("refs/tags/"))
+            && let Some(r) = tx.table::<Repos>().get(repo)
+        {
+            let mut r = Repo::clone(r);
+            r.pushed_at = Some(self.now());
+            tx.table_mut::<Repos>()
+                .replace(r)
+                .map_err(|e| GitError::Rejected(e.into()))?;
+        }
         let change = RefChange {
             repo_id: repo,
             sender,
