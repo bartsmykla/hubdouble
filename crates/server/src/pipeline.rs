@@ -360,7 +360,12 @@ impl Inner {
         }
         let services = &self.services;
         let mut who = Who::default();
-        let variables = request.variables.unwrap_or_default();
+        let variables = match request.variables {
+            Some(given) if hubdouble_gql::may_hold_wide_ints(&given) => {
+                exact_variables(body).unwrap_or(given)
+            }
+            given => given.unwrap_or_default(),
+        };
         let result = catch_unwind(AssertUnwindSafe(|| {
             let actor = services.store.view(|tx| {
                 hubdouble_auth::authenticate(tx, services.clock.as_ref(), &parts.headers)
@@ -636,6 +641,17 @@ struct GraphqlBody {
     #[serde(rename = "operationName")]
     operation_name: Option<String>,
     variables: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Deserialize)]
+struct RawVariables<'a> {
+    #[serde(borrow)]
+    variables: &'a serde_json::value::RawValue,
+}
+
+fn exact_variables(body: &[u8]) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let raw = serde_json::from_slice::<RawVariables<'_>>(body).ok()?;
+    hubdouble_gql::exact_variables(raw.variables).ok()
 }
 
 #[derive(Serialize)]

@@ -132,16 +132,16 @@ pub(crate) fn variables(
     Ok(coerced)
 }
 
-fn wide_int(n: &serde_json::Number) -> bool {
-    if n.is_f64() {
-        return n.as_f64().is_some_and(crate::scalar::wide_integer);
+fn wide_int(v: &Value) -> bool {
+    match v {
+        Value::Number(n) => !n.is_f64() && n.as_i64().is_none_or(|n| i32::try_from(n).is_err()),
+        v => crate::scalar::wide_digits(v).is_some(),
     }
-    n.as_i64().is_none_or(|n| i32::try_from(n).is_err())
 }
 
 fn mask_wide_ints(v: &mut Value) {
     match v {
-        Value::Number(n) if wide_int(n) => *v = Value::from(0),
+        v if wide_int(v) => *v = Value::from(0),
         Value::Array(items) => items.iter_mut().for_each(mask_wide_ints),
         Value::Object(fields) => fields.values_mut().for_each(mask_wide_ints),
         _ => {}
@@ -150,7 +150,7 @@ fn mask_wide_ints(v: &mut Value) {
 
 fn restore_wide_ints(coerced: &mut Value, given: &Value) {
     match (coerced, given) {
-        (c @ Value::Number(_), Value::Number(g)) if wide_int(g) => *c = Value::Number(g.clone()),
+        (c @ Value::Number(_), g) if wide_int(g) => *c = g.clone(),
         (Value::Array(c), Value::Array(g)) => {
             for (c, g) in c.iter_mut().zip(g) {
                 restore_wide_ints(c, g);

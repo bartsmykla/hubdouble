@@ -1,6 +1,8 @@
 use std::fmt::Write as _;
 
-use super::{Graphql, REPO, StatusCode, Value, client, fixture, json, node_id, server, success};
+use super::{
+    Graphql, Method, REPO, StatusCode, Value, client, fixture, json, node_id, server, success,
+};
 
 #[tokio::test]
 async fn rest_ids_and_legacy_ids_resolve_through_node_and_nodes() {
@@ -410,56 +412,50 @@ async fn depth_and_node_limits_apply_before_field_resolution() {
 async fn an_int_past_64_bits_keeps_its_digits() {
     // Given
     let server = server().await;
-    let api = Graphql::new(client(&server, fixture::ALICE_TOKEN));
-    for page in [
-        "first: 99999999999999999999",
-        "first: 99999999999999999999, last: 1",
-    ] {
-        // When
-        let query = format!(
-            "{{ repository(owner:\"acme\",name:\"docs\") {{ issues({page}) {{ totalCount }} }} }}"
-        );
-        let answer = api.query(&query, &Value::Null).await.json();
-
-        // Then
-        assert!(answer.get("data").is_none_or(Value::is_null), "{page}");
-        let error = &answer["errors"][0];
-        assert_eq!(error["type"], "MAX_NODE_LIMIT_EXCEEDED", "{page}");
-        assert_eq!(
-            error["message"],
-            "By the time this query traverses to the issues connection, it is requesting up to 99,999,999,999,999,999,999 possible nodes which exceeds the maximum limit of 500,000.",
-        );
-    }
+    let api = client(&server, fixture::ALICE_TOKEN);
+    let ask = async |query: &str, n: &str, as_variable: bool| {
+        let body = if as_variable {
+            format!(r#"{{"query":{},"variables":{{"n":{n}}}}}"#, json!(query))
+        } else {
+            let literal = query.replace("($n: Int!)", "").replace("$n", n);
+            format!(r#"{{"query":{}}}"#, json!(literal))
+        };
+        api.call_bytes(Method::POST, "graphql", body.into_bytes())
+            .await
+            .json()
+    };
+    let pages = [
+        "query($n: Int!) { repository(owner:\"acme\",name:\"docs\") { issues(first: $n) { totalCount } } }",
+        "query($n: Int!) { repository(owner:\"acme\",name:\"docs\") { issues(first: $n, last: 1) { totalCount } } }",
+    ];
     let lookup = "query($n: Int!) { repository(owner:\"acme\",name:\"docs\") { issue(number: $n) { title } } }";
-    let literal = |n: &str| lookup.replace("($n: Int!)", "").replace("$n", n);
-    for (query, vars, number) in [
-        (
-            literal("9223372036854775808"),
-            Value::Null,
-            "9223372036854775808",
-        ),
-        (
-            literal("99999999999999999999"),
-            Value::Null,
-            "99999999999999999999",
-        ),
-        (
-            lookup.to_owned(),
-            json!({"n": 9_223_372_036_854_775_808_u64}),
-            "9223372036854775808",
-        ),
-    ] {
-        // When
-        let answer = api.query(&query, &vars).await.json();
+    for as_variable in [false, true] {
+        for page in pages {
+            // When
+            let answer = ask(page, "99999999999999999999", as_variable).await;
 
-        // Then
-        let issue = &answer["data"]["repository"]["issue"];
-        assert_eq!(*issue, Value::Null, "{query}");
-        assert_eq!(answer["errors"][0]["type"], "NOT_FOUND", "{query}");
-        assert_eq!(
-            answer["errors"][0]["message"],
-            format!("Could not resolve to an Issue with the number of {number}."),
-        );
+            // Then
+            assert!(answer.get("data").is_none_or(Value::is_null), "{page}");
+            let error = &answer["errors"][0];
+            assert_eq!(error["type"], "MAX_NODE_LIMIT_EXCEEDED", "{page}");
+            assert_eq!(
+                error["message"],
+                "By the time this query traverses to the issues connection, it is requesting up to 99,999,999,999,999,999,999 possible nodes which exceeds the maximum limit of 500,000.",
+            );
+        }
+        for number in ["9223372036854775808", "99999999999999999999"] {
+            // When
+            let answer = ask(lookup, number, as_variable).await;
+
+            // Then
+            let issue = &answer["data"]["repository"]["issue"];
+            assert_eq!(*issue, Value::Null, "{number} {as_variable}");
+            assert_eq!(answer["errors"][0]["type"], "NOT_FOUND", "{number}");
+            assert_eq!(
+                answer["errors"][0]["message"],
+                format!("Could not resolve to an Issue with the number of {number}."),
+            );
+        }
     }
 }
 

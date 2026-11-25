@@ -139,30 +139,24 @@ impl Args {
 
     /// An `Int` argument, or `None` when it is absent or `null`. GitHub takes an integer of any
     /// size, so a value past `i64` is [`Int::Past`] with its digits, which no row holds.
-    /// A variable past 64 bits keeps the digits of the nearest double, as JSON reads it.
     ///
     /// # Errors
     ///
     /// An `UNPROCESSABLE` error when the value is not an integer.
     pub fn int(&self, name: &str) -> Result<Option<Int>, GqlError> {
         let not_int = || GqlError::new(ErrorType::Unprocessable, format!("{name} is not an Int"));
-        match self.0.get(name) {
-            None | Some(serde_json::Value::Null) => Ok(None),
-            Some(serde_json::Value::Number(n)) => match (n.as_i64(), n.as_u64(), n.as_f64()) {
-                (Some(i), _, _) => Ok(Some(Int::Fits(i))),
-                (None, Some(u), _) => Ok(Some(Int::Past(u.to_string()))),
-                (None, None, Some(f)) if crate::scalar::wide_integer(f) => {
-                    Ok(Some(Int::Past(format!("{f:.0}"))))
-                }
-                _ => Err(not_int()),
-            },
-            Some(serde_json::Value::String(digits))
-                if crate::scalar::digits(digits.strip_prefix('-').unwrap_or(digits)) =>
-            {
-                Ok(Some(Int::Past(digits.clone())))
-            }
-            Some(_) => Err(not_int()),
+        let Some(value) = self.0.get(name).filter(|v| !v.is_null()) else {
+            return Ok(None);
+        };
+        if let Some(i) = value.as_i64() {
+            return Ok(Some(Int::Fits(i)));
         }
+        value
+            .as_u64()
+            .map(|u| u.to_string())
+            .or_else(|| crate::scalar::wide_digits(value).map(str::to_owned))
+            .map(|digits| Some(Int::Past(digits)))
+            .ok_or_else(not_int)
     }
 }
 

@@ -405,7 +405,7 @@ impl<'r> Exec<'r> {
                 |_| {
                     i.as_str()
                         .parse::<u64>()
-                        .map_or_else(|_| Value::String(i.as_str().to_owned()), Value::from)
+                        .map_or_else(|_| crate::scalar::wide_int(i.as_str()), Value::from)
                 },
                 Value::from,
             ),

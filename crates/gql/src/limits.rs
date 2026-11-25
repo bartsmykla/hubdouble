@@ -193,14 +193,13 @@ impl<'a> Cost<'a> {
             let value = field.specified_argument_by_name(page)?;
             match value.as_ref() {
                 Ast::Int(n) => page_of(n.as_str()),
-                Ast::Variable(n) => match self.vars.get(n.as_str())? {
-                    Value::Number(n) => page_of(&n.as_u64().map_or_else(
-                        || n.as_f64().map_or_else(String::new, |f| format!("{f:.0}")),
-                        |n| n.to_string(),
-                    )),
-                    Value::String(digits) => page_of(digits),
-                    _ => None,
-                },
+                Ast::Variable(n) => {
+                    let value = self.vars.get(n.as_str())?;
+                    value
+                        .as_u64()
+                        .map(u128::from)
+                        .or_else(|| crate::scalar::wide_digits(value).and_then(page_of))
+                }
                 _ => None,
             }
         })

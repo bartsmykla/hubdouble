@@ -6,7 +6,7 @@ use serde_json::Value;
 pub(crate) fn matches(name: &str, value: &Value) -> bool {
     match name {
         "Boolean" => value.is_boolean(),
-        "Int" => value.is_i64() || value.is_u64() || value.as_f64().is_some_and(wide_integer),
+        "Int" => value.is_i64() || value.is_u64() || wide_digits(value).is_some(),
         "Float" => value.is_number(),
         "String" | "ID" => value.is_string(),
         "CustomPropertyValue" => {
@@ -44,10 +44,71 @@ pub(crate) fn digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Whether a JSON number that `serde_json` read as a double was an integer past 64 bits:
-/// every double that large is a whole number, and a smaller integer reads as `i64` or `u64`.
-pub(crate) fn wide_integer(f: f64) -> bool {
-    f.is_finite() && f.abs() >= 9_223_372_036_854_775_808.0
+const WIDE_INT: &str = "\0int";
+
+/// The value that stands for an integer past 64 bits, which a `serde_json::Number` cannot
+/// hold: a one-entry object whose key no request names, with the digits and sign.
+pub(crate) fn wide_int(digits: &str) -> Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert(WIDE_INT.to_owned(), Value::String(digits.to_owned()));
+    Value::Object(entry)
+}
+
+pub(crate) fn wide_digits(value: &Value) -> Option<&str> {
+    let entry = value.as_object().filter(|o| o.len() == 1)?;
+    entry.get(WIDE_INT)?.as_str()
+}
+
+/// Reads GraphQL request variables and keeps the digits of an integer past 64 bits, which
+/// `serde_json` reads as the nearest double.
+///
+/// # Errors
+///
+/// The `serde_json` error when `raw` is not a JSON object.
+pub fn exact_variables(
+    raw: &serde_json::value::RawValue,
+) -> Result<serde_json::Map<String, Value>, serde_json::Error> {
+    let fields: std::collections::BTreeMap<String, &serde_json::value::RawValue> =
+        serde_json::from_str(raw.get())?;
+    fields
+        .into_iter()
+        .map(|(name, value)| Ok((name, exact(value)?)))
+        .collect()
+}
+
+fn exact(raw: &serde_json::value::RawValue) -> Result<Value, serde_json::Error> {
+    let text = raw.get();
+    match text.as_bytes().first() {
+        Some(b'{') => Ok(Value::Object(exact_variables(raw)?)),
+        Some(b'[') => serde_json::from_str::<Vec<&serde_json::value::RawValue>>(text)?
+            .into_iter()
+            .map(exact)
+            .collect::<Result<_, _>>()
+            .map(Value::Array),
+        Some(b'-' | b'0'..=b'9')
+            if digits(text.strip_prefix('-').unwrap_or(text))
+                && text.parse::<i64>().is_err()
+                && text.parse::<u64>().is_err() =>
+        {
+            Ok(wide_int(text))
+        }
+        _ => serde_json::from_str(text),
+    }
+}
+
+/// Whether `variables` hold a number that may be an integer past 64 bits, so that
+/// [`exact_variables`] must read them again.
+#[must_use]
+pub fn may_hold_wide_ints(variables: &serde_json::Map<String, Value>) -> bool {
+    fn wide(value: &Value) -> bool {
+        match value {
+            Value::Number(n) => n.is_f64() && n.as_f64().is_some_and(|f| f.abs() >= 2f64.powi(63)),
+            Value::Array(items) => items.iter().any(wide),
+            Value::Object(fields) => fields.values().any(wide),
+            _ => false,
+        }
+    }
+    variables.values().any(wide)
 }
 
 fn date(s: &str) -> bool {
@@ -190,4 +251,35 @@ fn der_part(bytes: &[u8], tag: u8) -> Option<(&[u8], &[u8])> {
         .iter()
         .fold(0_usize, |n, b| n * 256 + usize::from(*b));
     (len >= 128).then(|| tail.split_at_checked(len)).flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use serde_json::value::RawValue;
+
+    use super::*;
+
+    #[test]
+    fn exact_variables_keep_the_digits_of_a_wide_integer_at_any_depth() {
+        // Given variables with wide integers in a list and an input object, next to a string of
+        // digits, a float and integers that fit 64 bits
+        let raw = r#"{"a": [1, -99999999999999999999], "b": {"c": 18446744073709551616},
+            "d": "99999999999999999999", "e": 1e20, "f": 18446744073709551615, "g": -5}"#;
+        let raw: Box<RawValue> = serde_json::from_str(raw).unwrap();
+
+        // When
+        let vars = exact_variables(&raw).unwrap();
+
+        // Then only the wide integers change form
+        assert_eq!(wide_digits(&vars["a"][1]), Some("-99999999999999999999"));
+        assert_eq!(wide_digits(&vars["b"]["c"]), Some("18446744073709551616"));
+        assert_eq!(vars["a"][0], json!(1));
+        assert_eq!(vars["d"], json!("99999999999999999999"));
+        assert_eq!(vars["e"], json!(1e20));
+        assert_eq!(vars["f"], json!(u64::MAX));
+        assert_eq!(vars["g"], json!(-5));
+        assert!(matches("Int", &vars["b"]["c"]));
+        assert!(!matches("Int", &vars["d"]) && !matches("Int", &vars["e"]));
+    }
 }

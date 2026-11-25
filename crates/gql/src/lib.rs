@@ -22,4 +22,5 @@ pub use answer::AnswerError;
 pub use contract::*;
 pub use data::Data;
 pub use pin::schema_sdl;
+pub use scalar::{exact_variables, may_hold_wide_ints};
 pub use schema::Schema;
