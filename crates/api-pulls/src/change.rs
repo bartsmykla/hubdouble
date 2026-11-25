@@ -584,15 +584,8 @@ pub(crate) struct MergeOptions {
     pub(crate) author_email: Option<String>,
 }
 
-pub(crate) fn merge_pull(
-    tx: &mut TxMut<'_>,
-    git: &Git,
-    merger: &Actor,
-    (repo, issue): (&Arc<Repo>, &Issue),
-    options: MergeOptions,
-) -> Result<ObjectId, ApiError> {
-    let p = state::pull(issue)?;
-    let refused = match options.method {
+fn refused_method(repo: &Repo, method: MergeMethod) -> Option<&'static str> {
+    match method {
         MergeMethod::Merge if !repo.allow_merge_commit => {
             Some("Merge commits are not allowed on this repository.")
         }
@@ -603,8 +596,18 @@ pub(crate) fn merge_pull(
             Some("Rebase merges are not allowed on this repository.")
         }
         _ => None,
-    };
-    if let Some(message) = refused {
+    }
+}
+
+pub(crate) fn merge_pull(
+    tx: &mut TxMut<'_>,
+    git: &Git,
+    merger: &Actor,
+    (repo, issue): (&Arc<Repo>, &Issue),
+    options: MergeOptions,
+) -> Result<ObjectId, ApiError> {
+    let p = state::pull(issue)?;
+    if let Some(message) = refused_method(repo, options.method) {
         return Err(ApiError::new(405, message));
     }
     if p.draft || issue.state == IssueState::Closed || p.head.repo_id.is_none() {
@@ -629,7 +632,15 @@ pub(crate) fn merge_pull(
     let base = state::branch(git, tx, repo.id, &p.base.ref_name)?;
     let written = format!("refs/heads/{}", p.base.ref_name);
     let move_base = |tx: &mut TxMut<'_>, commit| {
-        git.update_ref(tx, repo.id, sender, &written, Some(base), Some(commit), false)
+        git.update_ref(
+            tx,
+            repo.id,
+            sender,
+            &written,
+            Some(base),
+            Some(commit),
+            false,
+        )
     };
     let (title, message) = (options.title, options.message);
     let owners = reviewing::owner_violations(tx, merger, issue)?;
