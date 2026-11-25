@@ -116,11 +116,51 @@ pub(crate) fn variables(
     if !errors.is_empty() {
         return Err(errors);
     }
-    let raw: JsonMap = serde_json::from_value(Value::Object(given.clone())).unwrap_or_default();
+    let mut masked = given.clone();
+    masked.values_mut().for_each(mask_wide_ints);
+    let raw: JsonMap = serde_json::from_value(Value::Object(masked)).unwrap_or_default();
     let coerced = apollo_compiler::request::coerce_variable_values(&schema.inner, op, &raw)
         .map_err(|e| vec![request_error(&e, sources)])?;
-    Ok(match serde_json::to_value(&*coerced) {
-        Ok(Value::Object(m)) => m,
-        _ => Map::new(),
-    })
+    let Ok(Value::Object(mut coerced)) = serde_json::to_value(&*coerced) else {
+        return Ok(Map::new());
+    };
+    for (name, value) in given {
+        if let Some(c) = coerced.get_mut(name) {
+            restore_wide_ints(c, value);
+        }
+    }
+    Ok(coerced)
+}
+
+fn wide_int(n: &serde_json::Number) -> bool {
+    (n.is_i64() || n.is_u64()) && n.as_i64().is_none_or(|n| i32::try_from(n).is_err())
+}
+
+fn mask_wide_ints(v: &mut Value) {
+    match v {
+        Value::Number(n) if wide_int(n) => *v = Value::from(0),
+        Value::Array(items) => items.iter_mut().for_each(mask_wide_ints),
+        Value::Object(fields) => fields.values_mut().for_each(mask_wide_ints),
+        _ => {}
+    }
+}
+
+fn restore_wide_ints(coerced: &mut Value, given: &Value) {
+    match (coerced, given) {
+        (c @ Value::Number(_), Value::Number(g)) if wide_int(g) => *c = Value::Number(g.clone()),
+        (Value::Array(c), Value::Array(g)) => {
+            for (c, g) in c.iter_mut().zip(g) {
+                restore_wide_ints(c, g);
+            }
+        }
+        (Value::Array(c), g) if c.len() == 1 => restore_wide_ints(&mut c[0], g),
+        (Value::Object(c), Value::Object(g)) => {
+            for (k, g) in g {
+                if let Some(c) = c.get_mut(k) {
+                    restore_wide_ints(c, g);
+                }
+            }
+        }
+        _ => {}
+    }
 }

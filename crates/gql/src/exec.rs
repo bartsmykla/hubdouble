@@ -401,7 +401,10 @@ impl<'r> Exec<'r> {
                 .ok()
                 .and_then(serde_json::Number::from_f64)
                 .map_or(Value::Null, Value::Number),
-            Ast::Int(i) => i.as_str().parse::<i64>().map_or(Value::Null, Value::from),
+            Ast::Int(i) => i.as_str().parse::<i64>().map_or_else(
+                |_| i.as_str().parse::<u64>().map_or(Value::Null, Value::from),
+                Value::from,
+            ),
             Ast::Boolean(b) => Value::Bool(*b),
             Ast::List(items) => Value::Array(
                 items

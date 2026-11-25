@@ -24,12 +24,30 @@ static SCHEMA: LazyLock<Schema> = LazyLock::new(|| {
     type Formats {
         date: DateTime, gitDate: GitTimestamp, url: URI, html: HTML, hash: GitObjectID,
         ssh: GitSSHRemote, bytes: Base64String, count: BigInt, cert: X509Certificate,
-        precise: PreciseDateTime
+        precise: PreciseDateTime, number: Int
     }
 ",
     )
     .unwrap_or_else(|e| panic!("parse answer-check test schema: {e}"))
 });
+
+#[test]
+fn an_int_answer_may_pass_32_bits_but_not_be_a_fraction() {
+    // Given an Int field, which live cli/cli answered as databaseId 139044377974 on 2026-11-25
+    let doc = "{ formats { number } }";
+    let answer = |n: Value| json!({"data": {"formats": {"number": n}}});
+    // Then a wide integer is GitHub's answer, and a fraction is not
+    assert!(
+        SCHEMA
+            .check_answer(doc, &Value::Null, &answer(json!(139_044_377_974_i64)))
+            .is_ok()
+    );
+    assert!(
+        SCHEMA
+            .check_answer(doc, &Value::Null, &answer(json!(1.5)))
+            .is_err()
+    );
+}
 
 #[test]
 fn rejects_wrong_fields_types_and_fragment_branches() {

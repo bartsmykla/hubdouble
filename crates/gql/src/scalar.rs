@@ -6,7 +6,7 @@ use serde_json::Value;
 pub(crate) fn matches(name: &str, value: &Value) -> bool {
     match name {
         "Boolean" => value.is_boolean(),
-        "Int" => value.as_i64().is_some_and(|n| i32::try_from(n).is_ok()),
+        "Int" => value.is_i64() || value.is_u64(),
         "Float" => value.is_number(),
         "String" | "ID" => value.is_string(),
         "CustomPropertyValue" => {

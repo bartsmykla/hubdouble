@@ -11,6 +11,7 @@ use crate::contract::{ErrorType, ResponseError};
 use crate::schema::Schema;
 
 const CONFLICTING_FIELD_TYPE: &str = "ConflictingFieldType";
+const INT_COERCION: &str = "IntCoercionError";
 
 pub(crate) fn validate(
     schema: &Schema,
@@ -66,8 +67,10 @@ fn tolerated(
     doc: &ExecutableDocument,
     d: &Diagnostic<'_, DiagnosticData>,
 ) -> bool {
-    if d.error.unstable_error_name() != Some(CONFLICTING_FIELD_TYPE) {
-        return false;
+    match d.error.unstable_error_name() {
+        Some(INT_COERCION) => return true,
+        Some(CONFLICTING_FIELD_TYPE) => {}
+        _ => return false,
     }
     let Some(at) = d.error.location() else {
         return false;

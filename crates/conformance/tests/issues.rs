@@ -1080,6 +1080,45 @@ async fn implement_issue_filters_manual_and_cross_repository_keyword_links() {
 }
 
 #[tokio::test]
+async fn an_int_argument_past_32_bits_reaches_the_resolver() {
+    // Given an issue number past the 32-bit range, as a literal and as a variable
+    let server = start().await;
+    let alice = Graphql::new(as_alice(&server));
+    let literal = format!(
+        "{{ repository(owner: \"{ORG}\", name: \"{PUBLIC_REPO}\") {{ issue(number: 2147483648) {{ id }} }} }}"
+    );
+    let variable = format!(
+        "query($n: Int!) {{ repository(owner: \"{ORG}\", name: \"{PUBLIC_REPO}\") {{ issue(number: $n) {{ id }} }} }}"
+    );
+    // When alice sends each, and a variable that is not an integer
+    let answers = [
+        alice.query(&literal, &json!({})).await.json(),
+        alice
+            .query(&variable, &json!({"n": 2_147_483_648_i64}))
+            .await
+            .json(),
+        alice
+            .query(&variable, &json!({"n": -2_147_483_649_i64}))
+            .await
+            .json(),
+    ];
+    let fraction = alice.query(&variable, &json!({"n": 1.0})).await.json(); // Then each integer reaches the issue lookup, as live cli/cli answered NOT_FOUND for them on 2026-11-25, and 1.0 is refused
+    for answer in answers {
+        assert_eq!(
+            answer["data"]["repository"]["issue"],
+            Value::Null,
+            "{answer}"
+        );
+        assert_eq!(answer["errors"][0]["type"], "NOT_FOUND", "{answer}");
+    }
+    assert!(fraction.get("data").is_none(), "{fraction}");
+    assert_eq!(
+        fraction["errors"][0]["extensions"]["problems"][0]["path"],
+        json!([])
+    );
+}
+
+#[tokio::test]
 async fn issue_events_carry_intent_and_a_close_reason_only_when_not_completed() {
     // Given an issue that alice labels, assigns, closes, reopens and closes as not planned
     let server = start().await;
