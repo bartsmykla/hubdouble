@@ -352,6 +352,31 @@ pub(crate) fn tested(p: &Pull, method: MergeMethod) -> Result<Via, ApiError> {
     })
 }
 
+/// [`tested`] for a merge, with the test merge only while it merges `base` with the head, so
+/// a check on the test merge of an older head or base never counts.
+fn tested_now(
+    tx: &Tx,
+    git: &Git,
+    (p, base): (&Pull, ObjectId),
+    method: MergeMethod,
+) -> Result<Via, ApiError> {
+    let head: ObjectId = p.head.sha.parse()?;
+    let test_merge = match (p.merge_commit_sha.as_deref(), p.base.repo_id) {
+        (Some(sha), Some(repo)) => {
+            let id: ObjectId = sha.parse()?;
+            crate::state::commit_node(git, tx, repo, id)
+                .is_ok_and(|node| node.commit.parents == [base, head])
+                .then_some(id)
+        }
+        _ => None,
+    };
+    Ok(Via::Pull {
+        head,
+        test_merge,
+        method,
+    })
+}
+
 /// The code owner reviews that a merge still waits on, from the owners of the base branch
 /// before the merge moves it.
 pub(crate) fn owner_violations(
@@ -392,7 +417,7 @@ pub(crate) fn merge_violations(
         repo,
         branch,
         moves,
-        tested(p, method)?,
+        tested_now(tx, git, (p, old), method)?,
     )?);
     out.extend(review_blocks(tx, issue, p, &rules));
     let name = format!("refs/heads/{branch}");

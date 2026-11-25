@@ -803,6 +803,34 @@ async fn a_strict_check_refuses_the_merge_of_a_pull_request_behind_its_base() {
     assert_eq!(tip(&alice, "main").await, main);
 }
 
+#[tokio::test]
+async fn a_required_check_reads_the_latest_head_and_not_an_older_test_merge() {
+    // Given a main that requires ci, a test merge that stays pending for many reads, and pull
+    // request 1 whose settled test merge passes ci
+    let rules = on_main(&json!([required_checks(&["ci"], false)]));
+    let slow = json!({"kind": "mergeability", "repository": "acme/public", "reads": 1000});
+    let server = server_with_pull(&[rules, slow]).await;
+    let alice = client(&server, ALICE_TOKEN);
+    let settle = || server.admin(Method::POST, "repos/acme/public/pulls/1/mergeability", None);
+    assert_eq!(settle().await.status, StatusCode::OK);
+    let old_merge = alice.get(PULL).await.json()["merge_commit_sha"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert_ne!(old_merge, "");
+    status(&alice, &old_merge, "ci", "success").await;
+    // When a push moves the head, its test merge is still pending, and ci fails on the new
+    // head
+    commit(&server, ALICE_ID, "feature", Some("src/next.txt"));
+    assert_eq!(alice.get(PULL).await.json()["merge_commit_sha"], old_merge);
+    let head = tip(&alice, "feature").await;
+    status(&alice, &head, "ci", "failure").await;
+    let main = tip(&alice, "main").await;
+    // Then the merge is refused with 405, and main stays
+    assert_refused(&merge_pull(&alice).await, 405, Some(PULL_MERGE_DOCS), "ci");
+    assert_eq!(tip(&alice, "main").await, main);
+}
+
 fn owners_rule() -> Value {
     let mut rule = reviews_rule(0, false, false);
     rule["parameters"]["require_code_owner_review"] = json!(true);
