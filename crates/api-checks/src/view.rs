@@ -66,11 +66,40 @@ pub fn latest_statuses<'t>(statuses: &[&'t Arc<Status>]) -> Vec<&'t Arc<Status>>
     let mut latest: Vec<_> = statuses
         .iter()
         .copied()
-        .filter(|status| seen.insert(status.context.to_lowercase()))
+        .filter(|status| seen.insert(Folded(&status.context)))
         .collect();
     latest.sort_unstable_by_key(|status| status.id);
     latest
 }
+
+struct Folded<'a>(&'a str);
+
+impl Ord for Folded<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if self.0.is_ascii() && other.0.is_ascii() {
+            self.0
+                .bytes()
+                .map(|b| b.to_ascii_lowercase())
+                .cmp(other.0.bytes().map(|b| b.to_ascii_lowercase()))
+        } else {
+            self.0.to_lowercase().cmp(&other.0.to_lowercase())
+        }
+    }
+}
+
+impl PartialOrd for Folded<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Folded<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for Folded<'_> {}
 
 pub struct View<'a> {
     pub tx: &'a Tx,
