@@ -30,11 +30,10 @@ impl Odb {
     }
 
     pub(crate) fn get(&self, id: ObjectId) -> Result<ObjectData, GitError> {
-        self.shard(id)
-            .read()
-            .get(&id)
-            .map(|object| object.data.clone())
-            .ok_or(GitError::NotFound)
+        match self.shard(id).read().get(&id) {
+            Some(object) => Ok(object.data.clone()),
+            None => Err(GitError::NotFound),
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -80,7 +79,9 @@ impl Odb {
 
     fn tree_depth(&self, id: ObjectId) -> Result<usize, GitError> {
         let shard = self.shard(id).read();
-        let object = shard.get(&id).ok_or(GitError::NotFound)?;
+        let Some(object) = shard.get(&id) else {
+            return Err(GitError::NotFound);
+        };
         match object.data {
             ObjectData::Tree(_) => Ok(object.tree_depth),
             _ => Err(GitError::WrongKind),

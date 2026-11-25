@@ -183,13 +183,14 @@ pub(crate) fn put_sorted(odb: &Odb, mut entries: Vec<TreeEntry>) -> Result<Objec
 pub(crate) fn lookup(odb: &Odb, root: ObjectId, path: &str) -> Result<ObjectId, GitError> {
     let mut id = root;
     for name in path.split('/').filter(|p| !p.is_empty()) {
-        id = odb
+        let found = odb
             .tree(id)
-            .map_err(|_| GitError::NotFound)?
-            .iter()
-            .find(|e| e.name == name)
-            .ok_or(GitError::NotFound)?
-            .id;
+            .ok()
+            .and_then(|t| t.iter().find(|e| e.name == name).map(|e| e.id));
+        let Some(next) = found else {
+            return Err(GitError::NotFound);
+        };
+        id = next;
     }
     Ok(id)
 }

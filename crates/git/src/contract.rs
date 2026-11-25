@@ -52,9 +52,13 @@ impl FromStr for ObjectId {
             return Err(GitError::BadObjectId);
         }
         let mut out = [0u8; 20];
-        let hex = |c: u8| char::from(c).to_digit(16).ok_or(GitError::BadObjectId);
+        let hex = |c: u8| char::from(c).to_digit(16);
         for (o, [hi, lo]) in out.iter_mut().zip(bytes.as_chunks::<2>().0) {
-            *o = u8::try_from(hex(*hi)? * 16 + hex(*lo)?).map_err(|_| GitError::BadObjectId)?;
+            let byte = hex(*hi).zip(hex(*lo)).map(|(hi, lo)| hi * 16 + lo);
+            match byte.and_then(|b| u8::try_from(b).ok()) {
+                Some(b) => *o = b,
+                None => return Err(GitError::BadObjectId),
+            }
         }
         Ok(ObjectId(out))
     }
@@ -536,7 +540,10 @@ impl Git {
     ///
     /// [`GitError::NotFound`] for a missing ref.
     pub fn resolve_ref(&self, tx: &Tx, repo: i64, name: &str) -> Result<ObjectId, GitError> {
-        refs::resolve(tx, repo, name).ok_or(GitError::NotFound)
+        match refs::resolve(tx, repo, name) {
+            Some(id) => Ok(id),
+            None => Err(GitError::NotFound),
+        }
     }
 
     /// The refs whose full name starts with `prefix`, sorted by name; a prefix without `refs/`
