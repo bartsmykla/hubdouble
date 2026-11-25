@@ -8,6 +8,7 @@ use serde::ser::SerializeMap as _;
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
+use crate::push::PushRepository;
 use crate::{HooksError, Injection};
 
 const ALWAYS_DELIVERED: [&str; 4] = [
@@ -134,6 +135,7 @@ pub(crate) fn recipients(tx: &Tx, e: &Event) -> Vec<(i64, Option<Arc<Installatio
 
 enum Rendered {
     Repository(Box<Repository>),
+    PushRepository(Box<PushRepository>),
     Organization(OrganizationSimple),
     Sender(SimpleUser),
 }
@@ -155,6 +157,7 @@ impl Serialize for Entry<'_> {
         match self {
             Entry::Value(v) => v.serialize(s),
             Entry::Rendered(Rendered::Repository(r)) => r.serialize(s),
+            Entry::Rendered(Rendered::PushRepository(r)) => r.serialize(s),
             Entry::Rendered(Rendered::Organization(o)) => o.serialize(s),
             Entry::Rendered(Rendered::Sender(u)) => u.serialize(s),
             Entry::Installation(i) => i.serialize(s),
@@ -178,6 +181,7 @@ struct Subjects {
     repo: Option<i64>,
     org: Option<i64>,
     sender: Option<i64>,
+    push: bool,
 }
 
 fn rendered(tx: &Tx, e: &Subjects, p: &Map<String, Value>) -> Vec<(&'static str, Rendered)> {
@@ -190,9 +194,19 @@ fn rendered(tx: &Tx, e: &Subjects, p: &Map<String, Value>) -> Vec<(&'static str,
         && let Some(r) = repo
         && let Some(owner) = accounts.get(r.owner_id)
     {
+        let repository = Repository::new(&urls, r, owner);
         out.push((
             "repository",
-            Rendered::Repository(Box::new(Repository::new(&urls, r, owner))),
+            if e.push {
+                Rendered::PushRepository(Box::new(PushRepository {
+                    repo: repository,
+                    owner_email: owner.email.clone(),
+                    organization: (owner.kind == AccountKind::Organization)
+                        .then(|| owner.login.clone()),
+                }))
+            } else {
+                Rendered::Repository(Box::new(repository))
+            },
         ));
     }
     if absent("organization")
@@ -277,6 +291,7 @@ pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
         repo: e.repo_id,
         org: e.org_id,
         sender: Some(e.sender_id),
+        push: e.name == "push",
     };
     let rendered = rendered(tx, &subjects, &payload);
     let mut buffer = Vec::with_capacity(BODY_CAPACITY);
@@ -319,6 +334,7 @@ pub(crate) fn inject(tx: &mut TxMut<'_>, i: Injection) -> Result<(), HooksError>
         repo: i.repo_id,
         org: None,
         sender: i.sender_id,
+        push: false,
     };
     let rendered = rendered(tx, &subjects, &payload);
     let body = payload_body(

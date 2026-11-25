@@ -594,11 +594,13 @@ impl Git {
             return Err(GitError::NotFastForward);
         }
         refs::set(tx, repo, name, new);
+        let now = Some(self.now());
         if (name.starts_with("refs/heads/") || name.starts_with("refs/tags/"))
             && let Some(r) = tx.table::<Repos>().get(repo)
+            && r.pushed_at != now
         {
             let mut r = Repo::clone(r);
-            r.pushed_at = Some(self.now());
+            r.pushed_at = now;
             tx.table_mut::<Repos>()
                 .replace(r)
                 .map_err(|e| GitError::Rejected(e.into()))?;

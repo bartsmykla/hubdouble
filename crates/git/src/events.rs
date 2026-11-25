@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use hubdouble_model::{Account, AccountKind, Event, Repo, Timestamp};
-use hubdouble_render::{Repository, Urls};
+use hubdouble_render::Urls;
 use hubdouble_store::{Accounts, Repos, Tx};
 use serde_json::{Map, Value, json};
 
@@ -144,32 +144,6 @@ fn new_commits(
     Ok(list)
 }
 
-/// The repository of a `push` payload, which differs from every other event's: `created_at`
-/// and `pushed_at` are Unix seconds, `stargazers` and `master_branch` repeat the star count and
-/// the default branch, the owner carries the `name` and `email` of the pusher form, and an
-/// organization's repository names it in `organization`.
-fn push_repository(tx: &Tx, urls: &Urls, repo: &Repo) -> Value {
-    let Some(owner) = tx.table::<Accounts>().get(repo.owner_id) else {
-        return Value::Null;
-    };
-    let mut value = serde_json::to_value(Repository::new(urls, repo, owner)).unwrap_or_default();
-    if let Value::Object(m) = &mut value {
-        let stars = m.get("stargazers_count").cloned().unwrap_or(json!(0));
-        m.insert("created_at".to_owned(), json!(repo.created_at.0));
-        m.insert("pushed_at".to_owned(), json!(repo.pushed_at.map(|t| t.0)));
-        m.insert("stargazers".to_owned(), stars);
-        m.insert("master_branch".to_owned(), json!(repo.default_branch));
-        if owner.kind == AccountKind::Organization {
-            m.insert("organization".to_owned(), json!(owner.login));
-        }
-        if let Some(Value::Object(o)) = m.get_mut("owner") {
-            o.insert("name".to_owned(), json!(owner.login));
-            o.insert("email".to_owned(), json!(owner.email));
-        }
-    }
-    value
-}
-
 pub(crate) fn push(tx: &Tx, odb: &Odb, change: &RefChange) -> Result<Option<Event>, GitError> {
     let Some((short_name, _)) = pushed(&change.name) else {
         return Ok(None);
@@ -227,7 +201,6 @@ pub(crate) fn push(tx: &Tx, odb: &Odb, change: &RefChange) -> Result<Option<Even
             "commits": commits,
             "head_commit": head_commit,
             "pusher": pusher,
-            "repository": push_repository(tx, &urls, &scope.repo),
         })),
     }))
 }
