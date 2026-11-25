@@ -10,12 +10,12 @@ in THIRD-PARTY-NOTICES, under LGPL-2.1-or-later.
 The binary links xdiff statically. The complete source of this binary,
 with xdiff and every other crate that it uses, is in the image
 
-    ghcr.io/bartsmykla/hubdouble:@VERSION@-source
+    ghcr.io/bartsmykla/hubdouble-source:@VERSION@
 
-which is published beside this image. That image holds one file,
-hubdouble-source.tar. To copy it out:
+which is published in the same registry as this image. That image holds
+one file, hubdouble-source.tar. To copy it out:
 
-    id=$(docker create ghcr.io/bartsmykla/hubdouble:@VERSION@-source x)
+    id=$(docker create ghcr.io/bartsmykla/hubdouble-source:@VERSION@ x)
     docker cp "$id":/hubdouble-source.tar .
     docker rm "$id"
 
