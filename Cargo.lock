@@ -1479,6 +1479,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "626d4928326b646e70f65ed36fc7cf9f206bdb68a0019ee7c6b4709da4e084c4"
 dependencies = [
  "crc32fast",
+ "libz-sys",
  "miniz_oxide",
  "zlib-rs",
 ]
@@ -2592,6 +2593,7 @@ name = "hubdouble-git"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "flate2",
  "foldhash 0.2.0",
  "gix-actor 0.44.1",
  "gix-hash 0.28.1",
@@ -2601,6 +2603,7 @@ dependencies = [
  "hubdouble-render",
  "hubdouble-store",
  "imara-diff",
+ "libz-sys",
  "parking_lot 0.13.0",
  "pgp",
  "rand 0.8.8",
@@ -3382,6 +3385,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "libz-sys"
+version = "1.1.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fee3f59f4321dab0c78d828942e7aa09d0bd8ad6e78a501977e6bf3d02938045"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -5695,6 +5710,12 @@ dependencies = [
  "outref",
  "vsimd",
 ]
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"

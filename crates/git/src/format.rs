@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use flate2::{Compress, Compression, FlushCompress, Status};
 use hubdouble_model::civil_from_days;
 
 use crate::contract::{Commit, EntryMode, GitError, ObjectId, Signature};
@@ -13,7 +14,6 @@ const MAIL_WIDTH: usize = 78;
 const ENCODED_WIDTH: usize = 76;
 const MIN_ABBREV: usize = 7;
 const BINARY_LINE: usize = 52;
-const STORED_BLOCK: usize = 65_535;
 const BASE85: &[u8; 85] =
     b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
 const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
@@ -477,7 +477,7 @@ pub(crate) fn diff_text(files: &[File], abbrev: usize, binary_patch: bool) -> St
 
 fn literal(out: &mut String, data: &[u8]) {
     let _ = writeln!(out, "literal {}", data.len());
-    for chunk in zlib_stored(data).chunks(BINARY_LINE) {
+    for chunk in deflated(data).chunks(BINARY_LINE) {
         let n = u8::try_from(chunk.len()).unwrap_or(0);
         out.push(char::from(if n <= 26 {
             b'A' + n - 1
@@ -502,26 +502,17 @@ fn literal(out: &mut String, data: &[u8]) {
     out.push('\n');
 }
 
-fn zlib_stored(data: &[u8]) -> Vec<u8> {
-    let mut out = vec![0x78, 0x01];
-    if data.is_empty() {
-        out.extend([1, 0, 0, 0xff, 0xff]);
+fn deflated(data: &[u8]) -> Vec<u8> {
+    let mut z = Compress::new(Compression::fast(), true);
+    let mut out = Vec::with_capacity(data.len() + data.len() / 8 + 64);
+    loop {
+        let read = usize::try_from(z.total_in()).unwrap_or(data.len());
+        let rest = data.get(read..).unwrap_or_default();
+        match z.compress_vec(rest, &mut out, FlushCompress::Finish) {
+            Ok(Status::StreamEnd) | Err(_) => return out,
+            Ok(Status::Ok | Status::BufError) => out.reserve(out.capacity().max(64)),
+        }
     }
-    let mut blocks = data.chunks(STORED_BLOCK).peekable();
-    while let Some(block) = blocks.next() {
-        out.push(u8::from(blocks.peek().is_none()));
-        let n = u16::try_from(block.len()).unwrap_or(u16::MAX);
-        out.extend(n.to_le_bytes());
-        out.extend((!n).to_le_bytes());
-        out.extend(block);
-    }
-    let (mut a, mut b) = (1_u32, 0_u32);
-    for &byte in data {
-        a = (a + u32::from(byte)) % 65_521;
-        b = (b + a) % 65_521;
-    }
-    out.extend((b << 16 | a).to_be_bytes());
-    out
 }
 
 fn date(who: &Signature) -> String {
@@ -702,6 +693,8 @@ pub(crate) fn mail(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read as _;
+
     use super::*;
 
     #[test]
@@ -726,18 +719,50 @@ mod tests {
         }
     }
 
+    const LIVE_PNG: &str = include_str!("../testdata/explore-9d47da0-git-png.patch");
+
+    fn base85_lines(lines: &[&str]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for line in lines {
+            let (len, body) = line.split_at(1);
+            let len = match len.as_bytes()[0] {
+                c @ b'A'..=b'Z' => usize::from(c - b'A' + 1),
+                c => usize::from(c - b'a' + 27),
+            };
+            let mut bytes = Vec::new();
+            for group in body.as_bytes().chunks(5) {
+                let word = group.iter().fold(0_u32, |acc, c| {
+                    let digit = BASE85.iter().position(|d| d == c).unwrap();
+                    acc * 85 + u32::try_from(digit).unwrap()
+                });
+                bytes.extend(word.to_be_bytes());
+            }
+            out.extend(&bytes[..len]);
+        }
+        out
+    }
+
     #[test]
-    fn a_stored_zlib_stream_inflates_to_its_data() {
-        let data: Vec<u8> = (0..70_000_u32)
-            .map(|i| u8::try_from(i % 251).unwrap_or(0))
-            .collect();
-        let z = zlib_stored(&data);
-        assert_eq!(&z[..2], &[0x78, 0x01]);
-        assert_eq!(z.len(), 2 + 5 + 65_535 + 5 + (70_000 - 65_535) + 4);
-        assert_eq!(
-            zlib_stored(&[]),
-            [0x78, 0x01, 1, 0, 0, 0xff, 0xff, 0, 0, 0, 1]
-        );
+    fn a_literal_writes_the_bytes_live_github_writes() {
+        // Given both sides of topics/git/git.png in github/explore 9d47da0, as the live
+        // patch carries them: zlib 1.2.12 at level 1 streams of 9007 and 11761 bytes
+        let body = LIVE_PNG.strip_prefix("GIT binary patch\n").unwrap();
+        let blocks: Vec<&str> = body.split_terminator("\n\n").collect();
+        assert_eq!(blocks.len(), 2);
+        for block in blocks {
+            let lines: Vec<&str> = block.lines().skip(1).collect();
+            let mut data = Vec::new();
+            flate2::read::ZlibDecoder::new(base85_lines(&lines).as_slice())
+                .read_to_end(&mut data)
+                .unwrap();
+
+            // When hubdouble writes the side as a literal
+            let mut out = String::new();
+            literal(&mut out, &data);
+
+            // Then it writes the live lines byte for byte
+            assert_eq!(out, format!("{block}\n\n"));
+        }
     }
 
     #[test]
