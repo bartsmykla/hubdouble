@@ -190,9 +190,7 @@ pub(crate) fn serve(
             (true, _, at) if !at.is_some_and(&signed) => {
                 Some(cdn_refusal("jwt:signature-fail", OCTET_STREAM, now))
             }
-            (true, _, Some(at)) if now > at => {
-                Some(cdn_refusal("jwt:expired", OCTET_STREAM, now))
-            }
+            (true, _, Some(at)) if now > at => Some(cdn_refusal("jwt:expired", OCTET_STREAM, now)),
             (false, _, None) => Some(storage_refusal(NOT_SIGNED, now)),
             (false, _, Some(at)) if !signed(at) => {
                 Some(storage_refusal("Signature did not match.", now))

@@ -628,6 +628,9 @@ pub(crate) fn merge_pull(
     let who = (sender, timeline::via_app(merger));
     let base = state::branch(git, tx, repo.id, &p.base.ref_name)?;
     let written = format!("refs/heads/{}", p.base.ref_name);
+    let move_base = |tx: &mut TxMut<'_>, commit| {
+        git.update_ref(tx, repo.id, sender, &written, Some(base), Some(commit), false)
+    };
     let (title, message) = (options.title, options.message);
     let owners = reviewing::owner_violations(tx, merger, issue)?;
     let commit = match options.method {
@@ -639,7 +642,7 @@ pub(crate) fn merge_pull(
                 let merger = (sender, options.author_email.as_deref());
                 let commit =
                     merging::merge_commit(tx, git, (repo.id, merger), (base, head), message)?;
-                git.update_ref(tx, repo.id, sender, &written, Some(base), Some(commit), false)?;
+                move_base(tx, commit)?;
                 commit
             } else {
                 git.merge(tx, repo.id, sender, &p.base.ref_name, &sha, &message)
@@ -667,7 +670,7 @@ pub(crate) fn merge_pull(
                 merging::rebase(tx, git, (repo.id, merger), (base, head))?
             };
             state::merged_as(tx, git, issue.id, commit, sender)?;
-            git.update_ref(tx, repo.id, sender, &written, Some(base), Some(commit), false)?;
+            move_base(tx, commit)?;
             state::emit_closed(tx, git, issue.id, sender)?;
             commit
         }

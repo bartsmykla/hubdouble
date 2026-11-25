@@ -194,7 +194,14 @@ fn check_workflows(
     operation: &str,
 ) -> Result<(), ApiError> {
     let repo = ctx.repo()?;
-    match denied_workflow(ctx.tx(), ctx.git(), ctx.actor(), (repo, written), base, target)? {
+    match denied_workflow(
+        ctx.tx(),
+        ctx.git(),
+        ctx.actor(),
+        (repo, written),
+        base,
+        target,
+    )? {
         Some(path) => Err(
             ApiError::unprocessable(workflow_refusal(ctx.actor(), &path))
                 .with_docs(format!("{DOCS}#{operation}")),
