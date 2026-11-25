@@ -55,14 +55,14 @@ pub struct Variables(pub(crate) Map<String, Value>);
 
 impl Variables {
     /// Reads the `variables` member of a GraphQL request body, keeping the digits of each
-    /// integer past 64 bits. It takes the nesting that `serde_json` takes in that member of a
-    /// body: 126 levels, the object of the member included.
+    /// integer past 64 bits. It takes the nesting that GitHub takes in that member: 255 levels,
+    /// the object of the member included.
     ///
     /// # Errors
     ///
     /// The `serde_json` error when `text` is not a JSON object or nests deeper than that.
     pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
-        exact_object(text, 1).map(Self)
+        Exact::new(text).whole_object().map(Self)
     }
 
     /// Whether `fields`, as `serde_json` read them, may have lost the digits of an integer past
@@ -196,38 +196,161 @@ fn holds_a_large_double(value: &Value) -> bool {
     }
 }
 
-const MAX_DEPTH: usize = 126;
+const MAX_DEPTH: usize = 255;
 
-fn exact_object(text: &str, depth: usize) -> Result<Map<String, Value>, serde_json::Error> {
-    if depth > MAX_DEPTH {
-        return Err(serde::de::Error::custom("recursion limit exceeded"));
-    }
-    let fields: std::collections::BTreeMap<String, &RawValue> = serde_json::from_str(text)?;
-    fields
-        .into_iter()
-        .map(|(name, value)| Ok((escaped(name), exact(value.get(), depth + 1)?)))
-        .collect()
+fn invalid(what: &str) -> serde_json::Error {
+    serde::de::Error::custom(what)
 }
 
-fn exact(text: &str, depth: usize) -> Result<Value, serde_json::Error> {
-    match text.as_bytes().first() {
-        Some(b'{') => exact_object(text, depth).map(Value::Object),
-        Some(b'[') if depth > MAX_DEPTH => {
-            Err(serde::de::Error::custom("recursion limit exceeded"))
+struct Exact<'t> {
+    text: &'t str,
+    at: usize,
+    #[cfg(test)]
+    parsed: usize,
+}
+
+impl<'t> Exact<'t> {
+    fn new(text: &'t str) -> Self {
+        Self {
+            text,
+            at: 0,
+            #[cfg(test)]
+            parsed: 0,
         }
-        Some(b'[') => serde_json::from_str::<Vec<&RawValue>>(text)?
-            .into_iter()
-            .map(|item| exact(item.get(), depth + 1))
-            .collect::<Result<_, _>>()
-            .map(Value::Array),
-        Some(b'-' | b'0'..=b'9')
-            if digits(text.strip_prefix('-').unwrap_or(text))
-                && text.parse::<i64>().is_err()
-                && text.parse::<u64>().is_err() =>
+    }
+
+    fn peek(&mut self) -> Option<u8> {
+        while let Some(b) = self.text.as_bytes().get(self.at) {
+            if !b.is_ascii_whitespace() {
+                return Some(*b);
+            }
+            self.bump();
+        }
+        None
+    }
+
+    fn bump(&mut self) {
+        self.at += 1;
+    }
+
+    fn eat(&mut self, byte: u8) -> Result<(), serde_json::Error> {
+        if self.peek() != Some(byte) {
+            return Err(invalid("unexpected character"));
+        }
+        self.bump();
+        Ok(())
+    }
+
+    fn token(&mut self, end: usize) -> Result<&'t str, serde_json::Error> {
+        let token = self
+            .text
+            .get(self.at..end)
+            .ok_or_else(|| invalid("unexpected end"))?;
+        #[cfg(test)]
         {
-            Ok(wide_int(text))
+            self.parsed += token.len();
         }
-        _ => serde_json::from_str(text),
+        self.at = end;
+        Ok(token)
+    }
+
+    fn whole_object(mut self) -> Result<Map<String, Value>, serde_json::Error> {
+        let fields = self.object(1)?;
+        match self.peek() {
+            None => Ok(fields),
+            Some(_) => Err(invalid("trailing characters")),
+        }
+    }
+
+    fn value(&mut self, depth: usize) -> Result<Value, serde_json::Error> {
+        match self.peek() {
+            Some(b'{') => self.object(depth).map(Value::Object),
+            Some(b'[') => self.array(depth),
+            Some(b'"') => self.string().map(Value::String),
+            Some(_) => self.scalar(),
+            None => Err(invalid("unexpected end")),
+        }
+    }
+
+    fn object(&mut self, depth: usize) -> Result<Map<String, Value>, serde_json::Error> {
+        if depth > MAX_DEPTH {
+            return Err(invalid("recursion limit exceeded"));
+        }
+        self.eat(b'{')?;
+        let mut fields = Map::new();
+        if self.peek() == Some(b'}') {
+            self.bump();
+            return Ok(fields);
+        }
+        loop {
+            if self.peek() != Some(b'"') {
+                return Err(invalid("key must be a string"));
+            }
+            let name = self.string()?;
+            self.eat(b':')?;
+            let value = self.value(depth + 1)?;
+            fields.insert(escaped(name), value);
+            match self.peek() {
+                Some(b',') => self.bump(),
+                Some(b'}') => {
+                    self.bump();
+                    return Ok(fields);
+                }
+                _ => return Err(invalid("expected `,` or `}`")),
+            }
+        }
+    }
+
+    fn array(&mut self, depth: usize) -> Result<Value, serde_json::Error> {
+        if depth > MAX_DEPTH {
+            return Err(invalid("recursion limit exceeded"));
+        }
+        self.eat(b'[')?;
+        let mut items = Vec::new();
+        if self.peek() == Some(b']') {
+            self.bump();
+            return Ok(Value::Array(items));
+        }
+        loop {
+            items.push(self.value(depth + 1)?);
+            match self.peek() {
+                Some(b',') => self.bump(),
+                Some(b']') => {
+                    self.bump();
+                    return Ok(Value::Array(items));
+                }
+                _ => return Err(invalid("expected `,` or `]`")),
+            }
+        }
+    }
+
+    fn string(&mut self) -> Result<String, serde_json::Error> {
+        let bytes = self.text.as_bytes();
+        let mut end = self.at + 1;
+        while let Some(c) = bytes.get(end) {
+            match c {
+                b'\\' => end += 2,
+                b'"' => break,
+                _ => end += 1,
+            }
+        }
+        serde_json::from_str(self.token(end + 1)?)
+    }
+
+    fn scalar(&mut self) -> Result<Value, serde_json::Error> {
+        let rest = self.text.as_bytes().get(self.at..).unwrap_or_default();
+        let len = rest
+            .iter()
+            .position(|b| matches!(b, b',' | b']' | b'}') || b.is_ascii_whitespace())
+            .unwrap_or(rest.len());
+        let token = self.token(self.at + len)?;
+        if digits(token.strip_prefix('-').unwrap_or(token))
+            && token.parse::<i64>().is_err()
+            && token.parse::<u64>().is_err()
+        {
+            return Ok(wide_int(token));
+        }
+        serde_json::from_str(token)
     }
 }
 
@@ -404,6 +527,42 @@ mod tests {
         assert_eq!(vars["g"], json!(-5));
         assert!(matches("Int", &vars["b"]["c"]) && matches("Float", &vars["b"]["c"]));
         assert!(!matches("Int", &vars["d"]) && !matches("Int", &vars["e"]));
+    }
+
+    fn wide_ints_nested(arrays: usize) -> String {
+        let wide = "18446744073709551616";
+        let inner = (0..arrays).fold("{\"x\": 1}".to_owned(), |inner, _| {
+            format!("[{wide}, \"[{{\\\"\", {inner}]")
+        });
+        format!(r#"{{"a": {inner}}}"#)
+    }
+
+    #[test]
+    fn variables_read_each_byte_once_up_to_255_levels() {
+        // Given variables of 255 levels with a wide integer and a string at each level, and of
+        // 256 levels
+        let (fits, deeper) = (wide_ints_nested(253), wide_ints_nested(254));
+
+        // When each is read
+        let mut exact = Exact::new(&fits);
+        let read = exact.object(1);
+
+        // Then the 255 levels read, each byte reaches a parse at most once, and 256 levels are
+        // too deep
+        let mut value = &read.unwrap()["a"];
+        for _ in 0..253 {
+            assert_eq!(wide_digits(&value[0]), Some("18446744073709551616"));
+            assert_eq!(value[1], json!("[{\""));
+            value = &value[2];
+        }
+        assert_eq!(value, &json!({"x": 1}));
+        assert!(
+            exact.parsed <= fits.len(),
+            "{} of {}",
+            exact.parsed,
+            fits.len()
+        );
+        assert!(Variables::parse(&deeper).is_err());
     }
 
     #[test]
