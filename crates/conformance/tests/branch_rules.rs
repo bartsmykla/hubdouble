@@ -861,6 +861,45 @@ async fn a_code_owner_review_rule_waits_for_an_owner_of_every_changed_file() {
     assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
 }
 
+#[tokio::test]
+async fn a_merge_waits_for_the_code_owners_of_the_base_before_the_merge() {
+    for method in ["merge", "squash", "rebase"] {
+        // Given a main whose CODEOWNERS gives src/ to bob and needs code owner reviews, and
+        // pull request 1 whose head also gives every file to carol
+        let rules = on_main(&json!([owners_rule()]));
+        let server = server_where(&[rules, computed_at_once(), pull_request()], |repo| {
+            repo["files"][".github/CODEOWNERS"] = json!("* @alice\n/src/ @bob\n");
+            repo["collaborators"] = json!([{"login": "bob", "permission": "write"},
+                                           {"login": "carol", "permission": "write"}]);
+        })
+        .await;
+        let alice = client(&server, ALICE_TOKEN);
+        let head = tip(&alice, "feature").await;
+        let moved = file_commit(&alice, &head, ".github/CODEOWNERS", "* @carol\n").await;
+        let answer = alice
+            .call_json(
+                Method::PATCH,
+                &format!("{REPO}/git/refs/heads/feature"),
+                &json!({"sha": moved}),
+            )
+            .await;
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.json());
+        let main = tip(&alice, "main").await;
+        // When carol, an owner only in the merge result, approves and alice merges
+        approve_as(&server, fixture::CAROL_TOKEN).await;
+        let merged = alice
+            .call_json(
+                Method::PUT,
+                &format!("{PULL}/merge"),
+                &json!({"merge_method": method}),
+            )
+            .await;
+        // Then the merge waits for bob, the owner of src/ on main, and main stays
+        assert_refused(&merged, 405, Some(PULL_MERGE_DOCS), method);
+        assert_eq!(tip(&alice, "main").await, main, "{method}");
+    }
+}
+
 fn tag_ruleset(rules: &Value) -> Value {
     json!({"kind": "ruleset", "repository": "acme/public", "name": "tags",
            "target": "tag", "enforcement": "active", "bypass_actors": [],

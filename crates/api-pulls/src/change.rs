@@ -628,6 +628,7 @@ pub(crate) fn merge_pull(
     let who = (sender, timeline::via_app(merger));
     let base = state::branch(git, tx, repo.id, &p.base.ref_name)?;
     let (title, message) = (options.title, options.message);
+    let owners = reviewing::owner_violations(tx, merger, issue)?;
     let commit = match options.method {
         MergeMethod::Merge => {
             let title = title.unwrap_or_else(|| format!("Merge pull request #{}", issue.number));
@@ -674,8 +675,14 @@ pub(crate) fn merge_pull(
     if let Some(path) = denied_workflow(tx, git, merger, repo, Some(base), commit)? {
         return Err(ApiError::new(403, workflow_refusal(merger, &path)).with_docs(MERGE_DOCS));
     }
-    let violations =
-        reviewing::merge_violations(tx, git, merger, issue, (base, commit), options.method)?;
+    let violations = reviewing::merge_violations(
+        tx,
+        git,
+        merger,
+        issue,
+        (base, commit),
+        (options.method, owners),
+    )?;
     if !violations.is_empty() {
         return Err(refusal(405, &violations, MERGE_DOCS));
     }

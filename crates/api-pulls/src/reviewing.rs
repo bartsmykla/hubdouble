@@ -352,13 +352,30 @@ pub(crate) fn tested(p: &Pull, method: MergeMethod) -> Result<Via, ApiError> {
     })
 }
 
+/// The code owner reviews that a merge still waits on, from the owners of the base branch
+/// before the merge moves it.
+pub(crate) fn owner_violations(
+    tx: &Tx,
+    actor: &Actor,
+    issue: &Issue,
+) -> Result<Vec<String>, ApiError> {
+    let p = crate::state::pull(issue)?;
+    let Some(repo) = base_repo(tx, p) else {
+        return Ok(Vec::new());
+    };
+    let rules = branch_rules::rules(tx, Some(actor), repo, &p.base.ref_name, true);
+    Ok(owner_blocks(tx, issue, p, &rules))
+}
+
+/// Every rule a merge from `old` to `new` breaks, after the `owners` of
+/// [`owner_violations`].
 pub(crate) fn merge_violations(
     tx: &Tx,
     git: &Git,
     actor: &Actor,
     issue: &Issue,
     (old, new): (ObjectId, ObjectId),
-    method: MergeMethod,
+    (method, owners): (MergeMethod, Vec<String>),
 ) -> Result<Vec<String>, ApiError> {
     let p = crate::state::pull(issue)?;
     let Some(repo) = base_repo(tx, p) else {
@@ -367,7 +384,7 @@ pub(crate) fn merge_violations(
     let branch = &p.base.ref_name;
     let moves = (Some(old), Some(new));
     let rules = branch_rules::rules(tx, Some(actor), repo, branch, true);
-    let mut out = owner_blocks(tx, issue, p, &rules);
+    let mut out = owners;
     out.extend(branch_rules::violations(
         tx,
         git,
