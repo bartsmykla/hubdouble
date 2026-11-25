@@ -40,7 +40,11 @@ RUN --network=none --mount=type=cache,target=/src/target \
     && printf '\n%s\nmusl libc (MIT)\n\nUsed by:\n    the C library of the static binary\n\n' \
     ================================================================================ \
     >> /licenses/THIRD-PARTY-NOTICES \
-    && cat notices/musl-COPYRIGHT >> /licenses/THIRD-PARTY-NOTICES
+    && cat notices/musl-COPYRIGHT >> /licenses/THIRD-PARTY-NOTICES \
+    && printf '\n%s\nRust 1.100.0 standard library (MIT OR Apache-2.0)\n\nUsed by:\n    the standard library of the static binary\n\n' \
+    ================================================================================ \
+    >> /licenses/THIRD-PARTY-NOTICES \
+    && cat notices/rust-std >> /licenses/THIRD-PARTY-NOTICES
 
 FROM scratch
 COPY --from=build /hubdouble /hubdouble
