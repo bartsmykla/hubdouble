@@ -410,6 +410,55 @@ async fn an_asset_link_answers_as_the_release_asset_cdn_after_five_minutes() {
     }
 }
 
+#[tokio::test]
+async fn an_asset_link_refuses_a_missing_part_as_the_cdn_refuses_its_token() {
+    // Given the download redirect of an asset
+    let server = start(vec![release_seed()]).await;
+    let redirect = alice(&server)
+        .call_headers(
+            Method::GET,
+            "repos/acme/public/releases/assets/7101",
+            HeaderMap::from_iter([(ACCEPT, HeaderValue::from_static(OCTET_STREAM))]),
+        )
+        .await;
+    assert_eq!(redirect.status, StatusCode::FOUND);
+    let path = redirect
+        .header("location")
+        .strip_prefix(&server.base)
+        .unwrap()
+        .to_owned();
+    let (bare, query) = path.split_once('?').unwrap();
+    let without = |name: &str| {
+        let kept: Vec<&str> = query
+            .split('&')
+            .filter(|p| !p.starts_with(&format!("{name}=")))
+            .collect();
+        format!("{bare}?{}", kept.join("&"))
+    };
+    assert!(query.contains("%3A"), "{query}");
+    let root = GoGithub::new(&server);
+    // When the link is read without sig, without se, and with a lower case %3a
+    let unsigned = root.get(&without("sig")).await;
+    let undated = root.get(&without("se")).await;
+    let lower = root.get(&path.replace("%3A", "%3a")).await;
+    // Then a link without sig is a token not provided and a link without se fails its
+    // signature, as live cli/cli v2.40.0 asset links answered with jwt dropped and with jwt
+    // kept but its exp claim removed on 2026-11-25, and %3a decodes as %3A
+    for (answer, code) in [
+        (&unsigned, "jwt:jwt-not-provided"),
+        (&undated, "jwt:signature-fail"),
+    ] {
+        assert_eq!(answer.status.as_u16(), 618, "{code}");
+        assert_eq!(answer.header("content-type"), OCTET_STREAM, "{code}");
+        assert!(
+            String::from_utf8_lossy(&answer.body).contains(&format!("<title>618 {code}</title>")),
+            "{code}"
+        );
+    }
+    assert_eq!(lower.status, StatusCode::OK);
+    assert_eq!(&lower.body[..], b"the asset bytes");
+}
+
 fn ruleset(id: i64, include: &[&str], rule: &str, enforcement: &str) -> Value {
     json!({"kind": "ruleset", "id": id, "repository": "acme/public", "name": format!("r{id}"),
            "target": "branch", "enforcement": enforcement,

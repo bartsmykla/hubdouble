@@ -8,7 +8,7 @@ mod narrow;
 mod requirement;
 mod sso;
 
-pub use admin::authenticate_admin;
+pub use admin::{authenticate_admin, equal_in_constant_time};
 pub use bypass::{Bypass, ruleset_bypass};
 pub use check::repo_role;
 pub use contract::*;

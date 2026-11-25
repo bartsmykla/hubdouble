@@ -1,6 +1,7 @@
 use http::header::{self, HeaderName, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
 use hubdouble_admin::Services;
+use hubdouble_auth::equal_in_constant_time;
 use hubdouble_model::{ApiError, Timestamp};
 use hubdouble_rest::Reply;
 use hubdouble_store::Blobs;
@@ -125,7 +126,12 @@ fn link(query: Option<&str>) -> Link<'_> {
         expiry: None,
         sig: None,
     };
-    let time = |value: &str| Timestamp::parse(&value.replace("%3A", ":")).ok();
+    let time = |value: &str| {
+        percent_encoding::percent_decode_str(value)
+            .decode_utf8()
+            .ok()
+            .and_then(|t| Timestamp::parse(&t).ok())
+    };
     for (name, value) in query
         .unwrap_or_default()
         .split('&')
@@ -164,18 +170,34 @@ pub(crate) fn serve(
     if blob.link_key.is_some() {
         let now = services.clock.now();
         let link = link(query);
-        let signed = |at| blob.link_signature(id, link.start, at).as_deref() == link.sig;
-        let refusal = match (blob.cdn, link.expiry) {
-            (true, None) => Some(cdn_refusal("jwt:jwt-not-provided", HTML, now)),
-            (true, Some(at)) if !signed(at) => {
+        let signed = |at: Timestamp| {
+            blob.link_signature(id, link.start, at)
+                .zip(link.sig)
+                .is_some_and(|(want, given)| {
+                    equal_in_constant_time(want.as_bytes(), given.as_bytes())
+                })
+        };
+        let refusal = match (blob.cdn, link.sig, link.expiry) {
+            (true, None, _) => Some(cdn_refusal(
+                "jwt:jwt-not-provided",
+                if query.is_none_or(str::is_empty) {
+                    HTML
+                } else {
+                    OCTET_STREAM
+                },
+                now,
+            )),
+            (true, _, at) if !at.is_some_and(&signed) => {
                 Some(cdn_refusal("jwt:signature-fail", OCTET_STREAM, now))
             }
-            (true, Some(at)) if now > at => Some(cdn_refusal("jwt:expired", OCTET_STREAM, now)),
-            (false, None) => Some(storage_refusal(NOT_SIGNED, now)),
-            (false, Some(at)) if !signed(at) => {
+            (true, _, Some(at)) if now > at => {
+                Some(cdn_refusal("jwt:expired", OCTET_STREAM, now))
+            }
+            (false, _, None) => Some(storage_refusal(NOT_SIGNED, now)),
+            (false, _, Some(at)) if !signed(at) => {
                 Some(storage_refusal("Signature did not match.", now))
             }
-            (false, Some(at)) if now > at || link.start.is_some_and(|start| now < start) => {
+            (false, _, Some(at)) if now > at || link.start.is_some_and(|start| now < start) => {
                 Some(storage_refusal(&expired(link.start, at, now), now))
             }
             _ => None,

@@ -2728,6 +2728,7 @@ dependencies = [
  "hubdouble-store",
  "hyper",
  "hyper-util",
+ "percent-encoding",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

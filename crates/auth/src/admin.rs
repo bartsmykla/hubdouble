@@ -20,6 +20,8 @@ pub fn authenticate_admin(headers: &HeaderMap, admin_token: &str) -> Result<(), 
     }
 }
 
-fn equal_in_constant_time(a: &[u8], b: &[u8]) -> bool {
+/// Compares two secrets in a time that depends only on their lengths.
+#[must_use]
+pub fn equal_in_constant_time(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
