@@ -15,6 +15,7 @@ pub(crate) struct MergeFacts {
     issue_id: i64,
     behind: bool,
     test_merge: Option<ObjectId>,
+    merge: Option<reviewing::TestMerge>,
     closed: Option<&'static str>,
     owners: Owners,
 }
@@ -47,7 +48,7 @@ pub(crate) fn current_owner_groups(
         tx,
         issue.repo_id,
         at,
-        &mut OwnersFile::default(),
+        &mut PushMemo::default(),
         Owners::default(),
     )?;
     Ok(groups_of(tx, issue.repo_id, &owners))
@@ -111,15 +112,32 @@ pub fn mergeable_state(tx: &Tx, issue: &Issue) -> &'static str {
     }
 }
 
-/// The CODEOWNERS file of the last base tip read, so that a push which moves the base of many
-/// pull requests reads it once.
+/// What a push that moves the base of many pull requests reads once for all of them: the
+/// CODEOWNERS file of the last base tip, and each ancestry answer.
 #[derive(Default)]
-pub(crate) struct OwnersFile {
+pub(crate) struct PushMemo {
     at: Option<(i64, ObjectId)>,
     text: Option<Arc<str>>,
+    reaches: Vec<((i64, ObjectId, ObjectId), bool)>,
 }
 
-impl OwnersFile {
+impl PushMemo {
+    pub(crate) fn is_ancestor(
+        &mut self,
+        tx: &Tx,
+        git: &Git,
+        repo: i64,
+        (ancestor, of): (ObjectId, ObjectId),
+    ) -> Result<bool, GitError> {
+        let key = (repo, ancestor, of);
+        if let Some(&(_, known)) = self.reaches.iter().find(|(k, _)| *k == key) {
+            return Ok(known);
+        }
+        let answer = git.is_ancestor(tx, repo, ancestor, of)?;
+        self.reaches.push((key, answer));
+        Ok(answer)
+    }
+
     fn read(
         &mut self,
         tx: &Tx,
@@ -136,14 +154,14 @@ impl OwnersFile {
 }
 
 pub(crate) fn record(tx: &mut TxMut<'_>, git: &Git, issue: &Issue) -> Result<(), ApiError> {
-    record_with(tx, git, issue, &mut OwnersFile::default())
+    record_with(tx, git, issue, &mut PushMemo::default())
 }
 
 pub(crate) fn record_with(
     tx: &mut TxMut<'_>,
     git: &Git,
     issue: &Issue,
-    file: &mut OwnersFile,
+    memo: &mut PushMemo,
 ) -> Result<(), ApiError> {
     let Some(p) = issue.pull.as_ref() else {
         return Ok(());
@@ -154,13 +172,15 @@ pub(crate) fn record_with(
         IssueState::Open => {
             let base = base_tip(git, tx, p)?;
             let head: ObjectId = p.head.sha.parse()?;
+            let merge = reviewing::test_merge_of(tx, git, p, old.as_ref().and_then(|f| f.merge))?;
             MergeFacts {
                 issue_id: issue.id,
                 behind: p.mergeable == Some(true)
                     && !git.is_ancestor(tx, issue.repo_id, base, head)?,
-                test_merge: reviewing::current_test_merge(tx, git, p, base)?,
+                test_merge: reviewing::current_test_merge(tx, git, (p, base, head), merge, memo)?,
+                merge,
                 closed: None,
-                owners: owners(git, tx, issue.repo_id, (base, head), file, kept)?,
+                owners: owners(git, tx, issue.repo_id, (base, head), memo, kept)?,
             }
         }
         IssueState::Closed => {
@@ -170,6 +190,7 @@ pub(crate) fn record_with(
                 issue_id: issue.id,
                 behind,
                 test_merge,
+                merge: old.as_ref().and_then(|f| f.merge),
                 closed: Some(
                     old.as_ref()
                         .and_then(|f| f.closed)
@@ -197,10 +218,10 @@ fn owners(
     tx: &Tx,
     repo: i64,
     at: (ObjectId, ObjectId),
-    file: &mut OwnersFile,
+    memo: &mut PushMemo,
     kept: Owners,
 ) -> Result<Owners, ApiError> {
-    let Some(text) = file.read(tx, git, repo, at.0)? else {
+    let Some(text) = memo.read(tx, git, repo, at.0)? else {
         return Ok(Owners::default());
     };
     if kept.at == Some(at) {

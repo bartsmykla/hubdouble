@@ -342,25 +342,44 @@ fn review_blocks(tx: &Tx, issue: &Issue, p: &Pull, rules: &[&Rule]) -> Vec<Strin
 pub(crate) fn current_test_merge(
     tx: &Tx,
     git: &Git,
-    p: &Pull,
-    base: ObjectId,
+    (p, base, head): (&Pull, ObjectId, ObjectId),
+    merge: Option<TestMerge>,
+    memo: &mut crate::merge_state::PushMemo,
 ) -> Result<Option<ObjectId>, ApiError> {
+    let (Some((id, Some([first, second]))), Some(repo)) = (merge, p.base.repo_id) else {
+        return Ok(None);
+    };
+    let counts =
+        second == head && (first == base || memo.is_ancestor(tx, git, repo, (first, base))?);
+    Ok(counts.then_some(id))
+}
+
+/// The test merge commit of a pull request, with its parents when it has two.
+pub(crate) type TestMerge = (ObjectId, Option<[ObjectId; 2]>);
+
+/// The [`TestMerge`] of `p`, taken from `known` while `merge_commit_sha` still names it, so
+/// that a base push does not read the commit of every pull request again.
+pub(crate) fn test_merge_of(
+    tx: &Tx,
+    git: &Git,
+    p: &Pull,
+    known: Option<TestMerge>,
+) -> Result<Option<TestMerge>, ApiError> {
     let (Some(sha), Some(repo)) = (p.merge_commit_sha.as_deref(), p.base.repo_id) else {
         return Ok(None);
     };
-    let head: ObjectId = p.head.sha.parse()?;
     let id: ObjectId = sha.parse()?;
+    if let Some(known) = known.filter(|(at, _)| *at == id) {
+        return Ok(Some(known));
+    }
     let Ok(node) = crate::state::commit_node(git, tx, repo, id) else {
         return Ok(None);
     };
-    Ok(match node.commit.parents[..] {
-        [first, second]
-            if second == head && (first == base || git.is_ancestor(tx, repo, first, base)?) =>
-        {
-            Some(id)
-        }
+    let parents = match node.commit.parents[..] {
+        [first, second] => Some([first, second]),
         _ => None,
-    })
+    };
+    Ok(Some((id, parents)))
 }
 
 fn tested_now(
@@ -369,9 +388,17 @@ fn tested_now(
     (p, base): (&Pull, ObjectId),
     method: MergeMethod,
 ) -> Result<Via, ApiError> {
+    let head = p.head.sha.parse()?;
+    let merge = test_merge_of(tx, git, p, None)?;
     Ok(Via::Pull {
-        head: p.head.sha.parse()?,
-        test_merge: current_test_merge(tx, git, p, base)?,
+        head,
+        test_merge: current_test_merge(
+            tx,
+            git,
+            (p, base, head),
+            merge,
+            &mut crate::merge_state::PushMemo::default(),
+        )?,
         method,
     })
 }
