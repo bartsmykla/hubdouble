@@ -225,12 +225,37 @@ impl Timestamp {
         let secs = self.0.rem_euclid(86_400);
         let weekday = DAYS[usize::try_from((days + 4).rem_euclid(7)).unwrap_or(0)];
         let month = MONTHS[usize::try_from(month - 1).unwrap_or(0)];
-        format!(
-            "{weekday}, {day:02} {month} {year:04} {:02}:{:02}:{:02} GMT",
-            secs / 3600,
-            secs / 60 % 60,
-            secs % 60
-        )
+        if !(0..=9999).contains(&year) {
+            return format!(
+                "{weekday}, {day:02} {month} {year:04} {:02}:{:02}:{:02} GMT",
+                secs / 3600,
+                secs / 60 % 60,
+                secs % 60
+            );
+        }
+        let mut out = String::with_capacity(29);
+        out.push_str(weekday);
+        out.push_str(", ");
+        digits(&mut out, day, 2);
+        out.push(' ');
+        out.push_str(month);
+        out.push(' ');
+        digits(&mut out, year, 4);
+        out.push(' ');
+        digits(&mut out, secs / 3600, 2);
+        out.push(':');
+        digits(&mut out, secs / 60 % 60, 2);
+        out.push(':');
+        digits(&mut out, secs % 60, 2);
+        out.push_str(" GMT");
+        out
+    }
+}
+
+fn digits(out: &mut String, n: i64, width: u32) {
+    for place in (0..width).rev() {
+        let digit = n / 10_i64.pow(place) % 10;
+        out.push(char::from(b'0' + u8::try_from(digit).unwrap_or(0)));
     }
 }
 

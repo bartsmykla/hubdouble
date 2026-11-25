@@ -526,6 +526,11 @@ impl Inner {
             parts,
         } = call;
         let mut reply = result.unwrap_or_else(|e| error_reply(&e));
+        if let Some(at) = reply.modified
+            && let Ok(value) = HeaderValue::try_from(at.http_date())
+        {
+            reply.headers.insert(header::LAST_MODIFIED, value);
+        }
         let selected = (!version.is_empty()).then_some(version);
         let media = self.common_headers(&mut reply.headers, &parts.headers, resource, selected);
         if let Some(scopes) = &who.scopes {
@@ -545,7 +550,7 @@ impl Inner {
                 Some(t) => t.trim_start_matches("W/").to_owned(),
                 None => etag(&media, &reply.body),
             };
-            if not_modified(&parts.headers, &reply.headers, &strong) {
+            if not_modified(&parts.headers, reply.modified, &strong) {
                 reply.status = StatusCode::NOT_MODIFIED;
                 reply.body = Bytes::new();
                 if who.authenticated {
@@ -1066,23 +1071,17 @@ fn if_none_match(headers: &HeaderMap, tag: &str) -> bool {
         .any(|t| t.trim() == "*" || strip(t) == tag)
 }
 
-fn not_modified(request: &HeaderMap, reply: &HeaderMap, tag: &str) -> bool {
+fn not_modified(request: &HeaderMap, modified: Option<Timestamp>, tag: &str) -> bool {
     if request.contains_key(header::IF_NONE_MATCH) {
         return if_none_match(request, tag);
     }
-    let date = |headers: &HeaderMap, name| {
-        headers
-            .get(name)
+    modified.is_some_and(|modified| {
+        request
+            .get(header::IF_MODIFIED_SINCE)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| Timestamp::parse_http_date(v).ok())
-    };
-    match (
-        date(reply, header::LAST_MODIFIED),
-        date(request, header::IF_MODIFIED_SINCE),
-    ) {
-        (Some(modified), Some(since)) => modified <= since,
-        _ => false,
-    }
+            .is_some_and(|since| modified <= since)
+    })
 }
 
 fn set(headers: &mut HeaderMap, name: &'static str, value: &str) {
@@ -1106,6 +1105,7 @@ pub(crate) fn to_response(reply: Reply, head: bool) -> HttpResponse {
         status,
         mut headers,
         body,
+        ..
     } = reply;
     let body = if head {
         headers.insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));

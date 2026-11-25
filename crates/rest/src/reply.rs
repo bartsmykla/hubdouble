@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use http::header::{CONTENT_TYPE, LAST_MODIFIED, LOCATION};
+use http::header::{CONTENT_TYPE, LOCATION};
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use hubdouble_model::{ApiError, Timestamp};
 use serde::Serialize;
@@ -14,6 +14,7 @@ pub struct Reply {
     pub status: StatusCode,
     pub headers: HeaderMap,
     pub body: Bytes,
+    pub modified: Option<Timestamp>,
 }
 
 impl Reply {
@@ -37,6 +38,7 @@ impl Reply {
             status: StatusCode::OK,
             headers,
             body: body.into(),
+            modified: None,
         }
     }
 
@@ -52,6 +54,7 @@ impl Reply {
             status: StatusCode::FOUND,
             headers,
             body: Bytes::new(),
+            modified: None,
         })
     }
 
@@ -62,6 +65,7 @@ impl Reply {
             status: StatusCode::NO_CONTENT,
             headers: HeaderMap::new(),
             body: Bytes::new(),
+            modified: None,
         }
     }
 
@@ -82,12 +86,11 @@ impl Reply {
         Ok(self)
     }
 
-    /// Adds `Last-Modified`, which the server compares with `If-Modified-Since`.
+    /// Sets the time that the server sends as `Last-Modified` and compares with
+    /// `If-Modified-Since`.
     #[must_use]
     pub fn modified(mut self, at: Timestamp) -> Reply {
-        if let Ok(value) = HeaderValue::from_str(&at.http_date()) {
-            self.headers.insert(LAST_MODIFIED, value);
-        }
+        self.modified = Some(at);
         self
     }
 }
