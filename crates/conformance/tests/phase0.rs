@@ -218,6 +218,36 @@ async fn an_injected_event_is_signed_and_logged_for_the_app_it_names() {
     );
 }
 
+#[tokio::test]
+async fn an_injected_push_has_the_push_form_of_the_repository() {
+    // Given
+    let server = TestServer::builder()
+        .frame(hubdouble_api::register_all)
+        .fixture()
+        .start()
+        .await;
+    let push = json!({"event": "push", "app": APP_SLUG, "installation": INSTALLATION_ID,
+        "repository": "acme/public", "sender": "alice",
+        "payload": {"ref": "refs/heads/main"}});
+
+    // When
+    let injected = server.admin(Method::POST, "events", Some(&push)).await;
+    let drained = server.admin(Method::POST, "hooks/drain", None).await;
+
+    // Then
+    assert_eq!(injected.status, StatusCode::NO_CONTENT);
+    assert_eq!(drained.status, StatusCode::NO_CONTENT);
+    let received = server.receiver.received().await;
+    let [delivered] = &received[..] else {
+        panic!("expected one delivery, got {}", received.len());
+    };
+    let repository = &delivered.json()["repository"];
+    assert_eq!(repository["url"], repository["html_url"]);
+    assert_eq!(repository["master_branch"], "main");
+    assert_eq!(repository["organization"], "acme");
+    assert!(repository["created_at"].is_i64(), "{repository}");
+}
+
 #[derive(Clone, Default)]
 struct Moves(Vec<RefChange>);
 

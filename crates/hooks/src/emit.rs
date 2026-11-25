@@ -334,7 +334,7 @@ pub(crate) fn inject(tx: &mut TxMut<'_>, i: Injection) -> Result<(), HooksError>
         repo: i.repo_id,
         org: None,
         sender: i.sender_id,
-        push: false,
+        push: i.event == "push",
     };
     let rendered = rendered(tx, &subjects, &payload);
     let body = payload_body(
