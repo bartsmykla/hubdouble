@@ -91,6 +91,29 @@ pub fn covers(pattern: &str, path: &str) -> bool {
     false
 }
 
+/// The paths that a pattern can cover, for an index of rules: [`covers`] is true only when
+/// the first segment of the path, or for [`Reach::Name`] one of its segments, is the name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach<'p> {
+    Root(&'p str),
+    Name(&'p str),
+    Any,
+}
+
+/// The [`Reach`] of a pattern.
+#[must_use]
+pub fn reach(pattern: &str) -> Reach<'_> {
+    let trimmed = pattern.trim_end_matches('/');
+    let anchored = trimmed.starts_with('/') || trimmed.contains('/');
+    let p = trimmed.trim_start_matches('/');
+    let literal = |s: &str| !s.is_empty() && !s.contains(['*', '?']);
+    match p.split('/').next() {
+        Some(first) if anchored && literal(first) => Reach::Root(first),
+        _ if !anchored && literal(p) => Reach::Name(p),
+        _ => Reach::Any,
+    }
+}
+
 /// The owners of `path`: those of the last rule whose pattern covers it. `None` when no rule
 /// covers it; an empty list when the last such rule names no owner.
 #[must_use]
@@ -316,6 +339,64 @@ mod tests {
         ] {
             assert_eq!(covers(pattern, path), want, "{pattern} against {path}");
         }
+    }
+
+    #[test]
+    fn a_pattern_covers_only_paths_in_its_reach() {
+        // Given patterns of each reach and paths at the root, deeper and with the name inside
+        let patterns = [
+            "*",
+            "*.js",
+            "/build/logs/",
+            "docs/*",
+            "apps/",
+            "apps",
+            "/docs/",
+            "**/logs",
+            "/a?c/",
+            "/scripts/ci.sh",
+            "src/apps/main.go",
+            "/",
+            "logs",
+        ];
+        let paths = [
+            "apps",
+            "apps/x",
+            "src/apps/main.go",
+            "docs/a.md",
+            "docs",
+            "build/logs/y.log",
+            "deep/logs/x.log",
+            "logs",
+            "abc/d",
+            "scripts/ci.sh",
+            "other/scripts/ci.sh",
+            "x.js",
+            "apps.js",
+            "src/apps",
+        ];
+        // When each pattern meets each path
+        for pattern in patterns {
+            let reach = reach(pattern);
+            for path in paths {
+                let segments: Vec<&str> = path.split('/').collect();
+                let admitted = match reach {
+                    Reach::Root(first) => segments[0] == first,
+                    Reach::Name(name) => segments.contains(&name),
+                    Reach::Any => true,
+                };
+                // Then a covered path is in the reach of the pattern
+                assert!(
+                    !covers(pattern, path) || admitted,
+                    "{pattern} against {path}"
+                );
+            }
+        }
+        assert_eq!(reach("/build/logs/"), Reach::Root("build"));
+        assert_eq!(reach("docs/*"), Reach::Root("docs"));
+        assert_eq!(reach("apps/"), Reach::Name("apps"));
+        assert_eq!(reach("*.js"), Reach::Any);
+        assert_eq!(reach("/a?c/"), Reach::Any);
     }
 
     #[test]

@@ -1,12 +1,12 @@
-use std::collections::BTreeSet;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use hubdouble_api_gitdata::branch_rules::{self, CheckResults, MergeMethod, RequiredChecks, Via};
-use hubdouble_api_gitdata::codeowners;
+use hubdouble_api_gitdata::codeowners::{self, Reach};
 use hubdouble_git::{Git, GitError, ObjectId};
 use hubdouble_model::{ApiError, Issue, IssueState, Pull};
 use hubdouble_store::{Entity, Repos, Rows, Tx, TxMut};
+use sha2::{Digest as _, Sha256};
 
 use crate::reviewing;
 
@@ -25,7 +25,7 @@ pub(crate) struct MergeFacts {
 #[derive(Clone, Default, PartialEq, Eq)]
 struct Owners {
     at: Option<(ObjectId, ObjectId)>,
-    read: Option<(ObjectId, u64)>,
+    read: Option<(ObjectId, [u8; 32])>,
     rules: Vec<(usize, Box<str>)>,
     covering: Vec<Vec<usize>>,
 }
@@ -128,14 +128,68 @@ pub fn mergeable_state(tx: &Tx, issue: &Issue) -> &'static str {
 }
 
 /// What a push that moves the base of many pull requests reads once for all of them: the
-/// CODEOWNERS blob of the last base tip, the text of the last blob read, and each ancestry
+/// CODEOWNERS blob of the last base tip, the rules of the last blob read, and each ancestry
 /// answer.
 #[derive(Default)]
 pub(crate) struct PushMemo {
     at: Option<(i64, ObjectId)>,
     blob: Option<ObjectId>,
-    text: Option<(ObjectId, Arc<str>)>,
+    rules: Option<(ObjectId, Arc<Rules>)>,
     reaches: Vec<((i64, ObjectId, ObjectId), bool)>,
+}
+
+struct Rule {
+    number: usize,
+    pattern: Box<str>,
+    raw: Box<str>,
+}
+
+struct Rules {
+    all: Vec<Rule>,
+    root: HashMap<Box<str>, Vec<usize>>,
+    name: HashMap<Box<str>, Vec<usize>>,
+    any: Vec<usize>,
+}
+
+impl Rules {
+    fn of(text: &str) -> Self {
+        let mut rules = Self {
+            all: Vec::new(),
+            root: HashMap::new(),
+            name: HashMap::new(),
+            any: Vec::new(),
+        };
+        for (i, line) in codeowners::lines(text).enumerate() {
+            match codeowners::reach(line.pattern.1) {
+                Reach::Root(first) => rules.root.entry(first.into()).or_default().push(i),
+                Reach::Name(name) => rules.name.entry(name.into()).or_default().push(i),
+                Reach::Any => rules.any.push(i),
+            }
+            rules.all.push(Rule {
+                number: line.number,
+                pattern: line.pattern.1.into(),
+                raw: line.raw.into(),
+            });
+        }
+        rules
+    }
+
+    fn covering(&self, path: &str) -> Vec<usize> {
+        let mut candidates = self.any.clone();
+        let first = path.split('/').next().unwrap_or(path);
+        candidates.extend(self.root.get(first).into_iter().flatten());
+        for segment in path.split('/') {
+            candidates.extend(self.name.get(segment).into_iter().flatten());
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
+            .into_iter()
+            .filter_map(|i| self.all.get(i))
+            .filter(|rule| codeowners::covers(&rule.pattern, path))
+            .map(|rule| rule.number)
+            .collect()
+    }
 }
 
 impl PushMemo {
@@ -169,21 +223,21 @@ impl PushMemo {
         Ok(self.blob)
     }
 
-    fn text(
+    fn rules(
         &mut self,
         tx: &Tx,
         git: &Git,
         repo: i64,
         blob: ObjectId,
-    ) -> Result<Arc<str>, ApiError> {
-        if let Some((read, text)) = &self.text
+    ) -> Result<Arc<Rules>, ApiError> {
+        if let Some((read, rules)) = &self.rules
             && *read == blob
         {
-            return Ok(text.clone());
+            return Ok(rules.clone());
         }
-        let text: Arc<str> = codeowners::text_of(tx, git, repo, blob)?.into();
-        self.text = Some((blob, text.clone()));
-        Ok(text)
+        let rules = Arc::new(Rules::of(&codeowners::text_of(tx, git, repo, blob)?));
+        self.rules = Some((blob, rules.clone()));
+        Ok(rules)
     }
 }
 
@@ -266,24 +320,22 @@ fn owners(
         Err(GitError::NotFound) => Vec::new(),
         Err(e) => return Err(e.into()),
     };
-    let mut digest = DefaultHasher::new();
-    paths.hash(&mut digest);
-    let read = Some((blob, digest.finish()));
+    let mut digest = Sha256::new();
+    for path in &paths {
+        digest.update(path.as_bytes());
+        digest.update([0]);
+    }
+    let read = Some((blob, digest.finalize().into()));
     if kept.read == read {
         return Ok(Owners {
             at: Some(at),
             ..kept
         });
     }
-    let text = memo.text(tx, git, repo, blob)?;
-    let rules: Vec<codeowners::Line<'_>> = codeowners::lines(&text).collect();
+    let rules = memo.rules(tx, git, repo, blob)?;
     let mut covering: Vec<Vec<usize>> = Vec::new();
     for path in &paths {
-        let lines: Vec<usize> = rules
-            .iter()
-            .filter(|l| codeowners::covers(l.pattern.1, path))
-            .map(|l| l.number)
-            .collect();
+        let lines = rules.covering(path);
         if !lines.is_empty() && !covering.contains(&lines) {
             covering.push(lines);
         }
@@ -293,9 +345,10 @@ fn owners(
         at: Some(at),
         read,
         rules: rules
+            .all
             .iter()
-            .filter(|l| used.contains(&l.number))
-            .map(|l| (l.number, l.raw.into()))
+            .filter(|rule| used.contains(&rule.number))
+            .map(|rule| (rule.number, rule.raw.clone()))
             .collect(),
         covering,
     })

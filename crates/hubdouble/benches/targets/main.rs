@@ -1049,10 +1049,36 @@ fn in_process(dir: &Path, rows: &mut Vec<Row>) {
     }
 }
 
-fn push_seed(owner_rules: usize) -> Vec<Value> {
+#[derive(Clone, Copy)]
+enum Owners {
+    None,
+    Kept(usize),
+    Changed(usize),
+}
+
+impl Owners {
+    fn rules(self) -> usize {
+        match self {
+            Owners::None => 0,
+            Owners::Kept(rules) | Owners::Changed(rules) => rules,
+        }
+    }
+
+    fn pulls(self) -> String {
+        match self {
+            Owners::None => format!("{PUSH_PULLS}"),
+            Owners::Kept(n) => format!("a CODEOWNERS of {n} rules and {PUSH_PULLS}"),
+            Owners::Changed(n) => {
+                format!("a CODEOWNERS of {n} rules that each push changes and {PUSH_PULLS}")
+            }
+        }
+    }
+}
+
+fn push_seed(owners_file: Owners) -> Vec<Value> {
     let mut entries = fixture::seed();
     let mut owners = String::new();
-    for n in 1..=owner_rules {
+    for n in 1..=owners_file.rules() {
         let _ = writeln!(owners, "/area-{n}/ @{}", fixture::ALICE);
     }
     let _ = writeln!(owners, "/changes/ @{}", fixture::ALICE);
@@ -1062,12 +1088,15 @@ fn push_seed(owner_rules: usize) -> Vec<Value> {
                    "files": {format!("changes/{n}.txt"): format!("change {n}\n")}})
         })
         .collect();
-    commits.push(json!({"branch": "main-next", "message": "move main",
-                        "files": {"next.txt": "next\n"}}));
+    let mut next_files = json!({"next.txt": "next\n"});
+    if let Owners::Changed(_) = owners_file {
+        next_files[".github/CODEOWNERS"] = json!(format!("{owners}/next/ @{}\n", fixture::ALICE));
+    }
+    commits.push(json!({"branch": "main-next", "message": "move main", "files": next_files}));
     for entry in &mut entries {
         if entry["kind"] == "repository" && entry["name"] == fixture::PUBLIC_REPO {
             entry["commits"] = Value::Array(commits.clone());
-            if owner_rules > 0 {
+            if !matches!(owners_file, Owners::None) {
                 entry["files"][".github/CODEOWNERS"] = json!(owners);
             }
         }
@@ -1125,10 +1154,14 @@ async fn first_reads(client: &mut Client, doc: &mut Doc) -> Result<Vec<Duration>
     Ok(samples)
 }
 
-fn push_rows(dir: &Path, owner_rules: usize, rows: &mut Vec<Row>) {
+fn push_rows(dir: &Path, owners_file: Owners, rows: &mut Vec<Row>) {
     let receiver = Receiver::start(Duration::ZERO);
-    let seed_file = format!("push-seed-{owner_rules}.json");
-    let running = start_server(&push_seed(owner_rules), &receiver.url, dir, &seed_file);
+    let (owner_rules, changed) = (
+        owners_file.rules(),
+        matches!(owners_file, Owners::Changed(_)),
+    );
+    let seed_file = format!("push-seed-{owner_rules}-{changed}.json");
+    let running = start_server(&push_seed(owners_file), &receiver.url, dir, &seed_file);
     let client_runtime = runtime(4);
     let addr = running.addr;
     let measured = client_runtime.block_on(async {
@@ -1168,11 +1201,7 @@ fn push_rows(dir: &Path, owner_rules: usize, rows: &mut Vec<Row>) {
             (Err(e), _) | (_, Err(e)) => Err(e),
         }
     });
-    let with = if owner_rules == 0 {
-        format!("{PUSH_PULLS}")
-    } else {
-        format!("a CODEOWNERS of {owner_rules} rules and {PUSH_PULLS}")
-    };
+    let with = owners_file.pulls();
     let measure = format!("GraphQL updateRefs p99, main with {with} open pull requests");
     let read_measure = format!(
         "REST pull request read p99, first after a push to main with {with} open pull requests"
@@ -1991,8 +2020,9 @@ fn main() -> ExitCode {
         container_rows(dir.path(), &mut rows);
     }
     in_process(dir.path(), &mut rows);
-    push_rows(dir.path(), 0, &mut rows);
-    push_rows(dir.path(), PUSH_OWNER_RULES, &mut rows);
+    push_rows(dir.path(), Owners::None, &mut rows);
+    push_rows(dir.path(), Owners::Kept(PUSH_OWNER_RULES), &mut rows);
+    push_rows(dir.path(), Owners::Changed(PUSH_OWNER_RULES), &mut rows);
     rows.push(calibration_row(before, calibrate()));
     let table = report(&rows);
     let _ = std::io::stdout().lock().write_all(table.as_bytes());
