@@ -2438,6 +2438,7 @@ name = "hubdouble-api-pulls"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "foldhash 0.2.0",
  "http",
  "hubdouble-admin",
  "hubdouble-api-gitdata",

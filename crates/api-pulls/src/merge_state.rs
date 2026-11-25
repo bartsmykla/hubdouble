@@ -1,5 +1,9 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
+use std::hash::BuildHasher as _;
+use std::ops::Range;
 use std::sync::Arc;
+
+use foldhash::fast::FixedState;
 
 use hubdouble_api_gitdata::branch_rules::{self, CheckResults, MergeMethod, RequiredChecks, Via};
 use hubdouble_api_gitdata::codeowners::{self, Reach};
@@ -140,56 +144,90 @@ pub(crate) struct PushMemo {
 
 struct Rule {
     number: usize,
-    pattern: Box<str>,
-    raw: Box<str>,
+    raw: Range<usize>,
+    pattern: Range<usize>,
+    next: Option<usize>,
 }
 
+const ROOT: u8 = 0;
+const NAME: u8 = 1;
+
 struct Rules {
+    text: String,
     all: Vec<Rule>,
-    root: HashMap<Box<str>, Vec<usize>>,
-    name: HashMap<Box<str>, Vec<usize>>,
+    first: HashMap<u64, usize, FixedState>,
     any: Vec<usize>,
 }
 
 impl Rules {
-    fn of(text: &str) -> Self {
-        let mut rules = Self {
-            all: Vec::new(),
-            root: HashMap::new(),
-            name: HashMap::new(),
-            any: Vec::new(),
-        };
-        for (i, line) in codeowners::lines(text).enumerate() {
-            match codeowners::reach(line.pattern.1) {
-                Reach::Root(first) => rules.root.entry(first.into()).or_default().push(i),
-                Reach::Name(name) => rules.name.entry(name.into()).or_default().push(i),
-                Reach::Any => rules.any.push(i),
-            }
-            rules.all.push(Rule {
-                number: line.number,
-                pattern: line.pattern.1.into(),
-                raw: line.raw.into(),
+    fn of(text: String) -> Self {
+        let lines = text.bytes().filter(|&b| b == b'\n').count() + 1;
+        let mut all = Vec::with_capacity(lines);
+        let mut first: HashMap<u64, usize, FixedState> =
+            HashMap::with_capacity_and_hasher(lines, FixedState::default());
+        let mut any = Vec::new();
+        for (i, (number, raw, pattern)) in codeowners::spans(&text).enumerate() {
+            let key = match codeowners::reach(text.get(pattern.clone()).unwrap_or_default()) {
+                Reach::Root(name) => Some(key_of(ROOT, name)),
+                Reach::Name(name) => Some(key_of(NAME, name)),
+                Reach::Any => None,
+            };
+            let next = if let Some(key) = key {
+                first.insert(key, i)
+            } else {
+                any.push(i);
+                None
+            };
+            all.push(Rule {
+                number,
+                raw,
+                pattern,
+                next,
             });
         }
-        rules
+        Self {
+            text,
+            all,
+            first,
+            any,
+        }
+    }
+
+    fn raw(&self, rule: &Rule) -> &str {
+        self.text.get(rule.raw.clone()).unwrap_or_default()
     }
 
     fn covering(&self, path: &str) -> Vec<usize> {
-        let mut candidates = self.any.clone();
-        let first = path.split('/').next().unwrap_or(path);
-        candidates.extend(self.root.get(first).into_iter().flatten());
+        let mut found = self.any.clone();
+        let root = path.split('/').next().unwrap_or(path);
+        self.chain(key_of(ROOT, root), &mut found);
         for segment in path.split('/') {
-            candidates.extend(self.name.get(segment).into_iter().flatten());
+            self.chain(key_of(NAME, segment), &mut found);
         }
-        candidates.sort_unstable();
-        candidates.dedup();
-        candidates
-            .into_iter()
-            .filter_map(|i| self.all.get(i))
-            .filter(|rule| codeowners::covers(&rule.pattern, path))
-            .map(|rule| rule.number)
-            .collect()
+        found.sort_unstable();
+        found.dedup();
+        found.retain(|&i| {
+            self.all.get(i).is_some_and(|rule| {
+                codeowners::covers(
+                    self.text.get(rule.pattern.clone()).unwrap_or_default(),
+                    path,
+                )
+            })
+        });
+        found
     }
+
+    fn chain(&self, key: u64, out: &mut Vec<usize>) {
+        let mut at = self.first.get(&key).copied();
+        while let Some(i) = at {
+            out.push(i);
+            at = self.all.get(i).and_then(|rule| rule.next);
+        }
+    }
+}
+
+fn key_of(kind: u8, name: &str) -> u64 {
+    FixedState::default().hash_one((kind, name))
 }
 
 impl PushMemo {
@@ -235,7 +273,7 @@ impl PushMemo {
         {
             return Ok(rules.clone());
         }
-        let rules = Arc::new(Rules::of(&codeowners::text_of(tx, git, repo, blob)?));
+        let rules = Arc::new(Rules::of(codeowners::text_of(tx, git, repo, blob)?));
         self.rules = Some((blob, rules.clone()));
         Ok(rules)
     }
@@ -334,21 +372,28 @@ fn owners(
     }
     let rules = memo.rules(tx, git, repo, blob)?;
     let mut covering: Vec<Vec<usize>> = Vec::new();
+    let mut used: Vec<usize> = Vec::new();
     for path in &paths {
-        let lines = rules.covering(path);
+        let found = rules.covering(path);
+        let lines: Vec<usize> = found
+            .iter()
+            .filter_map(|&i| rules.all.get(i))
+            .map(|rule| rule.number)
+            .collect();
         if !lines.is_empty() && !covering.contains(&lines) {
             covering.push(lines);
+            used.extend(found);
         }
     }
-    let used: BTreeSet<usize> = covering.iter().flatten().copied().collect();
+    used.sort_unstable();
+    used.dedup();
     Ok(Owners {
         at: Some(at),
         read,
-        rules: rules
-            .all
+        rules: used
             .iter()
-            .filter(|rule| used.contains(&rule.number))
-            .map(|rule| (rule.number, rule.raw.clone()))
+            .filter_map(|&i| rules.all.get(i))
+            .map(|rule| (rule.number, rules.raw(rule).into()))
             .collect(),
         covering,
     })

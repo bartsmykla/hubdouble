@@ -27,11 +27,7 @@ pub struct Line<'t> {
 /// line or after a space starts a comment.
 pub fn lines(text: &str) -> impl Iterator<Item = Line<'_>> {
     text.lines().enumerate().filter_map(|(i, raw)| {
-        let line = raw.split_once(" #").map_or(raw, |(l, _)| l);
-        if line.trim_start().starts_with('#') {
-            return None;
-        }
-        let mut tokens = tokens(line);
+        let mut tokens = tokens(rule_of(raw)?);
         let pattern = tokens.next()?;
         Some(Line {
             number: i + 1,
@@ -40,6 +36,36 @@ pub fn lines(text: &str) -> impl Iterator<Item = Line<'_>> {
             owners: tokens.collect(),
         })
     })
+}
+
+/// The rules of [`lines`] as byte ranges into `text`: the line number, the line as written and
+/// the pattern, without reading the owners.
+pub fn spans(
+    text: &str,
+) -> impl Iterator<Item = (usize, std::ops::Range<usize>, std::ops::Range<usize>)> {
+    let mut start = 0;
+    text.split_inclusive('\n')
+        .enumerate()
+        .filter_map(move |(i, chunk)| {
+            let at = start;
+            start += chunk.len();
+            let raw = chunk
+                .strip_suffix('\n')
+                .map_or(chunk, |r| r.strip_suffix('\r').unwrap_or(r));
+            let (column, pattern) = tokens(rule_of(raw)?).next()?;
+            let from = at + column - 1;
+            Some((i + 1, at..at + raw.len(), from..from + pattern.len()))
+        })
+}
+
+fn rule_of(raw: &str) -> Option<&str> {
+    let line = raw
+        .as_bytes()
+        .windows(2)
+        .position(|pair| pair == b" #")
+        .and_then(|end| raw.get(..end))
+        .unwrap_or(raw);
+    (!line.trim_start().starts_with('#')).then_some(line)
 }
 
 fn tokens(line: &str) -> impl Iterator<Item = (usize, &str)> {
@@ -339,6 +365,29 @@ mod tests {
         ] {
             assert_eq!(covers(pattern, path), want, "{pattern} against {path}");
         }
+    }
+
+    #[test]
+    fn spans_name_the_lines_and_patterns_of_the_rules() {
+        // Given rules with comments, a blank line, CRLF ends and no final newline
+        let text = "# owners\r\n*.js @a # web\r\n\r\n  /docs/  @b\n#x\nlogs @c";
+        // When its spans are read
+        let read: Vec<(usize, &str, &str)> = spans(text)
+            .map(|(n, raw, pattern)| (n, &text[raw], &text[pattern]))
+            .collect();
+        // Then they are the rules of lines, by number, line and pattern
+        let expected: Vec<(usize, &str, &str)> = lines(text)
+            .map(|l| (l.number, l.raw, l.pattern.1))
+            .collect();
+        assert_eq!(read, expected);
+        assert_eq!(
+            read,
+            [
+                (2, "*.js @a # web", "*.js"),
+                (4, "  /docs/  @b", "/docs/"),
+                (6, "logs @c", "logs")
+            ]
+        );
     }
 
     #[test]

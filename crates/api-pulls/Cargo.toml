@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+foldhash.workspace = true
 http.workspace = true
 hubdouble-admin.workspace = true
 hubdouble-api-gitdata.workspace = true
