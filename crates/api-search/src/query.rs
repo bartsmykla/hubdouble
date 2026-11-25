@@ -218,8 +218,8 @@ fn count(value: &str) -> Option<Bounds<i64>> {
     bounds(
         value,
         |v| v.parse::<i64>().ok().map(|n| (n, n)),
-        |n| n + 1,
-        |n| n - 1,
+        |n: i64| n.saturating_add(1),
+        |n: i64| n.saturating_sub(1),
     )
 }
 
@@ -563,6 +563,8 @@ mod tests {
             ("10..*", Some(10), None),
             ("*..10", None, Some(10)),
             ("7", Some(7), Some(7)),
+            (">9223372036854775807", Some(i64::MAX), None),
+            ("<-9223372036854775808", None, Some(i64::MIN)),
         ];
 
         // When each is read as a count
