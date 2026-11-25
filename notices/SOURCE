@@ -1,0 +1,24 @@
+The hubdouble binary in this image contains xdiff, the diff library that
+libgit2 bundles in deps/xdiff (see deps/xdiff/xdiff.h):
+
+    Copyright (C) 2003  Davide Libenzi
+
+xdiff is free software under the GNU Lesser General Public License,
+version 2.1 or (at your option) any later version. The license text is
+in THIRD-PARTY-NOTICES, under LGPL-2.1-or-later.
+
+The binary links xdiff statically. The complete source of this binary,
+with xdiff and every other crate that it uses, is in the image
+
+    ghcr.io/bartsmykla/hubdouble:@VERSION@-source
+
+which is published beside this image. That image holds one file,
+hubdouble-source.tar. To copy it out:
+
+    id=$(docker create ghcr.io/bartsmykla/hubdouble:@VERSION@-source x)
+    docker cp "$id":/hubdouble-source.tar .
+    docker rm "$id"
+
+The BUILD file in the archive gives the command that rebuilds the binary
+without network access, and the steps that relink it with a changed
+xdiff.

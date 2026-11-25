@@ -32,7 +32,9 @@ checksum = "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
 [[libgit2-sys.clarify.files]]
 path = "libgit2/COPYING"
 license = "GPL-2.0-only WITH GCC-exception-2.0"
-checksum = "e0938121c0554985fe17196ac38fc590d149268e9c46e0c0e7a2eae1354fae71"
+checksum = "f6e577a7500ee8071d05a8842eddc83f6a24b303b4a20a806917b854d0593bc5"
+start = " libgit2 is Copyright (C) the libgit2 contributors,"
+end = "Public License instead of this License."
 
 [[libgit2-sys.clarify.files]]
 path = "libgit2/COPYING"
