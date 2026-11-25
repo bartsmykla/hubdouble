@@ -4,7 +4,7 @@ use hubdouble_api_gitdata::branch_rules::MergeMethod;
 use hubdouble_auth::{Target as AuthTarget, authorize};
 use hubdouble_git::{CommitNode, GitError, RefNode};
 use hubdouble_gql::{
-    Args, Ctx, ErrorType, GqlError, MutCtx, Obj, Registry, Resolved, Target, connection,
+    Args, Ctx, ErrorType, GqlError, Int, MutCtx, Obj, Registry, Resolved, Target, connection,
 };
 use hubdouble_model::{ApiError, Issue, IssueState, Pull, Repo, node_id};
 use hubdouble_store::{Issues, Labels, Repos};
@@ -149,8 +149,14 @@ fn by_id(cx: &Ctx<'_>, id: i64) -> Result<Resolved, GqlError> {
 fn by_number(cx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
     let repo = obj.get::<Repo>()?;
     check_read(cx, repo.id)?;
-    let number = required(args, "number")?;
-    Ok(pull_object(state::numbered(cx.tx, repo.id, number)?))
+    match args.int("number")? {
+        Some(Int::Fits(number)) => Ok(pull_object(state::numbered(cx.tx, repo.id, number)?)),
+        Some(Int::Past(_)) => Err(ApiError::not_found().into()),
+        None => Err(GqlError::new(
+            ErrorType::Unprocessable,
+            "argument number is required",
+        )),
+    }
 }
 
 fn repository(cx: &Ctx<'_>, id: Option<i64>) -> Result<Resolved, GqlError> {

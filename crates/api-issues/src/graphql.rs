@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use hubdouble_auth::{Target as AuthTarget, authorize};
-use hubdouble_gql::{Args, Ctx, ErrorType, GqlError, Obj, Registry, Resolved, Target, connection};
+use hubdouble_gql::{
+    Args, Ctx, ErrorType, GqlError, Int, Obj, Registry, Resolved, Target, connection,
+};
 use hubdouble_model::{
     AccountKind, ApiError, Grant, Issue, IssueComment, IssueState, Repo, Requirement, node_id,
 };
@@ -192,13 +194,14 @@ fn comment_author(ctx: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlErr
 fn repository_issue(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
     let repo = obj.get::<Repo>()?;
     read_repo(ctx, repo.id, &ISSUES_READ)?;
-    let number: i64 = args
-        .get("number")?
+    let number = args
+        .int("number")?
         .ok_or_else(|| GqlError::new(ErrorType::Unprocessable, "argument number is required"))?;
-    ctx.tx
-        .table::<Issues>()
-        .by_number(repo.id, number)
-        .filter(|i| i.pull.is_none())
+    let held = match number {
+        Int::Fits(n) => ctx.tx.table::<Issues>().by_number(repo.id, n),
+        Int::Past(_) => None,
+    };
+    held.filter(|i| i.pull.is_none())
         .map(issue_object)
         .ok_or_else(|| {
             GqlError::new(

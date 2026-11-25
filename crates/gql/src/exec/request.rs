@@ -133,7 +133,10 @@ pub(crate) fn variables(
 }
 
 fn wide_int(n: &serde_json::Number) -> bool {
-    (n.is_i64() || n.is_u64()) && n.as_i64().is_none_or(|n| i32::try_from(n).is_err())
+    if n.is_f64() {
+        return n.as_f64().is_some_and(crate::scalar::wide_integer);
+    }
+    n.as_i64().is_none_or(|n| i32::try_from(n).is_err())
 }
 
 fn mask_wide_ints(v: &mut Value) {

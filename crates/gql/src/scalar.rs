@@ -6,7 +6,7 @@ use serde_json::Value;
 pub(crate) fn matches(name: &str, value: &Value) -> bool {
     match name {
         "Boolean" => value.is_boolean(),
-        "Int" => value.is_i64() || value.is_u64(),
+        "Int" => value.is_i64() || value.is_u64() || value.as_f64().is_some_and(wide_integer),
         "Float" => value.is_number(),
         "String" | "ID" => value.is_string(),
         "CustomPropertyValue" => {
@@ -40,8 +40,14 @@ fn matches_string(name: &str, s: &str) -> bool {
     }
 }
 
-fn digits(s: &str) -> bool {
+pub(crate) fn digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Whether a JSON number that `serde_json` read as a double was an integer past 64 bits:
+/// every double that large is a whole number, and a smaller integer reads as `i64` or `u64`.
+pub(crate) fn wide_integer(f: f64) -> bool {
+    f.is_finite() && f.abs() >= 9_223_372_036_854_775_808.0
 }
 
 fn date(s: &str) -> bool {

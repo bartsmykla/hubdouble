@@ -407,6 +407,63 @@ async fn depth_and_node_limits_apply_before_field_resolution() {
 }
 
 #[tokio::test]
+async fn an_int_past_64_bits_keeps_its_digits() {
+    // Given
+    let server = server().await;
+    let api = Graphql::new(client(&server, fixture::ALICE_TOKEN));
+    for page in [
+        "first: 99999999999999999999",
+        "first: 99999999999999999999, last: 1",
+    ] {
+        // When
+        let query = format!(
+            "{{ repository(owner:\"acme\",name:\"docs\") {{ issues({page}) {{ totalCount }} }} }}"
+        );
+        let answer = api.query(&query, &Value::Null).await.json();
+
+        // Then
+        assert!(answer.get("data").is_none_or(Value::is_null), "{page}");
+        let error = &answer["errors"][0];
+        assert_eq!(error["type"], "MAX_NODE_LIMIT_EXCEEDED", "{page}");
+        assert_eq!(
+            error["message"],
+            "By the time this query traverses to the issues connection, it is requesting up to 99,999,999,999,999,999,999 possible nodes which exceeds the maximum limit of 500,000.",
+        );
+    }
+    let lookup = "query($n: Int!) { repository(owner:\"acme\",name:\"docs\") { issue(number: $n) { title } } }";
+    let literal = |n: &str| lookup.replace("($n: Int!)", "").replace("$n", n);
+    for (query, vars, number) in [
+        (
+            literal("9223372036854775808"),
+            Value::Null,
+            "9223372036854775808",
+        ),
+        (
+            literal("99999999999999999999"),
+            Value::Null,
+            "99999999999999999999",
+        ),
+        (
+            lookup.to_owned(),
+            json!({"n": 9_223_372_036_854_775_808_u64}),
+            "9223372036854775808",
+        ),
+    ] {
+        // When
+        let answer = api.query(&query, &vars).await.json();
+
+        // Then
+        let issue = &answer["data"]["repository"]["issue"];
+        assert_eq!(*issue, Value::Null, "{query}");
+        assert_eq!(answer["errors"][0]["type"], "NOT_FOUND", "{query}");
+        assert_eq!(
+            answer["errors"][0]["message"],
+            format!("Could not resolve to an Issue with the number of {number}."),
+        );
+    }
+}
+
+#[tokio::test]
 async fn invalid_documents_and_mutation_inputs_return_graphql_request_errors() {
     let server = server().await;
     let api = Graphql::new(client(&server, fixture::ALICE_TOKEN));

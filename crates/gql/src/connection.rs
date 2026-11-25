@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::contract::{Args, ErrorType, GqlError, Resolved};
+use crate::contract::{Args, ErrorType, GqlError, Int, Resolved};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,24 +172,30 @@ pub fn connection<T>(
 pub(crate) const MAX_PAGE: usize = 100;
 
 fn page_size(args: &Args, name: &str) -> Result<Option<usize>, GqlError> {
-    let Some(n) = args.get::<i64>(name)? else {
-        return Ok(None);
-    };
-    let n = usize::try_from(n).map_err(|_| {
+    let negative = || {
         GqlError::new(
             ErrorType::InvalidPagination,
             format!("`{name}` on the connection cannot be less than zero."),
         )
-    })?;
-    if n > MAX_PAGE {
-        return Err(GqlError::new(
+    };
+    let n = match args.int(name)? {
+        None => return Ok(None),
+        Some(Int::Fits(n)) if n < 0 => return Err(negative()),
+        Some(Int::Past(digits)) if digits.starts_with('-') => return Err(negative()),
+        Some(n) => n,
+    };
+    let size = match n {
+        Int::Fits(size) => usize::try_from(size).ok().filter(|size| *size <= MAX_PAGE),
+        Int::Past(_) => None,
+    };
+    size.map(Some).ok_or_else(|| {
+        GqlError::new(
             ErrorType::ExcessivePagination,
             format!(
                 "Requesting {n} records on the connection exceeds the `{name}` limit of {MAX_PAGE} records."
             ),
-        ));
-    }
-    Ok(Some(n))
+        )
+    })
 }
 
 fn boundary<T>(

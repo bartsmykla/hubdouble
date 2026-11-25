@@ -7,13 +7,12 @@ use apollo_compiler::parser::SourceSpan;
 use apollo_compiler::{ExecutableDocument, Node};
 use serde_json::{Map, Value};
 
-use crate::connection::MAX_PAGE;
 use crate::contract::{ErrorType, ResponseError};
 use crate::request_errors::locations;
 use crate::selection::included;
 
 const MAX_DEPTH: usize = 25;
-const MAX_NODES: usize = 500_000;
+const MAX_NODES: u128 = 500_000;
 
 pub(crate) fn check(
     doc: &ExecutableDocument,
@@ -61,7 +60,7 @@ pub(crate) fn check(
     })
 }
 
-fn separated(value: usize) -> String {
+fn separated(value: u128) -> String {
     let digits = value.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, ch) in digits.chars().enumerate() {
@@ -71,6 +70,10 @@ fn separated(value: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+fn page_of(digits: &str) -> Option<u128> {
+    crate::scalar::digits(digits).then(|| digits.parse().unwrap_or(u128::MAX))
 }
 
 fn depth<'a>(
@@ -107,12 +110,12 @@ fn depth<'a>(
 }
 
 type Fields<'a> = IndexMap<&'a str, Vec<&'a Node<Field>>>;
-type Key = (Vec<usize>, usize, Option<usize>);
+type Key = (Vec<usize>, u128, Option<u128>);
 
 #[derive(Clone, Copy, Default)]
 struct Estimate<'a> {
-    total: usize,
-    over: Option<(&'a str, usize, Option<SourceSpan>)>,
+    total: u128,
+    over: Option<(&'a str, u128, Option<SourceSpan>)>,
 }
 
 struct Cost<'a> {
@@ -124,8 +127,8 @@ impl<'a> Cost<'a> {
     fn count(
         &self,
         sets: &[&'a SelectionSet],
-        parents: usize,
-        connection: Option<usize>,
+        parents: u128,
+        connection: Option<u128>,
         memo: &mut HashMap<Key, Estimate<'a>>,
     ) -> Estimate<'a> {
         if parents == 0 || sets.iter().all(|set| set.selections.is_empty()) {
@@ -177,7 +180,7 @@ impl<'a> Cost<'a> {
         estimate
     }
 
-    fn page_size(&self, field: &Field) -> Option<usize> {
+    fn page_size(&self, field: &Field) -> Option<u128> {
         if !field
             .definition
             .ty
@@ -188,16 +191,18 @@ impl<'a> Cost<'a> {
         }
         ["first", "last"].into_iter().find_map(|page| {
             let value = field.specified_argument_by_name(page)?;
-            let size = match value.as_ref() {
-                Ast::Int(n) => n.as_str().parse::<usize>().ok(),
-                Ast::Variable(n) => self
-                    .vars
-                    .get(n.as_str())
-                    .and_then(Value::as_u64)
-                    .and_then(|n| usize::try_from(n).ok()),
+            match value.as_ref() {
+                Ast::Int(n) => page_of(n.as_str()),
+                Ast::Variable(n) => match self.vars.get(n.as_str())? {
+                    Value::Number(n) => page_of(&n.as_u64().map_or_else(
+                        || n.as_f64().map_or_else(String::new, |f| format!("{f:.0}")),
+                        |n| n.to_string(),
+                    )),
+                    Value::String(digits) => page_of(digits),
+                    _ => None,
+                },
                 _ => None,
-            }?;
-            (size <= MAX_PAGE).then_some(size)
+            }
         })
     }
 

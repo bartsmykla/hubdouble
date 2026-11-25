@@ -136,6 +136,51 @@ impl Args {
                 .map_err(|e| GqlError::new(ErrorType::Unprocessable, e.to_string())),
         }
     }
+
+    /// An `Int` argument, or `None` when it is absent or `null`. GitHub takes an integer of any
+    /// size, so a value past `i64` is [`Int::Past`] with its digits, which no row holds.
+    /// A variable past 64 bits keeps the digits of the nearest double, as JSON reads it.
+    ///
+    /// # Errors
+    ///
+    /// An `UNPROCESSABLE` error when the value is not an integer.
+    pub fn int(&self, name: &str) -> Result<Option<Int>, GqlError> {
+        let not_int = || GqlError::new(ErrorType::Unprocessable, format!("{name} is not an Int"));
+        match self.0.get(name) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::Number(n)) => match (n.as_i64(), n.as_u64(), n.as_f64()) {
+                (Some(i), _, _) => Ok(Some(Int::Fits(i))),
+                (None, Some(u), _) => Ok(Some(Int::Past(u.to_string()))),
+                (None, None, Some(f)) if crate::scalar::wide_integer(f) => {
+                    Ok(Some(Int::Past(format!("{f:.0}"))))
+                }
+                _ => Err(not_int()),
+            },
+            Some(serde_json::Value::String(digits))
+                if crate::scalar::digits(digits.strip_prefix('-').unwrap_or(digits)) =>
+            {
+                Ok(Some(Int::Past(digits.clone())))
+            }
+            Some(_) => Err(not_int()),
+        }
+    }
+}
+
+/// An `Int` argument as GitHub reads it: any integer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Int {
+    Fits(i64),
+    /// The digits of an integer past `i64`, with its sign.
+    Past(String),
+}
+
+impl std::fmt::Display for Int {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Int::Fits(i) => write!(f, "{i}"),
+            Int::Past(digits) => f.write_str(digits),
+        }
+    }
 }
 
 /// What [`Ctx::load`] fetches with the actor's per-object grant check.
