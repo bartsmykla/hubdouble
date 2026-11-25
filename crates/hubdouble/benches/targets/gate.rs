@@ -8,7 +8,8 @@ use std::process::ExitCode;
 use serde_json::Value;
 
 use crate::row::{
-    CALIBRATION, Goal, REFERENCE_CALIBRATION_US, REFERENCE_CPU, Row, SECTION_9, number,
+    CALIBRATION, Goal, INVENTORY_TARGET, REFERENCE_CALIBRATION_US, REFERENCE_CPU, Row, SECTION_9,
+    inventory_documents, number,
 };
 
 const BUDGET: f64 = 0.20;
@@ -108,11 +109,34 @@ fn measures(rounds: &[Round], side: fn(&Round) -> &[Row]) -> Vec<&Row> {
         .collect()
 }
 
+type Names<'a> = Box<dyn Fn(&str) -> bool + 'a>;
+
 fn section_9(rounds: &[Round], out: &mut String) -> usize {
     let mut failed = 0;
+    let documents = match inventory_documents() {
+        Ok(names) => names,
+        Err(e) => {
+            let _ = writeln!(out, "MISSING  section 9 {INVENTORY_TARGET}: {e}");
+            return 1;
+        }
+    };
+    let mut checks: Vec<(String, bool, Names<'_>)> = Vec::new();
     for measure in &SECTION_9 {
-        let held = |rows: &[Row]| rows.iter().any(|r| measure.names(&r.measure));
         let calibration = measure.prefix == CALIBRATION;
+        if measure.target == INVENTORY_TARGET {
+            for name in &documents {
+                let row = format!("{}{name}{}", measure.prefix, measure.suffix);
+                let names: Names<'_> = Box::new(move |m| m == row);
+                checks.push((format!("{INVENTORY_TARGET} {name}"), calibration, names));
+            }
+        } else {
+            let names: Names<'_> = Box::new(|m| measure.names(m));
+            checks.push((measure.target.to_owned(), calibration, names));
+        }
+    }
+    for (target, calibration, names) in &checks {
+        let held = |rows: &[Row]| rows.iter().any(|r| names(&r.measure));
+        let calibration = *calibration;
         for (side, rows) in [
             ("now", side_head as fn(&Round) -> &[Row]),
             ("main", side_base),
@@ -129,8 +153,7 @@ fn section_9(rounds: &[Round], out: &mut String) -> usize {
             failed += 1;
             let _ = writeln!(
                 out,
-                "MISSING  section 9 {}: no row {side} in rounds {}",
-                measure.target,
+                "MISSING  section 9 {target}: no row {side} in rounds {}",
                 missing.join(", ")
             );
         }

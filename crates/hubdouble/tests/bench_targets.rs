@@ -7,7 +7,9 @@ mod row;
 
 use std::path::Path;
 
-use row::{CALIBRATION, Goal, REFERENCE_CALIBRATION_US, REFERENCE_CPU, Row, SECTION_9};
+use row::{
+    CALIBRATION, Goal, INVENTORY_TARGET, REFERENCE_CALIBRATION_US, REFERENCE_CPU, Row, SECTION_9,
+};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -39,13 +41,26 @@ fn write(path: &Path, value: &Value) {
 }
 
 fn section_9_rows(without: Option<&str>) -> Vec<Value> {
+    let documents = row::inventory_documents().unwrap_or_else(|e| panic!("{e}"));
     SECTION_9
         .iter()
         .filter(|m| m.prefix != CALIBRATION && Some(m.target) != without)
-        .map(|m| {
-            let middle = if m.suffix.is_empty() { "" } else { "100" };
-            let name = format!("{}{middle}{}", m.prefix, m.suffix);
-            json!({"measure": name, "goal": "report", "unit": "", "value": 1.0})
+        .flat_map(|m| {
+            let middles: Vec<String> = if m.target == INVENTORY_TARGET {
+                documents
+                    .iter()
+                    .filter(|d| without != Some(d.as_str()))
+                    .cloned()
+                    .collect()
+            } else if m.suffix.is_empty() {
+                vec![String::new()]
+            } else {
+                vec!["100".to_owned()]
+            };
+            middles.into_iter().map(move |middle| {
+                let name = format!("{}{middle}{}", m.prefix, m.suffix);
+                json!({"measure": name, "goal": "report", "unit": "", "value": 1.0})
+            })
         })
         .collect()
 }
@@ -285,6 +300,13 @@ fn the_targets_gate_needs_every_section_9_measure_in_every_report_of_each_side()
             gone,
         )
     };
+    let no_teams = |_| {
+        report_without(
+            &[(&LATENCY, Some(10.0))],
+            Some(REFERENCE_CALIBRATION_US),
+            Some("teams"),
+        )
+    };
     let empty = |_| json!({"rows": []});
     let only_later = |n: u32| {
         let mut r = full(n);
@@ -297,7 +319,7 @@ fn the_targets_gate_needs_every_section_9_measure_in_every_report_of_each_side()
         r
     };
 
-    // When the gate judges them, with one measure removed from all five head reports, from one base report, with empty reports, and with a row only the later head rounds hold
+    // When the gate judges them, with one measure removed from all five head reports, from one base report, with empty reports, with a row only the later head rounds hold, and with one inventory document absent on both sides
     let complete = judge(&full, &full);
     let head_without = judge(&|n| without(n, None), &full);
     let base_once_without = judge(&full, &|n| without(n, Some(3)));
@@ -305,6 +327,7 @@ fn the_targets_gate_needs_every_section_9_measure_in_every_report_of_each_side()
     let all_empty = judge(&empty, &empty);
     let base_empty = judge(&full, &empty);
     let later = judge(&only_later, &full);
+    let document_absent = judge(&no_teams, &no_teams);
 
     // Then only complete reports pass, and a measure new on the head passes only when every head round holds it
     assert_eq!(complete, 0);
@@ -315,9 +338,10 @@ fn the_targets_gate_needs_every_section_9_measure_in_every_report_of_each_side()
         all_empty,
         base_empty,
         later,
+        document_absent,
     ]
     .map(|n| n > 0);
-    assert_eq!(failed, [true; 6]);
+    assert_eq!(failed, [true; 7]);
 }
 
 #[test]

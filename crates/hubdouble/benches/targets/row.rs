@@ -20,6 +20,24 @@ pub(crate) enum Goal {
 }
 
 pub(crate) const CALIBRATION: &str = "Runner calibration: JSON round trip of 13 KB";
+pub(crate) const INVENTORY_TARGET: &str = "Inventory GraphQL document";
+pub(crate) const INVENTORY_DIR: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/inventory/graphql");
+
+/// The sorted names of the inventory GraphQL documents, each of which needs its own row.
+pub(crate) fn inventory_documents() -> std::io::Result<Vec<String>> {
+    let mut names: Vec<String> = std::fs::read_dir(INVENTORY_DIR)?
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()
+                .and_then(|n| n.strip_suffix(".graphql"))
+                .map(str::to_owned)
+        })
+        .collect();
+    names.sort();
+    Ok(names)
+}
 
 pub(crate) struct Section9 {
     pub(crate) target: &'static str,
@@ -61,7 +79,7 @@ pub(crate) const SECTION_9: [Section9; 11] = [
         suffix: " routes",
     },
     Section9 {
-        target: "Inventory GraphQL document",
+        target: INVENTORY_TARGET,
         prefix: "GraphQL ",
         suffix: " p99",
     },

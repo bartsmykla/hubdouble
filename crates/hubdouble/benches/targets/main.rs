@@ -32,7 +32,7 @@ static ALLOCATOR: MiMalloc = MiMalloc;
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 const TMP: &str = env!("CARGO_TARGET_TMPDIR");
-const DOCS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/inventory/graphql");
+const DOCS: &str = row::INVENTORY_DIR;
 const PLACEHOLDER_OID: &str = "0123456789abcdef0123456789abcdef01234567";
 const USER_TOKEN: &str = "ghp_0123456789abcdef0123456789abcdef0123";
 const WARMUP: usize = 200;
@@ -628,18 +628,8 @@ struct Doc {
 }
 
 fn documents(w: &World) -> Vec<Doc> {
-    let mut names: Vec<String> = std::fs::read_dir(DOCS)
+    row::inventory_documents()
         .unwrap_or_else(|e| fail("read the inventory documents", e))
-        .filter_map(Result::ok)
-        .filter_map(|e| {
-            e.file_name()
-                .to_str()
-                .and_then(|n| n.strip_suffix(".graphql"))
-                .map(str::to_owned)
-        })
-        .collect();
-    names.sort();
-    names
         .into_iter()
         .map(|name| {
             let mut query = std::fs::read_to_string(format!("{DOCS}/{name}.graphql"))
