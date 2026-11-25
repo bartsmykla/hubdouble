@@ -19,13 +19,19 @@ pub struct Blob {
 }
 
 impl Blob {
-    /// The signature of a link to the blob `id` that expires at `expiry`, or `None` for a blob
-    /// whose links do not expire.
+    /// The signature of a link to the blob `id` that is valid from `start`, when it has one, to
+    /// `expiry`, or `None` for a blob whose links do not expire.
     #[must_use]
-    pub fn link_signature(&self, id: &str, expiry: Timestamp) -> Option<String> {
+    pub fn link_signature(
+        &self,
+        id: &str,
+        start: Option<Timestamp>,
+        expiry: Timestamp,
+    ) -> Option<String> {
         let key = self.link_key.as_deref()?;
         let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key.as_bytes()).ok()?;
         mac.update(id.as_bytes());
+        mac.update(&start.map_or(i64::MIN, Timestamp::unix).to_be_bytes());
         mac.update(&expiry.unix().to_be_bytes());
         let tag = mac.finalize().into_bytes();
         Some(tag.iter().fold(String::with_capacity(64), |mut s, b| {

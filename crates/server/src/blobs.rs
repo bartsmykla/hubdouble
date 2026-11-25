@@ -4,10 +4,13 @@ use hubdouble_admin::Services;
 use hubdouble_model::{ApiError, Timestamp};
 use hubdouble_rest::Reply;
 use hubdouble_store::Blobs;
+use hyper::ext::ReasonPhrase;
 
 use crate::pipeline::{HttpResponse, error_reply, to_response};
 
 const NOT_SIGNED: &str = "se is mandatory. Cannot be empty";
+const STORAGE_REASON: &[u8] = b"Server failed to authenticate the request. Make sure the value of \
+    Authorization header is formed correctly including the signature.";
 
 fn expired(start: Option<Timestamp>, expiry: Timestamp, now: Timestamp) -> String {
     let start = start.map_or_else(String::new, Timestamp::http_date);
@@ -142,15 +145,22 @@ pub(crate) fn serve(
         let refusal = match link.expiry {
             None => Some(NOT_SIGNED.to_owned()),
             Some(at)
-                if link.sig.is_none() || blob.link_signature(id, at).as_deref() != link.sig =>
+                if link.sig.is_none()
+                    || blob.link_signature(id, link.start, at).as_deref() != link.sig =>
             {
                 Some("Signature did not match.".to_owned())
             }
-            Some(at) if now > at => Some(expired(link.start, at, now)),
+            Some(at) if now > at || link.start.is_some_and(|start| now < start) => {
+                Some(expired(link.start, at, now))
+            }
             Some(_) => None,
         };
         if let Some(detail) = refusal {
-            return to_response(storage_refusal(&detail, now), head);
+            let mut response = to_response(storage_refusal(&detail, now), head);
+            response
+                .extensions_mut()
+                .insert(ReasonPhrase::from_static(STORAGE_REASON));
+            return response;
         }
     }
     let len = blob.data.len();

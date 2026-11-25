@@ -10,6 +10,7 @@ use hubdouble_model::{ApiError, Config, ManualClock, Requirement, Timestamp};
 use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::{Blob, Blobs};
 use hyper::client::conn::http1::{SendRequest, handshake};
+use hyper::ext::ReasonPhrase;
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
@@ -66,6 +67,7 @@ fn register(r: &mut Registrar<'_>) {
 struct Running {
     addr: SocketAddr,
     server: Server,
+    clock: Arc<ManualClock>,
     stop: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
@@ -78,7 +80,8 @@ async fn start() -> Running {
         ..Config::default()
     };
     let clock = Arc::new(ManualClock::new(Timestamp::SEED));
-    let server = Server::start(config, clock, &|_| None, Registries::new(register)).unwrap();
+    let server =
+        Server::start(config, clock.clone(), &|_| None, Registries::new(register)).unwrap();
     let listener = server.bind().await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, stopped) = oneshot::channel::<()>();
@@ -93,6 +96,7 @@ async fn start() -> Running {
     Running {
         addr,
         server,
+        clock,
         stop,
         task,
     }
@@ -107,6 +111,7 @@ async fn connect(addr: SocketAddr) -> SendRequest<Full<Bytes>> {
 
 struct Answer {
     status: StatusCode,
+    reason: Option<ReasonPhrase>,
     headers: HeaderMap,
     body: Bytes,
 }
@@ -142,6 +147,7 @@ async fn send(
     let (parts, body) = response.into_parts();
     Answer {
         status: parts.status,
+        reason: parts.extensions.get::<ReasonPhrase>().cloned(),
         headers: parts.headers,
         body: body.collect().await.unwrap().to_bytes(),
     }
@@ -355,6 +361,62 @@ async fn blobs_answer_head_and_ranges() {
     assert_eq!(past.status, StatusCode::RANGE_NOT_SATISFIABLE);
     assert_eq!(past.header("content-range"), "bytes */10");
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_signed_blob_link_works_only_from_its_start_to_its_expiry() {
+    // Given a link to a signed blob that starts 10 seconds and expires 60 seconds after now
+    let s = start().await;
+    let blob = Blob {
+        content_type: "text/plain".to_owned(),
+        data: Bytes::from_static(b"line\n"),
+        link_key: Some("key".into()),
+    };
+    let (st, se) = (
+        Timestamp::SEED.plus_seconds(10),
+        Timestamp::SEED.plus_seconds(60),
+    );
+    let sig = blob.link_signature("log-1", Some(st), se).unwrap();
+    s.server
+        .services()
+        .store
+        .update(|tx| {
+            tx.table_mut::<Blobs>().insert("log-1".to_owned(), blob);
+            Ok(())
+        })
+        .unwrap();
+    let time = |t: Timestamp| t.to_string().replace(':', "%3A");
+    let link = format!(
+        "/_blobs/log-1?se={}&sig={sig}&sp=r&st={}",
+        time(se),
+        time(st)
+    );
+    let moved = format!(
+        "/_blobs/log-1?se={}&sig={sig}&sp=r&st={}",
+        time(se),
+        time(Timestamp::SEED)
+    );
+    // When it is read before its start, from its start, after its expiry, and with another start
+    let early = get(s.addr, &link, &[]).await;
+    s.clock.set(st);
+    let started = get(s.addr, &link, &[]).await;
+    let other_start = get(s.addr, &moved, &[]).await;
+    s.clock.set(se.plus_seconds(1));
+    let late = get(s.addr, &link, &[]).await;
+    // Then only the read in its time frame answers the blob, and each refusal has Azure storage's status line
+    assert_eq!(started.status, StatusCode::OK);
+    assert_eq!(&started.body[..], b"line\n");
+    for refused in [early, other_start, late] {
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert_eq!(refused.header("x-ms-error-code"), "AuthenticationFailed");
+        assert_eq!(
+            refused.reason.as_ref().map(ReasonPhrase::as_bytes),
+            Some(
+                &b"Server failed to authenticate the request. Make sure the value of \
+                   Authorization header is formed correctly including the signature."[..]
+            )
+        );
+    }
 }
 
 #[tokio::test]

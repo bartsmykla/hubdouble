@@ -397,16 +397,19 @@ fn logs(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .as_deref()
         .ok_or_else(ApiError::not_found)?;
     let base = &ctx.tx().config().base_url;
-    let expiry = ctx.now().plus_seconds(LOG_LINK_SECONDS);
+    let (start, expiry) = (
+        ctx.now().plus_seconds(-5),
+        ctx.now().plus_seconds(LOG_LINK_SECONDS),
+    );
     let signature = ctx
         .tx()
         .table::<Blobs>()
         .get(id)
-        .and_then(|blob| blob.link_signature(id, expiry));
+        .and_then(|blob| blob.link_signature(id, Some(start), expiry));
     let link = match signature {
         Some(sig) => {
             let time = |t: Timestamp| t.to_string().replace(':', "%3A");
-            let (st, se) = (time(ctx.now().plus_seconds(-5)), time(expiry));
+            let (st, se) = (time(start), time(expiry));
             format!("{base}/_blobs/{id}?rsct=text%2Fplain&se={se}&sig={sig}&sp=r&st={st}")
         }
         None => format!("{base}/_blobs/{id}"),
