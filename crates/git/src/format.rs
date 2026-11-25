@@ -515,14 +515,18 @@ fn libgit2_deltas(old: &[u8], new: &[u8]) -> Result<Deltas, GitError> {
     let odb = git2::Odb::new().map_err(failed)?;
     odb.add_new_mempack_backend(1).map_err(failed)?;
     let repo = Repository::from_odb(odb).map_err(failed)?;
-    let a = repo.find_blob(repo.blob(old).map_err(failed)?).map_err(failed)?;
-    let b = repo.find_blob(repo.blob(new).map_err(failed)?).map_err(failed)?;
+    let a = repo
+        .find_blob(repo.blob(old).map_err(failed)?)
+        .map_err(failed)?;
+    let b = repo
+        .find_blob(repo.blob(new).map_err(failed)?)
+        .map_err(failed)?;
     let mut opts = DiffOptions::new();
     opts.show_binary(true).force_binary(true);
     let mut found = Ok((None, None));
     let mut on_binary = |_: DiffDelta<'_>, binary: DiffBinary<'_>| {
-        found = delta(&binary.new_file())
-            .and_then(|forward| Ok((forward, delta(&binary.old_file())?)));
+        found =
+            delta(&binary.new_file()).and_then(|forward| Ok((forward, delta(&binary.old_file())?)));
         true
     };
     repo.diff_blobs(
