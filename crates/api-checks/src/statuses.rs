@@ -81,7 +81,7 @@ pub fn insert(
     if !failed.is_empty() {
         return Err(ApiError::unprocessable("Validation Failed")
             .with_errors_text(format!("Validation failed: {}", failed.join(", ")))
-            .with_docs(CREATE_DOCS));
+            .without_docs());
     }
     let sha = view::commit(tx, git, repo.id, reference)
         .ok_or_else(|| no_commit(reference))?

@@ -93,6 +93,14 @@ impl ApiError {
         self
     }
 
+    /// The same error without `documentation_url`, for the answers that GitHub sends without
+    /// one.
+    #[must_use]
+    pub fn without_docs(mut self) -> ApiError {
+        self.documentation_url = String::new();
+        self
+    }
+
     #[must_use]
     pub fn with_error(mut self, e: FieldError) -> ApiError {
         self.errors.push(e);

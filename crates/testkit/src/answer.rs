@@ -38,6 +38,20 @@ const EMPTY_BODY_ON_LIVE_GITHUB: [LiveEvidence; 1] = [LiveEvidence {
     date: "2026-11-24",
 }];
 
+/// The only answers whose error body may leave out `documentation_url`.
+const NO_DOCS_ON_LIVE_GITHUB: [LiveEvidence; 1] = [LiveEvidence {
+    operation_id: "repos/create-commit-status",
+    status: 422,
+    command: "gh api repos/renovatebot/renovate/issues/44119 --jq .body",
+    date: "2026-11-25",
+}];
+
+fn live_without_docs(id: &str, status: u16) -> bool {
+    NO_DOCS_ON_LIVE_GITHUB
+        .iter()
+        .any(|e| e.operation_id == id && e.status == status && !e.command.is_empty())
+}
+
 fn live_empty_body(id: &str, status: u16) -> Option<&'static LiveEvidence> {
     EMPTY_BODY_ON_LIVE_GITHUB
         .iter()
@@ -535,6 +549,9 @@ fn error_body_with(x: &Exchange<'_>, id: &str, schema_checked: bool) -> Vec<Stri
     };
     let mut errors = Vec::new();
     for field in ["message", "documentation_url"] {
+        if field == "documentation_url" && body.get(field).is_none() && live_without_docs(id, s) {
+            continue;
+        }
         if !body.get(field).is_some_and(Value::is_string) {
             errors.push(format!("{id} {s}: no {field} in the error body"));
         }
@@ -898,6 +915,20 @@ mod tests {
             .is_err()
         );
         for e in EMPTY_BODY_ON_LIVE_GITHUB {
+            assert!(e.command.starts_with("gh api") && !e.date.is_empty());
+        }
+    }
+
+    #[test]
+    fn only_a_live_evidence_key_leaves_out_the_documentation_url() {
+        let h = github_headers();
+        let yes = |_: &str| true;
+        let body =
+            br#"{"message":"Validation Failed","errors":"Validation failed: x","status":"422"}"#;
+        let post = |path| check(&exchange("POST", path, 422, &h, body), &yes);
+        assert!(post("/repos/o/r/statuses/abc").is_ok());
+        assert!(post("/repos/o/r/issues").is_err());
+        for e in NO_DOCS_ON_LIVE_GITHUB {
             assert!(e.command.starts_with("gh api") && !e.date.is_empty());
         }
     }

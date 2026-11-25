@@ -559,10 +559,14 @@ async fn a_commit_status_is_validated_as_github_validates_a_status() {
         )
         .await;
 
-    // Then each refusal is a 422 of the Status model and writes nothing
+    // Then each refusal is a 422 of the Status model and writes nothing, and a model
+    // validation has no documentation_url, as the live answers quoted in the plan
     for answer in [&long, &relative] {
         assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(answer.json()["errors"].is_string(), "{}", answer.json());
+        let body = answer.json();
+        assert!(body["errors"].is_string(), "{body}");
+        assert_eq!(body["status"], "422", "{body}");
+        assert_eq!(body.get("documentation_url"), None, "{body}");
     }
     for (answer, field) in [(&no_state, "state"), (&emoji, "context")] {
         assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY);

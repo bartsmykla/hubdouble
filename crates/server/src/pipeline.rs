@@ -643,6 +643,7 @@ struct ErrorBody<'a> {
     message: &'a str,
     #[serde(skip_serializing_if = "Errors::is_empty")]
     errors: Errors<'a>,
+    #[serde(skip_serializing_if = "str::is_empty")]
     documentation_url: &'a str,
     status: String,
 }
