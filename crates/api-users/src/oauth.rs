@@ -144,7 +144,9 @@ fn access_token(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 }
 
 fn secret_matches(app: &App, form: &Form) -> bool {
-    form.get("client_secret") == Some(app.client_secret.as_str())
+    form.get("client_secret").is_some_and(|given| {
+        hubdouble_auth::equal_in_constant_time(given.as_bytes(), app.client_secret.as_bytes())
+    })
 }
 
 fn tokens(ctx: &Ctx<'_>, issued: &Issued) -> Result<Reply, ApiError> {
