@@ -1,4 +1,4 @@
-use hubdouble_api_gitdata::branch_rules::{self, CheckResults, MergeMethod, RequiredChecks};
+use hubdouble_api_gitdata::branch_rules::{self, CheckResults, MergeMethod, RequiredChecks, Via};
 use hubdouble_api_gitdata::codeowners;
 use hubdouble_git::{Git, GitError, ObjectId};
 use hubdouble_model::{ApiError, Issue, IssueState, Pull};
@@ -12,6 +12,7 @@ pub(crate) type MergeStates = Rows<MergeFacts>;
 pub(crate) struct MergeFacts {
     issue_id: i64,
     behind: bool,
+    test_merge: Option<ObjectId>,
     closed: Option<&'static str>,
     owners: Owners,
 }
@@ -40,7 +41,8 @@ impl Entity for MergeFacts {
 /// needs the base tip in the head, `blocked` while a required check, a required approval or a
 /// required thread resolution is missing, `unstable` while another check or status does not
 /// pass, and `clean` otherwise. A required check reads the test merge commit when that commit
-/// has a result for it and the head otherwise, and a check run and a commit status of one name
+/// merges the head into the base or an older base and has a result for it, and the head
+/// otherwise, as a merge does, and a check run and a commit status of one name
 /// must both pass. A draft answers as a ready one. A closed one keeps the state it had when it
 /// closed.
 #[must_use]
@@ -52,8 +54,13 @@ pub fn mergeable_state(tx: &Tx, issue: &Issue) -> &'static str {
     match issue.state {
         IssueState::Closed => facts
             .and_then(|f| f.closed)
-            .unwrap_or_else(|| open_state(tx, issue, p, false)),
-        IssueState::Open => open_state(tx, issue, p, facts.is_some_and(|f| f.behind)),
+            .unwrap_or_else(|| open_state(tx, issue, p, (false, None))),
+        IssueState::Open => open_state(
+            tx,
+            issue,
+            p,
+            facts.map_or((false, None), |f| (f.behind, f.test_merge)),
+        ),
     }
 }
 
@@ -104,19 +111,22 @@ pub(crate) fn record_with(
                 issue_id: issue.id,
                 behind: p.mergeable == Some(true)
                     && !git.is_ancestor(tx, issue.repo_id, base, head)?,
+                test_merge: reviewing::current_test_merge(tx, git, p, base)?,
                 closed: None,
                 owners: owners(git, tx, issue.repo_id, (base, head), file, kept)?,
             }
         }
         IssueState::Closed => {
             let behind = old.as_ref().is_some_and(|f| f.behind);
+            let test_merge = old.as_ref().and_then(|f| f.test_merge);
             MergeFacts {
                 issue_id: issue.id,
                 behind,
+                test_merge,
                 closed: Some(
                     old.as_ref()
                         .and_then(|f| f.closed)
-                        .unwrap_or_else(|| open_state(tx, issue, p, behind)),
+                        .unwrap_or_else(|| open_state(tx, issue, p, (behind, test_merge))),
                 ),
                 owners: kept,
             }
@@ -171,7 +181,12 @@ fn owners(
     })
 }
 
-fn open_state(tx: &Tx, issue: &Issue, p: &Pull, behind: bool) -> &'static str {
+fn open_state(
+    tx: &Tx,
+    issue: &Issue,
+    p: &Pull,
+    (behind, test_merge): (bool, Option<ObjectId>),
+) -> &'static str {
     match p.mergeable {
         None => return "unknown",
         Some(false) => return "dirty",
@@ -185,11 +200,13 @@ fn open_state(tx: &Tx, issue: &Issue, p: &Pull, behind: bool) -> &'static str {
     if required.strict && behind {
         return "behind";
     }
-    let Ok(via) = reviewing::tested(p, MergeMethod::Merge) else {
-        return "unknown";
-    };
     let Ok(head) = p.head.sha.parse() else {
         return "unknown";
+    };
+    let via = Via::Pull {
+        head,
+        test_merge,
+        method: MergeMethod::Merge,
     };
     if !required.unmet(tx, repo.id, &via.tested(head)).is_empty()
         || !reviewing::blocks(tx, issue, p, &rules).is_empty()

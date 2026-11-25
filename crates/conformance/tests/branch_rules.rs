@@ -832,6 +832,55 @@ async fn a_required_check_reads_the_latest_head_and_not_an_older_test_merge() {
 }
 
 #[tokio::test]
+async fn a_check_on_the_test_merge_still_counts_after_an_unrelated_base_push() {
+    // Given a main that requires ci without the strict rule, and pull request 1 whose test
+    // merge passes ci
+    let rules = on_main(&json!([required_checks(&["ci"], false)]));
+    let server = server_with_pull(&[rules, computed_at_once()]).await;
+    let alice = client(&server, ALICE_TOKEN);
+    let test_merge = alice.get(PULL).await.json()["merge_commit_sha"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert_ne!(test_merge, "");
+    status(&alice, &test_merge, "ci", "success").await;
+    // When main moves on with a file the pull request does not touch
+    commit(&server, ALICE_ID, "main", Some("main.txt"));
+    assert_eq!(alice.get(PULL).await.json()["merge_commit_sha"], test_merge);
+    // Then the pull request reads as clean and the merge goes through
+    assert_eq!(alice.get(PULL).await.json()["mergeable_state"], "clean");
+    let merged = merge_pull(&alice).await;
+    assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
+}
+
+#[tokio::test]
+async fn a_check_on_the_test_merge_of_an_older_head_counts_for_neither_read_nor_merge() {
+    // Given a main that requires ci without the strict rule, a test merge that stays pending
+    // for many reads, and pull request 1 whose settled test merge passes ci
+    let rules = on_main(&json!([required_checks(&["ci"], false)]));
+    let slow = json!({"kind": "mergeability", "repository": "acme/public", "reads": 1000});
+    let server = server_with_pull(&[rules, slow]).await;
+    let alice = client(&server, ALICE_TOKEN);
+    let settle = || server.admin(Method::POST, "repos/acme/public/pulls/1/mergeability", None);
+    assert_eq!(settle().await.status, StatusCode::OK);
+    let test_merge = alice.get(PULL).await.json()["merge_commit_sha"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert_ne!(test_merge, "");
+    status(&alice, &test_merge, "ci", "success").await;
+    // When a push moves the head and ci has no result on the new head
+    commit(&server, ALICE_ID, "feature", Some("src/next.txt"));
+    let read = alice.get(PULL).await.json();
+    assert_eq!(read["merge_commit_sha"], test_merge);
+    let main = tip(&alice, "main").await;
+    // Then the pull request does not read as clean and the merge is refused with 405
+    assert_eq!(read["mergeable_state"], "unknown");
+    assert_refused(&merge_pull(&alice).await, 405, Some(PULL_MERGE_DOCS), "ci");
+    assert_eq!(tip(&alice, "main").await, main);
+}
+
+#[tokio::test]
 async fn every_branch_and_tag_write_moves_pushed_at_and_leaves_updated_at() {
     // Given acme/public with pull request 1 from feature to main
     let server = server_with_pull(&[computed_at_once()]).await;

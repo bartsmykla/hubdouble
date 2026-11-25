@@ -344,35 +344,43 @@ fn review_blocks(tx: &Tx, issue: &Issue, p: &Pull, rules: &[&Rule]) -> Vec<Strin
     out
 }
 
-pub(crate) fn tested(p: &Pull, method: MergeMethod) -> Result<Via, ApiError> {
-    Ok(Via::Pull {
-        head: p.head.sha.parse()?,
-        test_merge: p.merge_commit_sha.as_deref().map(str::parse).transpose()?,
-        method,
+/// The test merge of `p` while it still tests the head on `base`: its second parent is the
+/// head and its first parent is `base` or a commit `base` reaches, so a check on the test
+/// merge of an older head or of a base that was force-pushed away never counts, and a base
+/// that is behind is left to the strict status check rule.
+pub(crate) fn current_test_merge(
+    tx: &Tx,
+    git: &Git,
+    p: &Pull,
+    base: ObjectId,
+) -> Result<Option<ObjectId>, ApiError> {
+    let (Some(sha), Some(repo)) = (p.merge_commit_sha.as_deref(), p.base.repo_id) else {
+        return Ok(None);
+    };
+    let head: ObjectId = p.head.sha.parse()?;
+    let id: ObjectId = sha.parse()?;
+    let Ok(node) = crate::state::commit_node(git, tx, repo, id) else {
+        return Ok(None);
+    };
+    Ok(match node.commit.parents[..] {
+        [first, second]
+            if second == head && (first == base || git.is_ancestor(tx, repo, first, base)?) =>
+        {
+            Some(id)
+        }
+        _ => None,
     })
 }
 
-/// [`tested`] for a merge, with the test merge only while it merges `base` with the head, so
-/// a check on the test merge of an older head or base never counts.
 fn tested_now(
     tx: &Tx,
     git: &Git,
     (p, base): (&Pull, ObjectId),
     method: MergeMethod,
 ) -> Result<Via, ApiError> {
-    let head: ObjectId = p.head.sha.parse()?;
-    let test_merge = match (p.merge_commit_sha.as_deref(), p.base.repo_id) {
-        (Some(sha), Some(repo)) => {
-            let id: ObjectId = sha.parse()?;
-            crate::state::commit_node(git, tx, repo, id)
-                .is_ok_and(|node| node.commit.parents == [base, head])
-                .then_some(id)
-        }
-        _ => None,
-    };
     Ok(Via::Pull {
-        head,
-        test_merge,
+        head: p.head.sha.parse()?,
+        test_merge: current_test_merge(tx, git, p, base)?,
         method,
     })
 }
