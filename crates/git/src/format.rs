@@ -490,7 +490,7 @@ fn binary_body(out: &mut String, old: &[u8], new: &[u8]) -> Result<(), GitError>
     let (forward, reverse) = if old.is_empty() || new.is_empty() {
         (None, None)
     } else {
-        libgit2_deltas(old, new).unwrap_or_default()
+        libgit2_deltas(old, new)?
     };
     side(out, new, forward)?;
     side(out, old, reverse)
@@ -510,17 +510,19 @@ fn side(out: &mut String, target: &[u8], delta: Option<Vec<u8>>) -> Result<(), G
 
 type Deltas = (Option<Vec<u8>>, Option<Vec<u8>>);
 
-fn libgit2_deltas(old: &[u8], new: &[u8]) -> Option<Deltas> {
-    let odb = git2::Odb::new().ok()?;
-    odb.add_new_mempack_backend(1).ok()?;
-    let repo = Repository::from_odb(odb).ok()?;
-    let a = repo.find_blob(repo.blob(old).ok()?).ok()?;
-    let b = repo.find_blob(repo.blob(new).ok()?).ok()?;
+fn libgit2_deltas(old: &[u8], new: &[u8]) -> Result<Deltas, GitError> {
+    let failed = |e: git2::Error| GitError::Delta(e.message().to_owned());
+    let odb = git2::Odb::new().map_err(failed)?;
+    odb.add_new_mempack_backend(1).map_err(failed)?;
+    let repo = Repository::from_odb(odb).map_err(failed)?;
+    let a = repo.find_blob(repo.blob(old).map_err(failed)?).map_err(failed)?;
+    let b = repo.find_blob(repo.blob(new).map_err(failed)?).map_err(failed)?;
     let mut opts = DiffOptions::new();
     opts.show_binary(true).force_binary(true);
-    let mut found = None;
+    let mut found = Ok((None, None));
     let mut on_binary = |_: DiffDelta<'_>, binary: DiffBinary<'_>| {
-        found = Some((delta(&binary.new_file()), delta(&binary.old_file())));
+        found = delta(&binary.new_file())
+            .and_then(|forward| Ok((forward, delta(&binary.old_file())?)));
         true
     };
     repo.diff_blobs(
@@ -534,17 +536,19 @@ fn libgit2_deltas(old: &[u8], new: &[u8]) -> Option<Deltas> {
         None,
         None,
     )
-    .ok()?;
+    .map_err(failed)?;
     found
 }
 
-fn delta(file: &DiffBinaryFile<'_>) -> Option<Vec<u8>> {
+fn delta(file: &DiffBinaryFile<'_>) -> Result<Option<Vec<u8>>, GitError> {
     if !matches!(file.kind(), DiffBinaryKind::Delta) {
-        return None;
+        return Ok(None);
     }
     let mut raw = Vec::with_capacity(file.inflated_len());
-    ZlibDecoder::new(file.data()).read_to_end(&mut raw).ok()?;
-    Some(raw)
+    ZlibDecoder::new(file.data())
+        .read_to_end(&mut raw)
+        .map_err(|e| GitError::Delta(e.to_string()))?;
+    Ok(Some(raw))
 }
 
 fn block(out: &mut String, kind: &str, len: usize, deflated: &[u8]) {

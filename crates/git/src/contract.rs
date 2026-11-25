@@ -304,6 +304,8 @@ pub enum GitError {
     Rejected(ApiError),
     #[error("deflate failed: {0}")]
     Compress(String),
+    #[error("binary delta failed: {0}")]
+    Delta(String),
 }
 
 impl From<GitError> for ApiError {
@@ -315,7 +317,7 @@ impl From<GitError> for ApiError {
             GitError::RefExists => ApiError::unprocessable("Reference already exists"),
             GitError::NotFastForward => ApiError::unprocessable("Update is not a fast forward"),
             GitError::Rejected(e) => e,
-            GitError::Compress(e) => ApiError::internal(e),
+            GitError::Compress(e) | GitError::Delta(e) => ApiError::internal(e),
             other => ApiError::unprocessable(other.to_string()),
         }
     }
