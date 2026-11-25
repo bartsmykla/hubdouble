@@ -387,7 +387,20 @@ pub(crate) fn merged_as(
     })?;
     crate::association::add(tx, issue.repo_id, [issue.user_id])?;
     tx.table_mut::<Issues>().replace(issue.clone())?;
-    sync_refs(tx, git, &issue)?;
+    sync_refs(tx, git, &issue)
+}
+
+pub(crate) fn emit_closed(
+    tx: &mut TxMut<'_>,
+    git: &Git,
+    issue_id: i64,
+    sender: i64,
+) -> Result<(), ApiError> {
+    let issue = tx
+        .table::<Issues>()
+        .get(issue_id)
+        .cloned()
+        .ok_or_else(ApiError::not_found)?;
     events::emit(tx, git, &issue, sender, "closed", serde_json::json!({}))
 }
 

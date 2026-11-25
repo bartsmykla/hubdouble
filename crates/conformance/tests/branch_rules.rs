@@ -1053,6 +1053,61 @@ async fn a_push_delivery_has_the_push_form_of_the_repository() {
 }
 
 #[tokio::test]
+async fn a_pull_request_merge_of_each_method_sends_push_before_closed() {
+    for method in ["merge", "squash", "rebase"] {
+        // Given pull request 1 from feature to main, and an App that hears push and
+        // pull_request
+        let mut builder = TestServer::builder().frame(hubdouble_api::register_all);
+        for mut entry in fixture::seed() {
+            if entry["kind"] == "app" {
+                entry["events"] = json!(["push", "pull_request"]);
+            }
+            builder = builder.entry(entry);
+        }
+        let server = builder
+            .entry(computed_at_once())
+            .entry(pull_request())
+            .start()
+            .await;
+        let alice = client(&server, ALICE_TOKEN);
+        deliveries(&server).await;
+        // When alice merges it with this method a minute later
+        server.clock.advance(60);
+        let merged = alice
+            .call_json(
+                Method::PUT,
+                &format!("{PULL}/merge"),
+                &json!({"merge_method": method}),
+            )
+            .await;
+        assert_eq!(merged.status, StatusCode::OK, "{method}: {}", merged.json());
+        // Then push comes before pull_request closed, and closed carries the new pushed_at
+        let sent = deliveries(&server).await;
+        let order: Vec<(String, Value)> = sent
+            .iter()
+            .map(|d| (d.header("x-github-event").to_owned(), d.json()["action"].clone()))
+            .filter(|(event, action)| event == "push" || action == "closed")
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("push".to_owned(), Value::Null),
+                ("pull_request".to_owned(), json!("closed"))
+            ],
+            "{method}"
+        );
+        let closed = sent
+            .iter()
+            .find(|d| d.json()["action"] == "closed")
+            .map(Delivery::json)
+            .unwrap_or_default();
+        let now = server.clock.now().to_string();
+        assert_eq!(closed["repository"]["pushed_at"], now, "{method}");
+        assert_eq!(alice.get(REPO).await.json()["pushed_at"], now, "{method}");
+    }
+}
+
+#[tokio::test]
 async fn a_pull_request_merge_of_each_method_is_a_pr_merge_activity() {
     for method in ["merge", "squash", "rebase"] {
         // Given pull request 1 from feature to main
