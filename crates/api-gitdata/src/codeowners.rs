@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use hubdouble_auth::repo_role;
-use hubdouble_git::{Git, GitError, ObjectData};
+use hubdouble_git::{Git, GitError, ObjectData, ObjectId};
 use hubdouble_model::{AccountKind, ApiError, Repo, RepoRole, Team, TeamPrivacy, glob};
 use hubdouble_store::{Accounts, Teams, Tx};
 use serde::Serialize;
@@ -114,12 +114,27 @@ pub fn file_at(
     repo: i64,
     at: impl Display,
 ) -> Result<Option<(&'static str, String)>, ApiError> {
+    blob_at(tx, git, repo, at)?
+        .map(|(path, blob)| Ok((path, text_of(tx, git, repo, blob)?)))
+        .transpose()
+}
+
+/// The location and blob of the CODEOWNERS file that [`file_at`] reads.
+///
+/// # Errors
+///
+/// A git error other than a missing file.
+pub fn blob_at(
+    tx: &Tx,
+    git: &Git,
+    repo: i64,
+    at: impl Display,
+) -> Result<Option<(&'static str, ObjectId)>, ApiError> {
     for path in LOCATIONS {
         match git.expression(tx, repo, &format!("{at}:{path}")) {
             Ok(o) => {
-                if let ObjectData::Blob(data) = o.data {
-                    return Ok((data.len() < MAX_FILE_BYTES)
-                        .then(|| (path, String::from_utf8_lossy(&data).into_owned())));
+                if let ObjectData::Blob(data) = &o.data {
+                    return Ok((data.len() < MAX_FILE_BYTES).then_some((path, o.id)));
                 }
             }
             Err(GitError::NotFound | GitError::WrongKind) => {}
@@ -127,6 +142,18 @@ pub fn file_at(
         }
     }
     Ok(None)
+}
+
+/// The text of a CODEOWNERS blob that [`blob_at`] found.
+///
+/// # Errors
+///
+/// A git error, also when `blob` is not a blob.
+pub fn text_of(tx: &Tx, git: &Git, repo: i64, blob: ObjectId) -> Result<String, ApiError> {
+    match git.object(tx, repo, blob)?.data {
+        ObjectData::Blob(data) => Ok(String::from_utf8_lossy(&data).into_owned()),
+        _ => Err(GitError::WrongKind.into()),
+    }
 }
 
 /// A team that may own files of `repo`, as GitHub's docs ask: a visible team of `org` with
@@ -255,9 +282,15 @@ pub fn check(path: &str, text: &str, owners: &impl Owners) -> Vec<OwnersError> {
 /// GitHub skips a line with an error.
 #[must_use]
 pub fn valid_lines<'t>(text: &'t str, owners: &impl Owners) -> Vec<Line<'t>> {
-    lines(text)
-        .filter(|line| problems(line, owners).is_empty())
-        .collect()
+    lines(text).filter(|line| line.is_valid(owners)).collect()
+}
+
+impl Line<'_> {
+    /// Whether GitHub applies this rule: [`check`] reports nothing on its line.
+    #[must_use]
+    pub fn is_valid(&self, owners: &impl Owners) -> bool {
+        problems(self, owners).is_empty()
+    }
 }
 
 #[cfg(test)]

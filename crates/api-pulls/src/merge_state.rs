@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use hubdouble_api_gitdata::branch_rules::{self, CheckResults, MergeMethod, RequiredChecks, Via};
@@ -23,7 +25,8 @@ pub(crate) struct MergeFacts {
 #[derive(Clone, Default, PartialEq, Eq)]
 struct Owners {
     at: Option<(ObjectId, ObjectId)>,
-    file: Option<Arc<str>>,
+    read: Option<(ObjectId, u64)>,
+    rules: Vec<(usize, Box<str>)>,
     covering: Vec<Vec<usize>>,
 }
 
@@ -55,10 +58,22 @@ pub(crate) fn current_owner_groups(
 }
 
 fn groups_of(tx: &Tx, repo: i64, owners: &Owners) -> Vec<Vec<String>> {
-    let (Some(text), Some(repo)) = (owners.file.as_deref(), tx.table::<Repos>().get(repo)) else {
+    let Some(repo) = tx.table::<Repos>().get(repo) else {
         return Vec::new();
     };
-    let valid = codeowners::valid_lines(text, &codeowners::RepoOwners { tx, repo });
+    let who = codeowners::RepoOwners { tx, repo };
+    let valid: Vec<codeowners::Line<'_>> = owners
+        .rules
+        .iter()
+        .filter_map(|(number, raw)| {
+            let line = codeowners::lines(raw).next()?;
+            Some(codeowners::Line {
+                number: *number,
+                ..line
+            })
+        })
+        .filter(|line| line.is_valid(&who))
+        .collect();
     let mut groups: Vec<Vec<String>> = Vec::new();
     for lines in &owners.covering {
         let Some(rule) = lines.iter().rev().find_map(|n| {
@@ -113,11 +128,13 @@ pub fn mergeable_state(tx: &Tx, issue: &Issue) -> &'static str {
 }
 
 /// What a push that moves the base of many pull requests reads once for all of them: the
-/// CODEOWNERS file of the last base tip, and each ancestry answer.
+/// CODEOWNERS blob of the last base tip, the text of the last blob read, and each ancestry
+/// answer.
 #[derive(Default)]
 pub(crate) struct PushMemo {
     at: Option<(i64, ObjectId)>,
-    text: Option<Arc<str>>,
+    blob: Option<ObjectId>,
+    text: Option<(ObjectId, Arc<str>)>,
     reaches: Vec<((i64, ObjectId, ObjectId), bool)>,
 }
 
@@ -138,18 +155,35 @@ impl PushMemo {
         Ok(answer)
     }
 
-    fn read(
+    fn blob(
         &mut self,
         tx: &Tx,
         git: &Git,
         repo: i64,
         base: ObjectId,
-    ) -> Result<Option<Arc<str>>, ApiError> {
+    ) -> Result<Option<ObjectId>, ApiError> {
         if self.at != Some((repo, base)) {
-            self.text = codeowners::file_at(tx, git, repo, base)?.map(|(_, text)| text.into());
+            self.blob = codeowners::blob_at(tx, git, repo, base)?.map(|(_, blob)| blob);
             self.at = Some((repo, base));
         }
-        Ok(self.text.clone())
+        Ok(self.blob)
+    }
+
+    fn text(
+        &mut self,
+        tx: &Tx,
+        git: &Git,
+        repo: i64,
+        blob: ObjectId,
+    ) -> Result<Arc<str>, ApiError> {
+        if let Some((read, text)) = &self.text
+            && *read == blob
+        {
+            return Ok(text.clone());
+        }
+        let text: Arc<str> = codeowners::text_of(tx, git, repo, blob)?.into();
+        self.text = Some((blob, text.clone()));
+        Ok(text)
     }
 }
 
@@ -221,32 +255,48 @@ fn owners(
     memo: &mut PushMemo,
     kept: Owners,
 ) -> Result<Owners, ApiError> {
-    let Some(text) = memo.read(tx, git, repo, at.0)? else {
+    let Some(blob) = memo.blob(tx, git, repo, at.0)? else {
         return Ok(Owners::default());
     };
     if kept.at == Some(at) {
         return Ok(kept);
     }
-    let rules: Vec<codeowners::Line<'_>> = codeowners::lines(&text).collect();
     let paths = match git.changed_paths(tx, repo, at.0, at.1) {
         Ok(paths) => paths,
         Err(GitError::NotFound) => Vec::new(),
         Err(e) => return Err(e.into()),
     };
+    let mut digest = DefaultHasher::new();
+    paths.hash(&mut digest);
+    let read = Some((blob, digest.finish()));
+    if kept.read == read {
+        return Ok(Owners {
+            at: Some(at),
+            ..kept
+        });
+    }
+    let text = memo.text(tx, git, repo, blob)?;
+    let rules: Vec<codeowners::Line<'_>> = codeowners::lines(&text).collect();
     let mut covering: Vec<Vec<usize>> = Vec::new();
-    for path in paths {
+    for path in &paths {
         let lines: Vec<usize> = rules
             .iter()
-            .filter(|l| codeowners::covers(l.pattern.1, &path))
+            .filter(|l| codeowners::covers(l.pattern.1, path))
             .map(|l| l.number)
             .collect();
         if !lines.is_empty() && !covering.contains(&lines) {
             covering.push(lines);
         }
     }
+    let used: BTreeSet<usize> = covering.iter().flatten().copied().collect();
     Ok(Owners {
         at: Some(at),
-        file: Some(text),
+        read,
+        rules: rules
+            .iter()
+            .filter(|l| used.contains(&l.number))
+            .map(|l| (l.number, l.raw.into()))
+            .collect(),
         covering,
     })
 }

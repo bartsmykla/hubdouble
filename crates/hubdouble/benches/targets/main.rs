@@ -58,6 +58,7 @@ const CALIBRATION_ITERATIONS: usize = 200;
 const PUSH_PULLS: usize = 100;
 const PUSH_WARMUP: usize = 20;
 const PUSH_SAMPLES: usize = 500;
+const PUSH_OWNER_RULES: usize = 20_000;
 
 fn micros(d: Duration) -> f64 {
     d.as_secs_f64() * 1e6
@@ -1048,8 +1049,13 @@ fn in_process(dir: &Path, rows: &mut Vec<Row>) {
     }
 }
 
-fn push_seed() -> Vec<Value> {
+fn push_seed(owner_rules: usize) -> Vec<Value> {
     let mut entries = fixture::seed();
+    let mut owners = String::new();
+    for n in 1..=owner_rules {
+        let _ = writeln!(owners, "/area-{n}/ @{}", fixture::ALICE);
+    }
+    let _ = writeln!(owners, "/changes/ @{}", fixture::ALICE);
     let mut commits: Vec<Value> = (1..=PUSH_PULLS)
         .map(|n| {
             json!({"branch": format!("pull-{n}"), "message": format!("change {n}"),
@@ -1061,6 +1067,9 @@ fn push_seed() -> Vec<Value> {
     for entry in &mut entries {
         if entry["kind"] == "repository" && entry["name"] == fixture::PUBLIC_REPO {
             entry["commits"] = Value::Array(commits.clone());
+            if owner_rules > 0 {
+                entry["files"][".github/CODEOWNERS"] = json!(owners);
+            }
         }
     }
     entries.extend((1..=PUSH_PULLS).map(|n| {
@@ -1116,9 +1125,10 @@ async fn first_reads(client: &mut Client, doc: &mut Doc) -> Result<Vec<Duration>
     Ok(samples)
 }
 
-fn push_rows(dir: &Path, rows: &mut Vec<Row>) {
+fn push_rows(dir: &Path, owner_rules: usize, rows: &mut Vec<Row>) {
     let receiver = Receiver::start(Duration::ZERO);
-    let running = start_server(&push_seed(), &receiver.url, dir, "push-seed.json");
+    let seed_file = format!("push-seed-{owner_rules}.json");
+    let running = start_server(&push_seed(owner_rules), &receiver.url, dir, &seed_file);
     let client_runtime = runtime(4);
     let addr = running.addr;
     let measured = client_runtime.block_on(async {
@@ -1158,9 +1168,14 @@ fn push_rows(dir: &Path, rows: &mut Vec<Row>) {
             (Err(e), _) | (_, Err(e)) => Err(e),
         }
     });
-    let measure = format!("GraphQL updateRefs p99, main with {PUSH_PULLS} open pull requests");
+    let with = if owner_rules == 0 {
+        format!("{PUSH_PULLS}")
+    } else {
+        format!("a CODEOWNERS of {owner_rules} rules and {PUSH_PULLS}")
+    };
+    let measure = format!("GraphQL updateRefs p99, main with {with} open pull requests");
     let read_measure = format!(
-        "REST pull request read p99, first after a push to main with {PUSH_PULLS} open pull requests"
+        "REST pull request read p99, first after a push to main with {with} open pull requests"
     );
     let (row, read_row) = match measured {
         Ok((samples, reads)) => {
@@ -1976,7 +1991,8 @@ fn main() -> ExitCode {
         container_rows(dir.path(), &mut rows);
     }
     in_process(dir.path(), &mut rows);
-    push_rows(dir.path(), &mut rows);
+    push_rows(dir.path(), 0, &mut rows);
+    push_rows(dir.path(), PUSH_OWNER_RULES, &mut rows);
     rows.push(calibration_row(before, calibrate()));
     let table = report(&rows);
     let _ = std::io::stdout().lock().write_all(table.as_bytes());
