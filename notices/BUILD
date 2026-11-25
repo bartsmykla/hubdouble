@@ -1,6 +1,6 @@
 Rebuild hubdouble @VERSION@ from this archive
 
-The archive holds the repository tree at the release tag, every crate of
+The archive holds the build context at the release tag, every crate of
 Cargo.lock in vendor/, and a .cargo/config.toml that makes Cargo read the
 crates from vendor/. The build needs no network access.
 
@@ -9,7 +9,7 @@ Rebuild the binary in the image that built the release:
     mkdir hubdouble
     tar -xf hubdouble-source.tar -C hubdouble
     cd hubdouble
-    docker run --rm -v "$PWD":/src -w /src \
+    docker run --rm --network none -v "$PWD":/src -w /src \
       rust:1.100.0-alpine3.24@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 \
       cargo build --release --frozen -p hubdouble
 

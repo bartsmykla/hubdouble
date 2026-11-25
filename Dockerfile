@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo install --locked --features cli cargo-about@0.9.3 --root /about
 WORKDIR /src
 COPY --from=vendored /hubdouble-source.tar /hubdouble-source.tar
-RUN --mount=type=cache,target=/src/target \
+RUN --network=none --mount=type=cache,target=/src/target \
     tar -xf /hubdouble-source.tar \
     && find . -path ./target -prune -o -type f -exec touch {} + \
     && cargo build --release --frozen -p hubdouble \
