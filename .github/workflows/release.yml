@@ -35,6 +35,14 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+      - name: Check that anyone can read the source image
+        env:
+          IMAGE: ghcr.io/bartsmykla/hubdouble-source:${{ github.ref_name }}
+        run: |
+          if ! DOCKER_CONFIG="$(mktemp -d)" docker buildx imagetools inspect "$IMAGE" > /dev/null; then
+            echo "::error::A read of $IMAGE without credentials failed. Make the hubdouble-source package public in its package settings, then run the release again."
+            exit 1
+          fi
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
