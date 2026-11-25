@@ -88,7 +88,7 @@ impl Exec<'_> {
                 )),
             };
         }
-        if self.is_leaf(def.ty.inner_named_type()) {
+        if let Some(leaf) = self.registry.schema.leaf(def.ty.inner_named_type()) {
             let form = serde.get_or_insert_with(|| {
                 self.registry
                     .objects
@@ -97,7 +97,7 @@ impl Exec<'_> {
                     .unwrap_or(Value::Null)
             });
             if let Some(v) = form.get(name)
-                && crate::leaf::fits(self.schema(), &def.ty, v)
+                && leaf.fits(&def.ty, v)
             {
                 return Ok(Out::R(Resolved::Leaf(v.clone())));
             }

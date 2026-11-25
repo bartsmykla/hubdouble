@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use apollo_compiler::executable::{Selection, SelectionSet};
@@ -6,12 +7,14 @@ use apollo_compiler::validation::Valid;
 use bytes::Bytes;
 
 use crate::contract::{ErrorType, GqlError, ResponseError};
+use crate::leaf::Leaf;
 use crate::meta::Meta;
 
 /// GitHub's parsed GraphQL schema, loaded once per server.
 #[derive(Debug)]
 pub struct Schema {
     pub(crate) inner: Valid<apollo_compiler::Schema>,
+    leaves: HashMap<String, Leaf>,
     meta: OnceLock<Result<Meta, GqlError>>,
 }
 
@@ -33,6 +36,7 @@ impl Schema {
     pub fn parse(sdl: &str) -> Result<Schema, GqlError> {
         apollo_compiler::Schema::parse_and_validate(sdl, "schema.graphql")
             .map(|inner| Schema {
+                leaves: crate::leaf::leaves(&inner),
                 inner,
                 meta: OnceLock::new(),
             })
@@ -91,6 +95,10 @@ impl Schema {
     #[must_use]
     pub fn type_count(&self) -> usize {
         self.inner.types.len()
+    }
+
+    pub(crate) fn leaf(&self, name: &str) -> Option<&Leaf> {
+        self.leaves.get(name)
     }
 
     pub(crate) fn is_object(&self, name: &str) -> bool {

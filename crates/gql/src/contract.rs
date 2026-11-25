@@ -326,18 +326,9 @@ impl Registry {
             })
             .flat_map(|(type_name, o)| {
                 o.fields.iter().filter_map(move |(field, def)| {
-                    let leaf = def.ty.inner_named_type().as_str();
-                    let is_leaf = matches!(
-                        schema.types.get(leaf),
-                        Some(
-                            apollo_compiler::schema::ExtendedType::Scalar(_)
-                                | apollo_compiler::schema::ExtendedType::Enum(_)
-                        )
-                    );
-                    (is_leaf
-                        && self.resolver(type_name, field.as_str()).is_none()
-                        && !crate::leaf::checkable(schema, leaf))
-                    .then(|| format!("{type_name}.{field}"))
+                    let leaf = self.schema.leaf(def.ty.inner_named_type())?;
+                    (self.resolver(type_name, field.as_str()).is_none() && !leaf.checkable())
+                        .then(|| format!("{type_name}.{field}"))
                 })
             })
             .collect();
