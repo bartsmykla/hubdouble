@@ -302,6 +302,8 @@ pub enum GitError {
     /// A ref subscriber refused the update; the transaction rolls back with its error.
     #[error("a ref subscriber refused the update: {}", .0.message)]
     Rejected(ApiError),
+    #[error("deflate failed: {0}")]
+    Compress(String),
 }
 
 impl From<GitError> for ApiError {
@@ -313,6 +315,7 @@ impl From<GitError> for ApiError {
             GitError::RefExists => ApiError::unprocessable("Reference already exists"),
             GitError::NotFastForward => ApiError::unprocessable("Update is not a fast forward"),
             GitError::Rejected(e) => e,
+            GitError::Compress(e) => ApiError::internal(e),
             other => ApiError::unprocessable(other.to_string()),
         }
     }
@@ -917,7 +920,7 @@ impl Git {
     ) -> Result<String, GitError> {
         let odb = self.odb(tx, repo);
         let files = Self::files(&odb, base, head)?;
-        Ok(format::diff_text(&files, format::abbrev(odb.len()), false))
+        format::diff_text(&files, format::abbrev(odb.len()), false)
     }
 
     /// Each commit, in the order given, as a `git format-patch` mail against its first
@@ -926,7 +929,8 @@ impl Git {
     ///
     /// # Errors
     ///
-    /// [`GitError::NotFound`] when a commit is missing.
+    /// [`GitError::NotFound`] when a commit is missing, and [`GitError::Compress`] when zlib
+    /// fails on a binary side, so no patch carries a broken stream.
     pub fn patch(&self, tx: &Tx, repo: i64, commits: &[ObjectId]) -> Result<String, GitError> {
         let odb = self.odb(tx, repo);
         let abbrev = format::abbrev(odb.len());
@@ -935,7 +939,7 @@ impl Git {
             let (id, commit) = odb.peel_commit(id)?;
             let files = Self::files(&odb, commit.parents.first().copied(), id)?;
             let number = (commits.len() > 1).then_some((i + 1, commits.len()));
-            mails.push(format::mail(id, &commit, number, &files, abbrev));
+            mails.push(format::mail(id, &commit, number, &files, abbrev)?);
         }
         Ok(mails.join("\n"))
     }

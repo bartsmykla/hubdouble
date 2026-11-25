@@ -132,7 +132,7 @@ impl File {
         (old.mode != new.mode).then_some((old.mode, new.mode))
     }
 
-    fn write(&self, out: &mut String, abbrev: usize, binary_patch: bool) {
+    fn write(&self, out: &mut String, abbrev: usize, binary_patch: bool) -> Result<(), GitError> {
         let _ = writeln!(
             out,
             "diff --git {} {}",
@@ -162,7 +162,7 @@ impl File {
         let old_id = self.old.as_ref().map_or(ObjectId::NULL, |s| s.id);
         let new_id = self.new.as_ref().map_or(ObjectId::NULL, |s| s.id);
         if old_id == new_id {
-            return;
+            return Ok(());
         }
         let width = if binary_patch && self.binary {
             40
@@ -187,7 +187,7 @@ impl File {
                 out,
                 self.old.as_ref().map_or(empty, |s| &s.data),
                 self.new.as_ref().map_or(empty, |s| &s.data),
-            );
+            )?;
         } else if self.binary {
             let _ = writeln!(
                 out,
@@ -203,6 +203,7 @@ impl File {
                 label(&self.new, "b/")
             );
         }
+        Ok(())
     }
 
     fn stat_name(&self) -> String {
@@ -472,31 +473,39 @@ fn summary(out: &mut String, files: &[File]) {
     }
 }
 
-pub(crate) fn diff_text(files: &[File], abbrev: usize, binary_patch: bool) -> String {
+pub(crate) fn diff_text(
+    files: &[File],
+    abbrev: usize,
+    binary_patch: bool,
+) -> Result<String, GitError> {
     let mut out = String::new();
     for f in files {
-        f.write(&mut out, abbrev, binary_patch);
+        f.write(&mut out, abbrev, binary_patch)?;
     }
-    out
+    Ok(out)
 }
 
-fn binary_body(out: &mut String, old: &[u8], new: &[u8]) {
+fn binary_body(out: &mut String, old: &[u8], new: &[u8]) -> Result<(), GitError> {
     out.push_str("GIT binary patch\n");
     let (forward, reverse) = if old.is_empty() || new.is_empty() {
         (None, None)
     } else {
         libgit2_deltas(old, new).unwrap_or_default()
     };
-    side(out, new, forward);
-    side(out, old, reverse);
+    side(out, new, forward)?;
+    side(out, old, reverse)
 }
 
-fn side(out: &mut String, target: &[u8], delta: Option<Vec<u8>>) {
-    let literal = deflated(target);
-    match delta.map(|d| (d.len(), deflated(&d))) {
+fn side(out: &mut String, target: &[u8], delta: Option<Vec<u8>>) -> Result<(), GitError> {
+    let literal = deflated(target)?;
+    match delta
+        .map(|d| deflated(&d).map(|z| (d.len(), z)))
+        .transpose()?
+    {
         Some((len, z)) if z.len() < literal.len() => block(out, "delta", len, &z),
         _ => block(out, "literal", target.len(), &literal),
     }
+    Ok(())
 }
 
 type Deltas = (Option<Vec<u8>>, Option<Vec<u8>>);
@@ -565,15 +574,16 @@ fn block(out: &mut String, kind: &str, len: usize, deflated: &[u8]) {
     out.push('\n');
 }
 
-fn deflated(data: &[u8]) -> Vec<u8> {
+fn deflated(data: &[u8]) -> Result<Vec<u8>, GitError> {
     let mut z = Compress::new(Compression::fast(), true);
     let mut out = Vec::with_capacity(data.len() + data.len() / 8 + 64);
     loop {
         let read = usize::try_from(z.total_in()).unwrap_or(data.len());
         let rest = data.get(read..).unwrap_or_default();
         match z.compress_vec(rest, &mut out, FlushCompress::Finish) {
-            Ok(Status::StreamEnd) | Err(_) => return out,
+            Ok(Status::StreamEnd) => return Ok(out),
             Ok(Status::Ok | Status::BufError) => out.reserve(out.capacity().max(64)),
+            Err(e) => return Err(GitError::Compress(e.to_string())),
         }
     }
 }
@@ -698,7 +708,7 @@ pub(crate) fn mail(
     number: Option<(usize, usize)>,
     files: &[File],
     abbrev: usize,
-) -> String {
+) -> Result<String, GitError> {
     let who = &commit.author;
     let mut out = format!("From {id} Mon Sep 17 00:00:00 2001\nFrom: ");
     let mut width = MAIL_WIDTH;
@@ -750,8 +760,8 @@ pub(crate) fn mail(
     out.push_str("---\n");
     out.push_str(&stat(files));
     out.push('\n');
-    out.push_str(&diff_text(files, abbrev, true));
-    out
+    out.push_str(&diff_text(files, abbrev, true)?);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -830,7 +840,7 @@ mod tests {
 
         // When hubdouble writes the binary patch of the change
         let mut out = String::new();
-        binary_body(&mut out, &sides[1], &sides[0]);
+        binary_body(&mut out, &sides[1], &sides[0]).unwrap();
 
         // Then it writes the live lines byte for byte
         assert_eq!(out, LIVE_PNG);
@@ -842,7 +852,7 @@ mod tests {
         // live GitHub wrote as delta 638 and delta 642
         // When hubdouble writes the binary patch of the change
         let mut out = String::new();
-        binary_body(&mut out, CODICON_OLD, CODICON_NEW);
+        binary_body(&mut out, CODICON_OLD, CODICON_NEW).unwrap();
 
         // Then it writes the live lines byte for byte
         assert_eq!(out, LIVE_CODICON);
