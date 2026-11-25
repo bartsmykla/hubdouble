@@ -151,6 +151,11 @@ fn mask_wide_ints(v: &mut Value) {
 fn restore_wide_ints(coerced: &mut Value, given: &Value) {
     match (coerced, given) {
         (c @ Value::Number(_), g) if wide_int(g) => *c = g.clone(),
+        (Value::String(c), g) if wide_int(g) => {
+            if let Some(digits) = crate::scalar::int_digits(g) {
+                *c = digits;
+            }
+        }
         (Value::Array(c), Value::Array(g)) => {
             for (c, g) in c.iter_mut().zip(g) {
                 restore_wide_ints(c, g);

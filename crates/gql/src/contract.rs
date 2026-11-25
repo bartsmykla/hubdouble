@@ -123,8 +123,9 @@ impl Obj {
 pub struct Args(pub serde_json::Map<String, serde_json::Value>);
 
 impl Args {
-    /// An argument, or `None` when it is absent or `null`. An integer past `i64` reads as the
-    /// `i64` bound of its sign, which no row holds.
+    /// An argument, or `None` when it is absent or `null`. An integer past `i64` that `T`
+    /// cannot hold, in the argument or in a field of an input object, reads as the `i64` bound
+    /// of its sign, which no row holds, so it misses as a lookup of it misses.
     ///
     /// # Errors
     ///
@@ -132,13 +133,14 @@ impl Args {
     pub fn get<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>, GqlError> {
         match self.0.get(name) {
             None | Some(serde_json::Value::Null) => Ok(None),
-            Some(v) => {
-                let mut v = v.clone();
-                crate::scalar::saturate_wide_ints(&mut v);
-                serde_json::from_value(v)
-                    .map(Some)
-                    .map_err(|e| GqlError::new(ErrorType::Unprocessable, e.to_string()))
-            }
+            Some(v) => serde_json::from_value(v.clone())
+                .or_else(|_| {
+                    let mut v = v.clone();
+                    crate::scalar::saturate_wide_ints(&mut v);
+                    serde_json::from_value(v)
+                })
+                .map(Some)
+                .map_err(|e| GqlError::new(ErrorType::Unprocessable, e.to_string())),
         }
     }
 
@@ -498,7 +500,12 @@ pub struct ResponseError {
     pub path: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub locations: Vec<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Written as the request sent its values: a variable's integer past 64 bits keeps all its
+    /// digits.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::scalar::serialize_as_sent"
+    )]
     pub extensions: Option<serde_json::Value>,
 }
 

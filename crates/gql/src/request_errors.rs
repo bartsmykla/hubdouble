@@ -273,7 +273,7 @@ pub(crate) fn variables(
                 ),
                 path: Vec::new(),
                 locations: locations(var.location(), sources),
-                extensions: Some(json!({"value":crate::scalar::shown(value),"problems":found})),
+                extensions: Some(json!({"value":value,"problems":found})),
             })
         })
         .collect()
@@ -317,7 +317,7 @@ fn problems(
         }
         Some(ExtendedType::Enum(e)) => value.as_str().is_some_and(|s| e.values.contains_key(s)),
         Some(ExtendedType::Scalar(_)) => match name.as_str() {
-            "ID" => value.is_string() || value.as_i64().is_some(),
+            "ID" => value.is_string() || crate::scalar::int_digits(value).is_some(),
             "Int" | "String" | "Boolean" | "Float" | "GitObjectID" | "GitRefname"
             | "Base64String" => crate::scalar::matches(name, value),
             _ => true,

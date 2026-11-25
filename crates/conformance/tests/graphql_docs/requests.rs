@@ -543,8 +543,9 @@ async fn a_variable_in_the_form_of_a_wide_int_is_an_object_that_is_no_int() {
 }
 
 #[tokio::test]
-async fn a_wide_int_in_an_input_object_reads_as_the_largest_i64() {
-    // Given a review thread on a line past 64 bits and one on the largest i64 line
+async fn an_int_past_i64_in_an_input_object_misses_as_a_line_that_is_not_there() {
+    // Given review threads on lines past i64, in the u64 range and past 64 bits, and one on the
+    // largest i64 line, which no diff has
     let server = server().await;
     let api = client(&server, fixture::ALICE_TOKEN);
     let pull = api.get(&format!("{REPO}/pulls/1")).await.json();
@@ -555,12 +556,89 @@ async fn a_wide_int_in_an_input_object_reads_as_the_largest_i64() {
     );
     for as_variable in [false, true] {
         // When
-        let wide = ask(&api, &thread, "99999999999999999999", as_variable).await;
         let largest = ask(&api, &thread, &i64::MAX.to_string(), as_variable).await;
+        for n in [
+            "9223372036854775808",
+            "18446744073709551615",
+            "99999999999999999999",
+        ] {
+            let past = ask(&api, &thread, n, as_variable).await;
 
-        // Then both fail the same way
-        assert!(wide["errors"][0]["type"].is_string(), "{wide}");
-        assert_eq!(wide, largest);
+            // Then each fails as the missing line does
+            assert!(past["errors"][0]["type"].is_string(), "{past}");
+            assert_eq!(past, largest, "{n} {as_variable}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_variable_error_echoes_every_digit_of_an_int_past_64_bits() {
+    // Given a String variable that gets integers in and past the u64 range
+    let server = server().await;
+    let api = client(&server, fixture::ALICE_TOKEN);
+    let lookup = "query($s: String!) { repository(owner: $s, name: \"docs\") { id } }";
+    let past_doubles = "9".repeat(400);
+    for n in [
+        "18446744073709551615",
+        "99999999999999999999",
+        past_doubles.as_str(),
+    ] {
+        let body = format!(r#"{{"query":{},"variables":{{"s":{n}}}}}"#, json!(lookup));
+
+        // When
+        let answer = api
+            .call_bytes(Method::POST, "graphql", body.into_bytes())
+            .await;
+
+        // Then the echoed value and the problem keep every digit, as GitHub's do
+        let text = std::str::from_utf8(&answer.body).unwrap();
+        assert!(text.contains(&format!(r#""value":{n}"#)), "{text}");
+        assert!(
+            text.contains(&format!("Could not coerce value {n} to String")),
+            "{text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_id_takes_an_integer_of_any_size() {
+    // Given integers for an ID, as a literal and as a variable, which live GitHub answered on
+    // 2026-11-25 with the global id NOT_FOUND of the digits
+    let server = server().await;
+    let api = client(&server, fixture::ALICE_TOKEN);
+    let cases = [
+        ("123", false),
+        ("123", true),
+        ("9223372036854775808", true),
+        ("99999999999999999999", true),
+        ("9223372036854775808", false),
+    ];
+    for (n, as_variable) in cases {
+        let body = if as_variable {
+            let node = "query($n: ID!) { node(id: $n) { id } }";
+            format!(r#"{{"query":{},"variables":{{"n":{n}}}}}"#, json!(node))
+        } else {
+            format!(
+                r#"{{"query":{}}}"#,
+                json!(format!("{{ node(id: {n}) {{ id }} }}"))
+            )
+        };
+
+        // When
+        let answer = api
+            .call_bytes(Method::POST, "graphql", body.into_bytes())
+            .await
+            .json();
+
+        // Then
+        assert_eq!(
+            answer["errors"][0]["type"], "NOT_FOUND",
+            "{n} {as_variable}: {answer}"
+        );
+        assert_eq!(
+            answer["errors"][0]["message"],
+            format!("Could not resolve to a node with the global id of '{n}'"),
+        );
     }
 }
 

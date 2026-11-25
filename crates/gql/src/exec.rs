@@ -6,7 +6,7 @@ mod resolve;
 use apollo_compiler::ast::{Type, Value as Ast};
 use apollo_compiler::collections::IndexMap;
 use apollo_compiler::executable::{Field, Selection, SelectionSet};
-use apollo_compiler::schema::FieldDefinition;
+use apollo_compiler::schema::{ExtendedType, FieldDefinition};
 use apollo_compiler::{ExecutableDocument, Node};
 use hubdouble_auth::Actor;
 use hubdouble_git::{Git, ReadJobs};
@@ -379,11 +379,12 @@ impl<'r> Exec<'r> {
                 .and_then(|a| self.json(&a.value));
             let value = given.or_else(|| arg.default_value.as_ref().and_then(|d| self.json(d)));
             if let Some(v) = value {
-                let v = match v {
+                let mut v = match v {
                     Value::Null | Value::Array(_) => v,
                     single if arg.ty.is_list() => Value::Array(vec![single]),
                     other => other,
                 };
+                ids_as_strings(&self.registry.schema, &arg.ty, &mut v);
                 map.insert(arg.name.to_string(), v);
             }
         }
@@ -423,6 +424,36 @@ impl<'r> Exec<'r> {
                     .collect(),
             ),
         })
+    }
+}
+
+fn ids_as_strings(schema: &crate::Schema, ty: &Type, value: &mut Value) {
+    match (ty, value) {
+        (_, Value::Null | Value::Bool(_) | Value::String(_)) => {}
+        (Type::List(item) | Type::NonNullList(item), Value::Array(items)) => {
+            for v in items {
+                ids_as_strings(schema, item, v);
+            }
+        }
+        (Type::List(item) | Type::NonNullList(item), v) => ids_as_strings(schema, item, v),
+        (ty, v) if ty.inner_named_type() == "ID" => {
+            if let Some(digits) = crate::scalar::int_digits(v) {
+                *v = Value::String(digits);
+            }
+        }
+        (ty, Value::Object(fields)) => {
+            let Some(ExtendedType::InputObject(def)) =
+                schema.inner.types.get(ty.inner_named_type())
+            else {
+                return;
+            };
+            for (key, v) in fields {
+                if let Some(field) = def.fields.get(key.as_str()) {
+                    ids_as_strings(schema, &field.ty, v);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

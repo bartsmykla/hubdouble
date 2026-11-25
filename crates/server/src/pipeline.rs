@@ -1196,6 +1196,45 @@ pub(crate) fn to_response(reply: Reply, head: bool) -> HttpResponse {
 mod unit {
     use super::*;
 
+    fn nested_body(arrays: usize, leaf: &str) -> String {
+        format!(
+            r#"{{"query":"q","variables":{{"a":{}{leaf}{}}}}}"#,
+            "[".repeat(arrays),
+            "]".repeat(arrays)
+        )
+    }
+
+    #[test]
+    fn a_body_with_a_wide_int_nests_as_deep_as_serde_json_reads_a_body() {
+        for arrays in 120..=130 {
+            // Given bodies that nest `arrays` arrays in a variable, with a small or a wide int
+            let read = serde_json::from_str::<serde_json::Value>(&nested_body(arrays, "1")).is_ok();
+            for leaf in ["1", "18446744073709551616", &"9".repeat(400)] {
+                // When the body is parsed
+                let parsed = GraphqlBody::parse(nested_body(arrays, leaf).as_bytes());
+                // Then it parses exactly when serde_json reads the body
+                assert_eq!(
+                    parsed.is_some(),
+                    read,
+                    "{arrays} arrays around {}",
+                    &leaf[..1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_body_nested_far_past_the_limit_is_refused_on_both_paths() {
+        for leaf in ["1", "18446744073709551616"] {
+            // Given a variable nested 100 000 arrays deep, around a small or a wide int
+            let body = nested_body(100_000, leaf);
+            // When the body is parsed
+            let parsed = GraphqlBody::parse(body.as_bytes());
+            // Then it is refused without overflowing the stack
+            assert!(parsed.is_none(), "{leaf}");
+        }
+    }
+
     #[test]
     fn media_type_follows_the_accept_header() {
         for (accept, default, want) in [

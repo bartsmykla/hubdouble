@@ -1,6 +1,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use hubdouble_model::Timestamp;
+use serde::Serialize as _;
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
@@ -54,13 +55,14 @@ pub struct Variables(pub(crate) Map<String, Value>);
 
 impl Variables {
     /// Reads the `variables` member of a GraphQL request body, keeping the digits of each
-    /// integer past 64 bits.
+    /// integer past 64 bits. It takes the nesting that `serde_json` takes in that member of a
+    /// body: 126 levels, the object of the member included.
     ///
     /// # Errors
     ///
-    /// The `serde_json` error when `text` is not a JSON object.
+    /// The `serde_json` error when `text` is not a JSON object or nests deeper than that.
     pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
-        exact_object(text).map(Self)
+        exact_object(text, 1).map(Self)
     }
 
     /// Whether `fields`, as `serde_json` read them, may have lost the digits of an integer past
@@ -86,6 +88,14 @@ pub(crate) fn wide_int(digits: &str) -> Value {
     Value::Object(entry)
 }
 
+/// The decimal digits of an integer of any size, as an `ID` takes it.
+pub(crate) fn int_digits(value: &Value) -> Option<String> {
+    match value {
+        Value::Number(n) if n.is_i64() || n.is_u64() => Some(n.to_string()),
+        v => wide_digits(v).map(str::to_owned),
+    }
+}
+
 pub(crate) fn wide_digits(value: &Value) -> Option<&str> {
     let entry = value.as_object().filter(|o| o.len() == 1)?;
     entry.get(WIDE_INT)?.as_str()
@@ -96,29 +106,44 @@ pub(crate) fn unescaped(key: &str) -> &str {
     key.strip_prefix('\0').unwrap_or(key)
 }
 
-/// `value` as the request sent it, with the nearest double for an integer past 64 bits.
-pub(crate) fn shown(value: &Value) -> Value {
-    if let Some(digits) = wide_digits(value) {
-        return digits
-            .parse::<f64>()
-            .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map_or(Value::Null, Value::Number);
-    }
-    match value {
-        Value::Array(items) => Value::Array(items.iter().map(shown).collect()),
-        Value::Object(fields) => Value::Object(
-            fields
-                .iter()
-                .map(|(k, v)| (unescaped(k).to_owned(), shown(v)))
-                .collect(),
-        ),
-        v => v.clone(),
+/// Writes `value` as the request sent it: each integer past 64 bits with all its digits, and
+/// each object key without the escape that [`Variables`] adds.
+#[expect(
+    clippy::ref_option,
+    reason = "serde's serialize_with passes a reference to the field"
+)]
+pub(crate) fn serialize_as_sent<S: serde::Serializer>(
+    value: &Option<Value>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    value.as_ref().map(Sent).serialize(s)
+}
+
+pub(crate) struct Sent<'a>(pub(crate) &'a Value);
+
+impl serde::Serialize for Sent<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if let Some(digits) = wide_digits(self.0) {
+            return RawValue::from_string(digits.to_owned())
+                .map_err(serde::ser::Error::custom)?
+                .serialize(s);
+        }
+        match self.0 {
+            Value::Array(items) => s.collect_seq(items.iter().map(Sent)),
+            Value::Object(fields) => {
+                s.collect_map(fields.iter().map(|(k, v)| (unescaped(k), Sent(v))))
+            }
+            v => v.serialize(s),
+        }
     }
 }
 
-/// `value` with each integer past 64 bits at the `i64` bound of its sign, for a typed read.
+/// `value` with each integer past `i64` at the `i64` bound of its sign, for a typed read.
 pub(crate) fn saturate_wide_ints(value: &mut Value) {
+    if value.is_u64() && !value.is_i64() {
+        *value = Value::from(i64::MAX);
+        return;
+    }
     if let Some(digits) = wide_digits(value) {
         *value = Value::from(if digits.starts_with('-') {
             i64::MIN
@@ -171,20 +196,28 @@ fn holds_a_large_double(value: &Value) -> bool {
     }
 }
 
-fn exact_object(text: &str) -> Result<Map<String, Value>, serde_json::Error> {
+const MAX_DEPTH: usize = 126;
+
+fn exact_object(text: &str, depth: usize) -> Result<Map<String, Value>, serde_json::Error> {
+    if depth > MAX_DEPTH {
+        return Err(serde::de::Error::custom("recursion limit exceeded"));
+    }
     let fields: std::collections::BTreeMap<String, &RawValue> = serde_json::from_str(text)?;
     fields
         .into_iter()
-        .map(|(name, value)| Ok((escaped(name), exact(value.get())?)))
+        .map(|(name, value)| Ok((escaped(name), exact(value.get(), depth + 1)?)))
         .collect()
 }
 
-fn exact(text: &str) -> Result<Value, serde_json::Error> {
+fn exact(text: &str, depth: usize) -> Result<Value, serde_json::Error> {
     match text.as_bytes().first() {
-        Some(b'{') => exact_object(text).map(Value::Object),
+        Some(b'{') => exact_object(text, depth).map(Value::Object),
+        Some(b'[') if depth > MAX_DEPTH => {
+            Err(serde::de::Error::custom("recursion limit exceeded"))
+        }
         Some(b'[') => serde_json::from_str::<Vec<&RawValue>>(text)?
             .into_iter()
-            .map(|item| exact(item.get()))
+            .map(|item| exact(item.get(), depth + 1))
             .collect::<Result<_, _>>()
             .map(Value::Array),
         Some(b'-' | b'0'..=b'9')
@@ -386,7 +419,8 @@ mod tests {
             for value in [&vars["n"], &vars["l"][0], &vars["o"]["x"]] {
                 assert_eq!(wide_digits(value), None);
                 assert!(!matches("Int", value) && !matches("Float", value));
-                assert_eq!(shown(value), json!({"\u{0}int": "5"}));
+                let sent = serde_json::to_string(&Sent(value)).unwrap();
+                assert_eq!(sent, r#"{"\u0000int":"5"}"#);
             }
         }
     }
