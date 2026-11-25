@@ -218,7 +218,9 @@ pub fn workflow_refusal(actor: &Actor, path: &str) -> String {
 
 /// The first workflow file that moving a ref from `base` to `target` changes when `actor` may
 /// not write workflows: an App without the `workflows` permission, or a classic or OAuth token
-/// without the `workflow` scope.
+/// without the `workflow` scope. For such a token, as the OAuth scopes docs say, a file that a
+/// branch already holds at the same path with the same contents does not count; an App gets no
+/// such exception, as live merges by an App without the permission are refused.
 ///
 /// # Errors
 ///
@@ -249,7 +251,9 @@ pub fn denied_workflow(
         Err(error) if error.status == 403 => (),
         Err(error) => return Err(error),
     }
-    trees.changed_path(before, after, WORKFLOWS)
+    let scoped = matches!(actor, Actor::User { token, .. }
+        if token.kind == TokenKind::Personal || token.app_id.is_none());
+    trees.changed_path(before, after, WORKFLOWS, scoped)
 }
 
 struct Trees<'a> {
@@ -283,41 +287,99 @@ impl Trees<'_> {
         }
     }
 
+    /// The first changed path under `prefix`, leaving out, when `elsewhere` holds, a file whose
+    /// new contents a branch already holds at that path.
     fn changed_path(
         &self,
         before: Option<ObjectId>,
         after: Option<ObjectId>,
         prefix: &str,
+        elsewhere: bool,
     ) -> Result<Option<String>, ApiError> {
+        let mut changed = Vec::new();
+        self.changes(before, after, prefix, &mut changed)?;
+        let tips: Vec<ObjectId> = if elsewhere {
+            self.git
+                .refs(self.tx, self.repo, "refs/heads/")
+                .into_iter()
+                .map(|r| r.target)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for (path, new) in changed {
+            if let Some(new) = new
+                && self.held_elsewhere(&tips, &path, new)?
+            {
+                continue;
+            }
+            return Ok(Some(path));
+        }
+        Ok(None)
+    }
+
+    fn held_elsewhere(
+        &self,
+        tips: &[ObjectId],
+        path: &str,
+        blob: ObjectId,
+    ) -> Result<bool, ApiError> {
+        for tip in tips {
+            match self
+                .git
+                .expression(self.tx, self.repo, &format!("{tip}:{path}"))
+            {
+                Ok(object) if object.id == blob => return Ok(true),
+                Ok(_) | Err(GitError::NotFound | GitError::WrongKind) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(false)
+    }
+
+    /// Every path under `prefix` that differs between the trees `before` and `after`, with the
+    /// file it holds after the change, `None` for a deletion.
+    fn changes(
+        &self,
+        before: Option<ObjectId>,
+        after: Option<ObjectId>,
+        prefix: &str,
+        out: &mut Vec<(String, Option<ObjectId>)>,
+    ) -> Result<(), ApiError> {
         if before == after {
-            return Ok(None);
+            return Ok(());
         }
         let before = self.entries(before)?;
         let after = self.entries(after)?;
-        let prior = before
-            .iter()
-            .map(|entry| (entry, after.iter().find(|next| next.name == entry.name)));
+        let prior = before.iter().map(|entry| {
+            (
+                Some(entry),
+                after.iter().find(|next| next.name == entry.name),
+            )
+        });
         let added = after
             .iter()
             .filter(|next| before.iter().all(|entry| entry.name != next.name))
-            .map(|entry| (entry, None));
-        for (entry, other) in prior.chain(added) {
-            if Some(entry) == other {
+            .map(|entry| (None, Some(entry)));
+        for (old, new) in prior.chain(added) {
+            if old == new {
                 continue;
             }
-            let path = format!("{prefix}/{}", entry.name);
-            if entry.mode != EntryMode::Tree
-                || other.is_some_and(|item| item.mode != EntryMode::Tree)
-            {
-                return Ok(Some(path));
+            let Some(name) = old.or(new).map(|e| &e.name) else {
+                continue;
+            };
+            let path = format!("{prefix}/{name}");
+            let tree =
+                |e: Option<&TreeEntry>| e.filter(|e| e.mode == EntryMode::Tree).map(|e| e.id);
+            let file = new.filter(|e| e.mode != EntryMode::Tree);
+            if old.is_some_and(|e| e.mode != EntryMode::Tree) || file.is_some() {
+                out.push((path.clone(), file.map(|e| e.id)));
             }
-            if let Some(path) =
-                self.changed_path(Some(entry.id), other.map(|item| item.id), &path)?
-            {
-                return Ok(Some(path));
+            if tree(old).is_some() || tree(new).is_some() {
+                self.changes(tree(old), tree(new), &path, out)?;
             }
         }
-        Ok(None)
+        Ok(())
     }
 }
 

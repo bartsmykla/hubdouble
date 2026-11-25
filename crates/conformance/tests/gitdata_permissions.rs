@@ -349,6 +349,70 @@ async fn a_classic_token_without_the_workflow_scope_cannot_change_a_workflow() {
     assert_eq!(branch_sha(&client, "main").await, sha);
 }
 
+#[tokio::test]
+async fn a_workflow_file_that_another_branch_holds_needs_no_workflow_scope() {
+    // Given alice's classic tokens with and without the workflow scope, ci and wf branches,
+    // written with the scope, that hold .github/workflows/check.yml and wf.yml, and a main
+    // one plain commit ahead
+    let plain = format!("ghp_{:0<36}", "c1a55");
+    let scoped = format!("ghp_{:0<36}", "c1a55f");
+    let server = TestServer::builder()
+        .frame(hubdouble_api::register_all)
+        .fixture()
+        .entry(json!({"kind": "token", "user": "alice", "token": plain, "scopes": ["repo"]}))
+        .entry(json!({"kind": "token", "user": "alice", "token": scoped,
+                      "scopes": ["repo", "workflow"]}))
+        .start()
+        .await;
+    let client = GoGithub::new(&server).with_token(&plain);
+    let writer = GoGithub::new(&server).with_token(&scoped);
+    let main = branch_sha(&client, "main").await;
+    for (branch, file) in [("ci", "check.yml"), ("wf", "wf.yml")] {
+        let sha = detached_commit(&client, &main, &format!(".github/workflows/{file}")).await;
+        let made = writer
+            .post(
+                &format!("{GIT}/refs"),
+                &json!({"ref": format!("refs/heads/{branch}"), "sha": sha}),
+            )
+            .await;
+        checked("git/create-ref", StatusCode::CREATED, &made);
+    }
+    let path = format!("{GIT}/refs/heads%2Fmain");
+    let plain = detached_commit(&client, &main, "notes.md").await;
+    let moved = client
+        .call_json(Method::PATCH, &path, &json!({"sha": plain}))
+        .await;
+    checked("git/update-ref", StatusCode::OK, &moved);
+
+    // When a token without the grant adds the same contents at another workflow path
+    let elsewhere = detached_commit(&client, &plain, ".github/workflows/other.yml").await;
+    let denied = client
+        .call_json(Method::PATCH, &path, &json!({"sha": elsewhere}))
+        .await;
+    // Then GitHub refuses it, as no branch holds that path
+    checked("git/update-ref", StatusCode::UNPROCESSABLE_ENTITY, &denied);
+    assert_eq!(branch_sha(&client, "main").await, plain);
+
+    // When it adds the file that ci holds, at the same path and with the same contents
+    let same = detached_commit(&client, &plain, ".github/workflows/check.yml").await;
+    let allowed = client
+        .call_json(Method::PATCH, &path, &json!({"sha": same}))
+        .await;
+    // Then main moves, as the OAuth scopes docs allow
+    checked("git/update-ref", StatusCode::OK, &allowed);
+    assert_eq!(branch_sha(&client, "main").await, same);
+
+    // When the same token merges wf, which holds its workflow file, into main
+    let merged = client
+        .post(
+            "repos/acme/public/merges",
+            &json!({"base": "main", "head": "wf"}),
+        )
+        .await;
+    // Then the merge goes through
+    checked("repos/merge", StatusCode::CREATED, &merged);
+}
+
 async fn branch_sha(client: &GoGithub, branch: &str) -> String {
     let answer = client.get(&format!("{GIT}/ref/heads/{branch}")).await;
     checked("git/get-ref", StatusCode::OK, &answer)["object"]["sha"]
