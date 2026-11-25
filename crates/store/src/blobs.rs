@@ -16,6 +16,9 @@ pub struct Blob {
     /// The key that signs links to the blob when each link expires, as a job log link does;
     /// `None` serves the blob at its bare path.
     pub link_key: Option<Arc<str>>,
+    /// Links to the blob are refused with the `618` answers of GitHub's release asset CDN, not
+    /// with Azure storage's `403`.
+    pub cdn: bool,
 }
 
 impl Blob {

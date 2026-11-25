@@ -326,6 +326,7 @@ async fn blobs_answer_head_and_ranges() {
                 content_type: "text/plain".to_owned(),
                 data: Bytes::from_static(b"0123456789"),
                 link_key: None,
+                cdn: false,
             };
             tx.table_mut::<Blobs>().insert("log-1".to_owned(), blob);
             Ok(())
@@ -371,6 +372,7 @@ async fn a_signed_blob_link_works_only_from_its_start_to_its_expiry() {
         content_type: "text/plain".to_owned(),
         data: Bytes::from_static(b"line\n"),
         link_key: Some("key".into()),
+        cdn: false,
     };
     let (st, se) = (
         Timestamp::SEED.plus_seconds(10),

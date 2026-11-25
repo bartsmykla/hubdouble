@@ -372,6 +372,44 @@ async fn a_private_asset_reaches_its_bytes_only_through_the_checked_redirect() {
     assert_eq!(unchecked.status, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn an_asset_link_answers_as_the_release_asset_cdn_after_five_minutes() {
+    // Given the download redirect of an asset
+    let server = start(vec![release_seed()]).await;
+    let redirect = alice(&server)
+        .call_headers(
+            Method::GET,
+            "repos/acme/public/releases/assets/7101",
+            HeaderMap::from_iter([(ACCEPT, HeaderValue::from_static(OCTET_STREAM))]),
+        )
+        .await;
+    assert_eq!(redirect.status, StatusCode::FOUND);
+    let path = redirect
+        .header("location")
+        .strip_prefix(&server.base)
+        .unwrap()
+        .to_owned();
+    let (bare, _) = path.split_once('?').unwrap();
+    let root = GoGithub::new(&server);
+    // When the link is read 300 seconds after the redirect, as the live cli/cli asset 761188502 link's jwt has nbf to exp of 300 seconds
+    server.clock.advance(300);
+    let last = root.get(&path).await;
+    // And a second later, and without its signature
+    server.clock.advance(1);
+    let expired = root.get(&path).await;
+    let unsigned = root.get(bare).await;
+    // Then the link answers the bytes until it expires, and then the CDN's 618, as live links answered on 2026-11-25
+    assert_eq!(last.status, StatusCode::OK);
+    assert_eq!(&last.body[..], b"the asset bytes");
+    for (answer, content_type) in [
+        (&expired, OCTET_STREAM),
+        (&unsigned, "text/html; charset=utf-8"),
+    ] {
+        assert_eq!(answer.status.as_u16(), 618);
+        assert_eq!(answer.header("content-type"), content_type);
+    }
+}
+
 fn ruleset(id: i64, include: &[&str], rule: &str, enforcement: &str) -> Value {
     json!({"kind": "ruleset", "id": id, "repository": "acme/public", "name": format!("r{id}"),
            "target": "branch", "enforcement": enforcement,

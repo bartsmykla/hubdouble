@@ -11,6 +11,10 @@ use crate::pipeline::{HttpResponse, error_reply, to_response};
 const NOT_SIGNED: &str = "se is mandatory. Cannot be empty";
 const STORAGE_REASON: &[u8] = b"Server failed to authenticate the request. Make sure the value of \
     Authorization header is formed correctly including the signature.";
+const HTML: &str = "text/html; charset=utf-8";
+const OCTET_STREAM: &str = "application/octet-stream";
+
+type Refusal = (&'static [u8], Reply);
 
 fn expired(start: Option<Timestamp>, expiry: Timestamp, now: Timestamp) -> String {
     let start = start.map_or_else(String::new, Timestamp::http_date);
@@ -22,7 +26,25 @@ fn expired(start: Option<Timestamp>, expiry: Timestamp, now: Timestamp) -> Strin
     )
 }
 
-fn storage_refusal(detail: &str, now: Timestamp) -> Reply {
+fn cdn_refusal(reason: &'static str, content_type: &'static str, now: Timestamp) -> Refusal {
+    let body = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML \
+         1.0 Strict//EN\"\n \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\">\n<html>\n  \
+         <head>\n    <title>618 {reason}</title>\n  </head>\n  <body>\n    <h1>Error 618 \
+         {reason}</h1>\n    <p>{reason}</p>\n    <h3>Error 54113</h3>\n    <p>Details: \
+         cache-hubdouble {} {}</p>\n    <hr>\n    <p>Varnish cache server</p>\n  </body>\n\
+         </html>\n",
+        now.unix(),
+        uuid::Uuid::new_v4().as_fields().0
+    );
+    let status = StatusCode::from_u16(618).unwrap_or(StatusCode::FORBIDDEN);
+    (
+        reason.as_bytes(),
+        Reply::raw(content_type, body).status(status),
+    )
+}
+
+fn storage_refusal(detail: &str, now: Timestamp) -> Refusal {
     let request = uuid::Uuid::new_v4();
     let time = now.to_string().replace('Z', ".0000000Z");
     let body = format!(
@@ -42,7 +64,7 @@ fn storage_refusal(detail: &str, now: Timestamp) -> Reply {
         HeaderName::from_static("x-ms-request-id"),
         &request.to_string(),
     );
-    reply
+    (STORAGE_REASON, reply)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,29 +164,32 @@ pub(crate) fn serve(
     if blob.link_key.is_some() {
         let now = services.clock.now();
         let link = link(query);
-        let refusal = match link.expiry {
-            None => Some(NOT_SIGNED.to_owned()),
-            Some(at)
-                if link.sig.is_none()
-                    || blob.link_signature(id, link.start, at).as_deref() != link.sig =>
-            {
-                Some("Signature did not match.".to_owned())
+        let signed = |at| blob.link_signature(id, link.start, at).as_deref() == link.sig;
+        let refusal = match (blob.cdn, link.expiry) {
+            (true, None) => Some(cdn_refusal("jwt:jwt-not-provided", HTML, now)),
+            (true, Some(at)) if !signed(at) => {
+                Some(cdn_refusal("jwt:signature-fail", OCTET_STREAM, now))
             }
-            Some(at) if now > at || link.start.is_some_and(|start| now < start) => {
-                Some(expired(link.start, at, now))
+            (true, Some(at)) if now > at => Some(cdn_refusal("jwt:expired", OCTET_STREAM, now)),
+            (false, None) => Some(storage_refusal(NOT_SIGNED, now)),
+            (false, Some(at)) if !signed(at) => {
+                Some(storage_refusal("Signature did not match.", now))
             }
-            Some(_) => None,
+            (false, Some(at)) if now > at || link.start.is_some_and(|start| now < start) => {
+                Some(storage_refusal(&expired(link.start, at, now), now))
+            }
+            _ => None,
         };
-        if let Some(detail) = refusal {
-            let mut response = to_response(storage_refusal(&detail, now), head);
+        if let Some((reason, reply)) = refusal {
+            let mut response = to_response(reply, head);
             response
                 .extensions_mut()
-                .insert(ReasonPhrase::from_static(STORAGE_REASON));
+                .insert(ReasonPhrase::from_static(reason));
             return response;
         }
     }
     let len = blob.data.len();
-    let content_type: &'static str = "application/octet-stream";
+    let content_type = OCTET_STREAM;
     let range = headers
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok())

@@ -182,6 +182,7 @@ fn change_everything(tx: &mut TxMut<'_>) -> Result<(), ApiError> {
             content_type: "text/plain".to_owned(),
             data: Bytes::from_static(b"x"),
             link_key: None,
+            cdn: false,
         },
     );
     tx.push_outbox(entry("push"));

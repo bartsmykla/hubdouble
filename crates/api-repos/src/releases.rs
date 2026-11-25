@@ -24,6 +24,7 @@ const CONTENTS_WRITE: Requirement = Requirement {
 };
 
 const OCTET_STREAM: &str = "application/octet-stream";
+const ASSET_LINK_SECONDS: i64 = 300;
 
 pub(crate) fn register(r: &mut Registrar<'_>) {
     r.rest.handle("repos/list-releases", CONTENTS, list);
@@ -137,7 +138,20 @@ fn asset(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .filter(|r| visible(tx, ctx.actor(), repo, r))
         .ok_or_else(ApiError::not_found)?;
     if wants_bytes(ctx) {
-        return Reply::redirect(&format!("{}/_blobs/{}", ctx.urls().base, a.blob_id));
+        let (base, id) = (&ctx.urls().base, &a.blob_id);
+        let expiry = ctx.now().plus_seconds(ASSET_LINK_SECONDS);
+        let link = match tx
+            .table::<Blobs>()
+            .get(id)
+            .and_then(|blob| blob.link_signature(id, None, expiry))
+        {
+            Some(sig) => {
+                let se = expiry.to_string().replace(':', "%3A");
+                format!("{base}/_blobs/{id}?sp=r&se={se}&sig={sig}")
+            }
+            None => format!("{base}/_blobs/{id}"),
+        };
+        return Reply::redirect(&link);
     }
     let accounts = tx.table::<Accounts>();
     let uploader = accounts
@@ -272,7 +286,8 @@ fn release_kind(ctx: &mut SeedCtx<'_>, v: Value) -> Result<(), ApiError> {
             Blob {
                 content_type: content_type.clone(),
                 data: data.clone(),
-                link_key: None,
+                link_key: Some(uuid::Uuid::new_v4().to_string().into()),
+                cdn: true,
             },
         );
         ctx.tx.table_mut::<ReleaseAssets>().insert(ReleaseAsset {

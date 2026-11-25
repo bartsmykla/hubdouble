@@ -678,7 +678,10 @@ fn blob(x: &Exchange<'_>) -> Vec<String> {
         {
             errors.push("a 403 that is not the storage's AuthenticationFailed".to_owned());
         }
-        200 | 206 | 403 | 404 | 416 => {}
+        618 if !String::from_utf8_lossy(x.body).contains("<p>Varnish cache server</p>") => {
+            errors.push("a 618 that is not the release asset CDN's jwt refusal".to_owned());
+        }
+        200 | 206 | 403 | 404 | 416 | 618 => {}
         s => errors.push(format!("status {s}")),
     }
     errors
