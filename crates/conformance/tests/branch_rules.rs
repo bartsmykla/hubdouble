@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use http::{Method, StatusCode};
 use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
-use hubdouble_model::{Clock, Repo};
+use hubdouble_model::{Clock, Repo, Timestamp};
 use hubdouble_store::Repos;
 use hubdouble_testkit::fixture::{self, ALICE_ID, ALICE_TOKEN, BOB_ID, BOB_TOKEN, PUBLIC_REPO_ID};
 use hubdouble_testkit::{Answer, Delivery, GoGithub, Graphql, TestServer};
@@ -914,6 +914,49 @@ async fn every_branch_and_tag_write_moves_pushed_at_and_leaves_updated_at() {
         .await
         .json();
     assert_eq!(read["data"]["repository"]["pushedAt"], now, "{read}");
+}
+
+#[tokio::test]
+async fn a_push_delivery_has_the_push_form_of_the_repository() {
+    // Given acme/public, owned by the acme organization
+    let server = server(&[]).await;
+    let alice = client(&server, ALICE_TOKEN);
+    let read = alice.get(REPO).await.json();
+    deliveries(&server).await;
+    // When alice creates a branch at main
+    server.clock.advance(60);
+    let main = tip(&alice, "main").await;
+    let answer = alice
+        .post(
+            &format!("{REPO}/git/refs"),
+            &json!({"ref": "refs/heads/topic", "sha": main}),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::CREATED, "{}", answer.json());
+    // Then the push repository has Unix times, stargazers, master_branch and the owner's
+    // name, and the create repository keeps the common form
+    let sent = deliveries(&server).await;
+    let payload = |event: &str| {
+        sent.iter()
+            .find(|d| d.header("x-github-event") == event)
+            .unwrap_or_else(|| panic!("no {event} delivery"))
+            .json()["repository"]
+            .clone()
+    };
+    let push = payload("push");
+    let created = Timestamp::parse(read["created_at"].as_str().unwrap_or_default())
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(push["created_at"], json!(created.0));
+    assert_eq!(push["pushed_at"], json!(server.clock.now().0));
+    assert_eq!(push["updated_at"], read["updated_at"]);
+    assert_eq!(push["stargazers"], json!(0));
+    assert_eq!(push["stargazers"], push["stargazers_count"]);
+    assert_eq!(push["master_branch"], "main");
+    assert_eq!(push["organization"], "acme");
+    assert_eq!(push["owner"]["name"], "acme");
+    let create = payload("create");
+    assert_eq!(create["created_at"], read["created_at"]);
+    assert_eq!(create.get("master_branch"), None);
 }
 
 #[tokio::test]
