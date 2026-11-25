@@ -289,6 +289,55 @@ async fn check_writes_refuse_what_github_refuses() {
 }
 
 #[tokio::test]
+async fn a_user_access_token_of_an_app_writes_check_runs_as_its_user() {
+    // Given a user access token that the fixture App issued to alice, as GitHub lists the
+    // check run writes among the routes that such a token can use
+    const USER_TOKEN: &str = "ghu_checks_conformance_user_of_the_app";
+    let server = start(vec![]).await;
+    server
+        .server
+        .services()
+        .store
+        .update_quiet(|tx| {
+            let id = tx.next_id();
+            tx.table_mut::<Tokens>().insert(Token {
+                kind: TokenKind::User,
+                installation_id: None,
+                user_id: Some(fixture::ALICE_ID),
+                ..token(id, USER_TOKEN, &[])
+            })?;
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("insert the user token: {e}"));
+    let user = GoGithub::enterprise(&server).with_token(USER_TOKEN);
+    let head = sha(&server, "main");
+    // When alice creates a run with it, and the App's installation and alice update it
+    let created = checked(
+        &user
+            .post(RUNS, &json!({"name": "user check", "head_sha": head}))
+            .await,
+        201,
+        "checks/create",
+    );
+    let run = format!("{RUNS}/{}", created["id"]);
+    let by_app = app_client(&server)
+        .call_json(Method::PATCH, &run, &json!({"status": "in_progress"}))
+        .await;
+    let by_user = user
+        .call_json(Method::PATCH, &run, &json!({"conclusion": "success"}))
+        .await;
+    // Then the run belongs to the App, either credential of the App updates it, and alice
+    // sends its event
+    assert_eq!(created["app"]["id"], fixture::APP_ID);
+    assert_eq!(by_app.status, StatusCode::OK);
+    assert_eq!(by_user.status, StatusCode::OK);
+    let all = drain(&server).await;
+    let event = webhook(&all, "check_run", Some("created"));
+    assert_eq!(event["sender"]["login"], fixture::ALICE);
+    assert_eq!(event["check_run"]["app"]["id"], fixture::APP_ID);
+}
+
+#[tokio::test]
 async fn an_app_cannot_set_the_states_only_github_sets() {
     // Given an App's in-progress run, and the docs rule that only GitHub Actions sets waiting, requested and pending, only GitHub sets stale, and the write enums leave out startup_failure
     let server = start(vec![]).await;
@@ -330,6 +379,88 @@ async fn an_app_cannot_set_the_states_only_github_sets() {
     let read = checked(&client.get(&run).await, 200, "checks/get");
     assert_eq!(read["status"], "in_progress");
     assert_eq!(read["conclusion"], Value::Null);
+}
+
+#[tokio::test]
+async fn a_suite_keeps_the_1000_newest_runs_of_a_name() {
+    // Given 1001 runs named build in the suite of one App, and one run of another name
+    let mut runs: Vec<Value> = (0..1001)
+        .map(|n| {
+            json!({"kind": "check_run", "id": 900_000 + n, "repository": "acme/public",
+                "app": "fixture-app", "name": "build", "head_sha": "main"})
+        })
+        .collect();
+    runs.push(
+        json!({"kind": "check_run", "id": 899_999, "repository": "acme/public",
+        "app": "fixture-app", "name": "lint", "head_sha": "main"}),
+    );
+    // When they are created, as the Checks docs say GitHub limits them
+    let server = start(runs).await;
+    let client = app_client(&server);
+    let head = sha(&server, "main");
+    let named = |name: &str| {
+        format!("repos/acme/public/commits/{head}/check-runs?check_name={name}&filter=all")
+    };
+    // Then the oldest build run is gone, the other 1000 and the lint run stay
+    let builds = checked(
+        &client.get(&named("build")).await,
+        200,
+        "checks/list-for-ref",
+    );
+    assert_eq!(builds["total_count"], 1000);
+    let lint = checked(
+        &client.get(&named("lint")).await,
+        200,
+        "checks/list-for-ref",
+    );
+    assert_eq!(lint["total_count"], 1);
+    assert_eq!(
+        client.get(&format!("{RUNS}/900000")).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        client.get(&format!("{RUNS}/900001")).await.status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn check_runs_for_ref_come_from_the_1000_newest_suites_on_the_ref() {
+    // Given 1001 Apps, each with a suite on main from one run
+    let mut extra = Vec::new();
+    for n in 0..1001 {
+        let slug = format!("limit-app-{n}");
+        extra.push(json!({"kind": "app", "id": 700_000 + n, "slug": slug,
+            "name": format!("Limit App {n}"), "owner": fixture::ORG,
+            "public_key": fixture::APP_PUBLIC_KEY,
+            "permissions": {"checks": "write", "metadata": "read"}}));
+        extra.push(
+            json!({"kind": "check_run", "repository": "acme/public", "app": slug,
+            "name": format!("suite-{n}"), "head_sha": "main"}),
+        );
+    }
+    let server = start(extra).await;
+    let client = app_client(&server);
+    let head = sha(&server, "main");
+    // When the runs of the oldest and the next suite are listed by name
+    let count = |name: &'static str| {
+        let client = client.clone();
+        let path = format!("repos/acme/public/commits/{head}/check-runs?check_name={name}");
+        async move {
+            checked(&client.get(&path).await, 200, "checks/list-for-ref")["total_count"].clone()
+        }
+    };
+    // Then only the run of the oldest suite is left out, as the Checks docs say
+    assert_eq!(count("suite-0").await, 0);
+    assert_eq!(count("suite-1").await, 1);
+    let suites = checked(
+        &client
+            .get(&format!("repos/acme/public/commits/{head}/check-suites"))
+            .await,
+        200,
+        "checks/list-suites-for-ref",
+    );
+    assert_eq!(suites["total_count"], 1001);
 }
 
 #[tokio::test]

@@ -5,10 +5,10 @@ use hubdouble_auth::Actor;
 use hubdouble_git::{Git, ObjectId};
 use hubdouble_model::{
     Annotation, AnnotationLevel, ApiError, CheckAction, CheckRun, Conclusion, Repo, RunStatus,
-    Timestamp, node_id,
+    Timestamp, TokenKind, node_id,
 };
 use hubdouble_rest::{Ctx, Reply};
-use hubdouble_store::{Apps, CheckRuns, TxMut};
+use hubdouble_store::{Apps, CheckRuns, CheckSuites, TxMut};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -19,6 +19,8 @@ use crate::{app_filter, filter, invalid, missing, page_object, suites};
 
 const MAX_ANNOTATIONS: usize = 50;
 const MAX_ACTIONS: usize = 3;
+const MAX_RUNS_PER_NAME: usize = 1000;
+const MAX_LISTED_SUITES: usize = 1000;
 
 #[derive(Deserialize)]
 pub struct AnnotationInput {
@@ -63,9 +65,22 @@ pub struct RunInput {
     actions: Option<Vec<ActionInput>>,
 }
 
+/// The App that a checks write acts for and the account that sends its events: an
+/// installation token's App and bot, or the App that issued a user access token (`ghu_`) and
+/// its user, as GitHub lists the check writes among the routes that such a token can use.
+///
+/// # Errors
+///
+/// `403` for another actor, such as a personal or an OAuth token.
 pub fn app_actor(actor: &Actor) -> Result<(i64, i64), ApiError> {
     match actor {
         Actor::Installation { app, bot, .. } if app.id != actions::APP_ID => Ok((app.id, bot.id)),
+        Actor::User { token, user } if token.kind == TokenKind::User => match token.app_id {
+            Some(app) if app != actions::APP_ID => Ok((app, user.id)),
+            _ => Err(ApiError::forbidden(
+                "You must authenticate via a GitHub App.",
+            )),
+        },
         _ => Err(ApiError::forbidden(
             "You must authenticate via a GitHub App.",
         )),
@@ -263,6 +278,15 @@ pub fn create_run(
     };
     apply(&mut run, input, now)?;
     let run = tx.table_mut::<CheckRuns>().insert(run)?;
+    let named: Vec<i64> = tx
+        .table::<CheckRuns>()
+        .children(suite)
+        .filter(|held| held.name == run.name)
+        .map(|held| held.id)
+        .collect();
+    for old in named.iter().rev().skip(MAX_RUNS_PER_NAME) {
+        tx.table_mut::<CheckRuns>().remove(*old);
+    }
     events::check_run(tx, git, &run, ("created", sender, To::Subscribers), None)?;
     if run.status == RunStatus::Completed {
         events::check_run(tx, git, &run, ("completed", sender, To::Subscribers), None)?;
@@ -343,8 +367,20 @@ pub fn list_for_ref(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let status = filter(query, "status");
     let app = app_filter(query);
     let all = query.get("filter") == Some("all");
-    let matching = view::runs_on(ctx.tx(), repo, &sha)
-        .filter(|run| name.is_none_or(|n| run.name == n) && app.is_none_or(|a| run.app_id == a));
+    let recent: std::collections::BTreeSet<i64> = ctx
+        .tx()
+        .table::<CheckSuites>()
+        .in_repo(repo)
+        .rev()
+        .filter(|suite| suite.head_sha == sha)
+        .take(MAX_LISTED_SUITES)
+        .map(|suite| suite.id)
+        .collect();
+    let matching = view::runs_on(ctx.tx(), repo, &sha).filter(|run| {
+        recent.contains(&run.check_suite_id)
+            && name.is_none_or(|n| run.name == n)
+            && app.is_none_or(|a| run.app_id == a)
+    });
     let mut runs: Vec<_> = if all {
         matching.collect()
     } else {
