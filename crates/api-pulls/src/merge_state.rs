@@ -168,7 +168,7 @@ impl Rules {
         let mut any = Vec::new();
         for (i, (number, raw, pattern)) in codeowners::spans(&text).enumerate() {
             let key = match codeowners::reach(text.get(pattern.clone()).unwrap_or_default()) {
-                Reach::Root(name) => Some(key_of(ROOT, name)),
+                Reach::Root(prefix) => Some(prefix.split('/').fold(key_of(ROOT, ""), step)),
                 Reach::Name(name) => Some(key_of(NAME, name)),
                 Reach::Any => None,
             };
@@ -199,9 +199,10 @@ impl Rules {
 
     fn covering(&self, path: &str) -> Vec<usize> {
         let mut found = self.any.clone();
-        let root = path.split('/').next().unwrap_or(path);
-        self.chain(key_of(ROOT, root), &mut found);
+        let mut prefix = key_of(ROOT, "");
         for segment in path.split('/') {
+            prefix = step(prefix, segment);
+            self.chain(prefix, &mut found);
             self.chain(key_of(NAME, segment), &mut found);
         }
         found.sort_unstable();
@@ -228,6 +229,10 @@ impl Rules {
 
 fn key_of(kind: u8, name: &str) -> u64 {
     FixedState::default().hash_one((kind, name))
+}
+
+fn step(prefix: u64, segment: &str) -> u64 {
+    FixedState::default().hash_one((prefix, segment))
 }
 
 impl PushMemo {

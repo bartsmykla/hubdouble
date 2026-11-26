@@ -118,7 +118,8 @@ pub fn covers(pattern: &str, path: &str) -> bool {
 }
 
 /// The paths that a pattern can cover, for an index of rules: [`covers`] is true only when
-/// the first segment of the path, or for [`Reach::Name`] one of its segments, is the name.
+/// the path starts with the segments of [`Reach::Root`], the literal segments that lead the
+/// pattern, or for [`Reach::Name`] when one of its segments is the name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reach<'p> {
     Root(&'p str),
@@ -133,9 +134,20 @@ pub fn reach(pattern: &str) -> Reach<'_> {
     let anchored = trimmed.starts_with('/') || trimmed.contains('/');
     let p = trimmed.trim_start_matches('/');
     let literal = |s: &str| !s.is_empty() && !s.contains(['*', '?']);
-    match p.split('/').next() {
-        Some(first) if anchored && literal(first) => Reach::Root(first),
-        _ if !anchored && literal(p) => Reach::Name(p),
+    if !anchored {
+        return if literal(p) {
+            Reach::Name(p)
+        } else {
+            Reach::Any
+        };
+    }
+    let end = p
+        .split('/')
+        .take_while(|s| literal(s))
+        .map(|s| s.len() + 1)
+        .sum::<usize>();
+    match p.get(..end.saturating_sub(1)) {
+        Some(prefix) if !prefix.is_empty() => Reach::Root(prefix),
         _ => Reach::Any,
     }
 }
@@ -430,7 +442,10 @@ mod tests {
             for path in paths {
                 let segments: Vec<&str> = path.split('/').collect();
                 let admitted = match reach {
-                    Reach::Root(first) => segments[0] == first,
+                    Reach::Root(prefix) => {
+                        let literal: Vec<&str> = prefix.split('/').collect();
+                        segments.starts_with(&literal)
+                    }
                     Reach::Name(name) => segments.contains(&name),
                     Reach::Any => true,
                 };
@@ -441,8 +456,9 @@ mod tests {
                 );
             }
         }
-        assert_eq!(reach("/build/logs/"), Reach::Root("build"));
+        assert_eq!(reach("/build/logs/"), Reach::Root("build/logs"));
         assert_eq!(reach("docs/*"), Reach::Root("docs"));
+        assert_eq!(reach("/src/a*/b"), Reach::Root("src"));
         assert_eq!(reach("apps/"), Reach::Name("apps"));
         assert_eq!(reach("*.js"), Reach::Any);
         assert_eq!(reach("/a?c/"), Reach::Any);

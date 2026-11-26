@@ -1049,18 +1049,31 @@ fn in_process(dir: &Path, rows: &mut Vec<Row>) {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Owners {
     None,
     Kept(usize),
     Changed(usize),
+    Shared(usize),
 }
 
 impl Owners {
     fn rules(self) -> usize {
         match self {
             Owners::None => 0,
-            Owners::Kept(rules) | Owners::Changed(rules) => rules,
+            Owners::Kept(rules) | Owners::Changed(rules) | Owners::Shared(rules) => rules,
+        }
+    }
+
+    fn changes(self) -> bool {
+        matches!(self, Owners::Changed(_) | Owners::Shared(_))
+    }
+
+    fn root(self) -> &'static str {
+        if matches!(self, Owners::Shared(_)) {
+            "shared/"
+        } else {
+            ""
         }
     }
 
@@ -1071,6 +1084,10 @@ impl Owners {
             Owners::Changed(n) => {
                 format!("a CODEOWNERS of {n} rules that each push changes and {PUSH_PULLS}")
             }
+            Owners::Shared(n) => format!(
+                "a CODEOWNERS of {n} rules under one root that each push changes and \
+                 {PUSH_PULLS}"
+            ),
         }
     }
 }
@@ -1078,18 +1095,19 @@ impl Owners {
 fn push_seed(owners_file: Owners) -> Vec<Value> {
     let mut entries = fixture::seed();
     let mut owners = String::new();
+    let root = owners_file.root();
     for n in 1..=owners_file.rules() {
-        let _ = writeln!(owners, "/area-{n}/ @{}", fixture::ALICE);
+        let _ = writeln!(owners, "/{root}area-{n}/ @{}", fixture::ALICE);
     }
-    let _ = writeln!(owners, "/changes/ @{}", fixture::ALICE);
+    let _ = writeln!(owners, "/{root}changes/ @{}", fixture::ALICE);
     let mut commits: Vec<Value> = (1..=PUSH_PULLS)
         .map(|n| {
             json!({"branch": format!("pull-{n}"), "message": format!("change {n}"),
-                   "files": {format!("changes/{n}.txt"): format!("change {n}\n")}})
+                   "files": {format!("{root}changes/{n}.txt"): format!("change {n}\n")}})
         })
         .collect();
     let mut next_files = json!({"next.txt": "next\n"});
-    if let Owners::Changed(_) = owners_file {
+    if owners_file.changes() {
         next_files[".github/CODEOWNERS"] = json!(format!("{owners}/next/ @{}\n", fixture::ALICE));
     }
     commits.push(json!({"branch": "main-next", "message": "move main", "files": next_files}));
@@ -1156,11 +1174,7 @@ async fn first_reads(client: &mut Client, doc: &mut Doc) -> Result<Vec<Duration>
 
 fn push_rows(dir: &Path, owners_file: Owners, rows: &mut Vec<Row>) {
     let receiver = Receiver::start(Duration::ZERO);
-    let (owner_rules, changed) = (
-        owners_file.rules(),
-        matches!(owners_file, Owners::Changed(_)),
-    );
-    let seed_file = format!("push-seed-{owner_rules}-{changed}.json");
+    let seed_file = format!("push-seed-{owners_file:?}.json");
     let running = start_server(&push_seed(owners_file), &receiver.url, dir, &seed_file);
     let client_runtime = runtime(4);
     let addr = running.addr;
@@ -2023,6 +2037,7 @@ fn main() -> ExitCode {
     push_rows(dir.path(), Owners::None, &mut rows);
     push_rows(dir.path(), Owners::Kept(PUSH_OWNER_RULES), &mut rows);
     push_rows(dir.path(), Owners::Changed(PUSH_OWNER_RULES), &mut rows);
+    push_rows(dir.path(), Owners::Shared(PUSH_OWNER_RULES), &mut rows);
     rows.push(calibration_row(before, calibrate()));
     let table = report(&rows);
     let _ = std::io::stdout().lock().write_all(table.as_bytes());
