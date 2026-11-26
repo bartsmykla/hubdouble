@@ -8,7 +8,6 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use crate::timeline::{self, StateKind};
 
-const MAX_LOGIN: usize = 39;
 const HIDING_ELEMENTS: [&str; 5] = ["pre", "code", "a", "style", "script"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -24,8 +23,10 @@ enum Named {
 /// a `subscribed`. One text subscribes a user once. A user who cannot read the repository gets
 /// none. `author` mentions a team only as a member of its organization, a secret team only as
 /// one of its members or an owner, and a team with notifications off reaches no one. Logins
-/// and team slugs match without case. A mention in GitHub Flavored Markdown code, in a link,
-/// or inside a `pre`, `code`, `a`, `style` or `script` element does not count.
+/// and team slugs match without case, and a mention ends where the user and team patterns of
+/// html-pipeline's mention filters end it. A mention in GitHub Flavored Markdown code, in a
+/// link, in an HTML comment, or inside a `pre`, `code`, `a`, `style` or `script` element does
+/// not count.
 ///
 /// # Errors
 ///
@@ -141,11 +142,12 @@ struct Scan {
     prose: String,
     hidden: usize,
     elements: usize,
+    comment: bool,
 }
 
 impl Scan {
     fn text(&mut self, text: &str) {
-        if self.hidden == 0 && self.elements == 0 {
+        if self.hidden == 0 && self.elements == 0 && !self.comment {
             self.prose.push_str(text);
         }
     }
@@ -157,9 +159,32 @@ impl Scan {
 
     fn html(&mut self, chunk: &str) {
         let mut rest = chunk;
-        while let Some(open) = rest.find('<') {
+        loop {
+            if self.comment {
+                let Some(end) = rest.find("-->") else {
+                    return;
+                };
+                self.comment = false;
+                rest = rest.get(end + 3..).unwrap_or_default();
+            }
+            let Some(open) = rest.find('<') else {
+                break;
+            };
             self.text(rest.get(..open).unwrap_or_default());
             let tag_and_rest = rest.get(open + 1..).unwrap_or_default();
+            if let Some(comment) = tag_and_rest.strip_prefix("!--") {
+                self.flush();
+                if let Some(after) = comment
+                    .strip_prefix('>')
+                    .or_else(|| comment.strip_prefix("->"))
+                {
+                    rest = after;
+                } else {
+                    self.comment = true;
+                    rest = comment;
+                }
+                continue;
+            }
             let Some(close) = tag_and_rest.find('>') else {
                 self.text(rest.get(open..).unwrap_or_default());
                 return;
@@ -169,10 +194,9 @@ impl Scan {
             let (closing, name) = tag.strip_prefix('/').map_or((false, tag), |n| (true, n));
             let name_len = name.bytes().take_while(u8::is_ascii_alphanumeric).count();
             let name = name.get(..name_len).unwrap_or_default();
-            if !tag.ends_with('/')
-                && HIDING_ELEMENTS
-                    .iter()
-                    .any(|hiding| hiding.eq_ignore_ascii_case(name))
+            if HIDING_ELEMENTS
+                .iter()
+                .any(|hiding| hiding.eq_ignore_ascii_case(name))
             {
                 if closing {
                     self.elements = self.elements.saturating_sub(1);
@@ -257,30 +281,26 @@ fn word(byte: u8) -> bool {
 }
 
 fn mention(rest: &str) -> Option<&str> {
-    let login_len = rest
-        .bytes()
-        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-')
-        .count();
-    let login = rest.get(..login_len)?.trim_end_matches('-');
-    if login.is_empty() || login.len() > MAX_LOGIN || login.starts_with('-') {
-        return None;
-    }
-    let after = rest.get(login_len..).unwrap_or_default();
-    let Some(team) = after.strip_prefix('/') else {
-        return Some(login);
+    let bytes = rest.as_bytes();
+    let run = |from: usize, extra: &[u8]| {
+        let starts = bytes.get(from).is_some_and(u8::is_ascii_alphanumeric);
+        let len = bytes
+            .iter()
+            .skip(from)
+            .take_while(|b| b.is_ascii_alphanumeric() || extra.contains(b))
+            .count();
+        starts.then_some(len)
     };
-    if login.len() != login_len {
-        return Some(login);
+    let login = run(0, b"-")?;
+    match bytes.get(login) {
+        Some(b'/') => {
+            let slug = rest.get(login + 1..login + 1 + run(login + 1, b"-_")?)?;
+            rest.get(..login + 1 + slug.trim_end_matches('-').len())
+        }
+        Some(b'.') if bytes.get(login + 1).is_some_and(|b| word(*b)) => None,
+        Some(b) if word(*b) => None,
+        _ => rest.get(..login),
     }
-    let slug_len = team
-        .bytes()
-        .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-        .count();
-    let slug = team.get(..slug_len)?.trim_end_matches('.');
-    if slug.is_empty() {
-        return Some(login);
-    }
-    rest.get(..login_len + 1 + slug.len())
 }
 
 #[cfg(test)]
@@ -295,10 +315,52 @@ mod tests {
         // When its mentions are read
         let found = mentions(text);
         // Then only the users and the team outside code count
-        assert_eq!(
-            found,
-            ["alice", "acme/core-team", "bob", "erin", "acme", "frank"]
-        );
+        assert_eq!(found, ["alice", "acme/core-team", "bob-", "erin"]);
+    }
+
+    #[test]
+    fn a_mention_ends_where_githubs_mention_filters_end_it() {
+        for (text, want) in [
+            ("@alice.bob", &[][..]),
+            ("@alice_bob", &[]),
+            ("@alice_x", &[]),
+            ("@frank/", &[]),
+            ("@alice.", &["alice"]),
+            ("@alice. next", &["alice"]),
+            ("@alice..bob", &["alice"]),
+            ("@alice-", &["alice-"]),
+            ("@acme/a.b", &["acme/a"]),
+            ("@acme/core-", &["acme/core"]),
+            ("@acme/core_", &["acme/core_"]),
+            ("@acme/-core", &[]),
+            ("é@alice", &["alice"]),
+        ] {
+            // Given a mention whose name meets a dot, an underscore, a slash or a dash
+            // When its mentions are read
+            let found = mentions(text);
+            // Then the name is what the user and team patterns of html-pipeline match
+            assert_eq!(found, want, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn deep_markdown_stays_on_a_small_stack() {
+        // Given text that nests block quotes, brackets and emphasis 100000 levels deep
+        let n = 100_000;
+        let texts = [
+            format!("{}x\n\n@b", "> ".repeat(n)),
+            format!("{} @b", "[".repeat(n)),
+            format!("{}x{} @b", "*".repeat(n), "*".repeat(n)),
+        ];
+        // When its mentions are read on a thread with a 256 KiB stack
+        let found = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || texts.iter().map(|t| mentions(t)).collect::<Vec<_>>())
+            .unwrap()
+            .join()
+            .unwrap();
+        // Then each finds the mention after the nesting
+        assert_eq!(found, [["b"], ["b"], ["b"]]);
     }
 
     #[test]
@@ -328,6 +390,11 @@ mod tests {
             ("<code>@a</code> @b", &["b"]),
             ("<pre>@a</pre>\n\n@b", &["b"]),
             ("<div>@a <script>@b</script></div>", &["a"]),
+            ("<!-- note > @a -->\n\n@b", &["b"]),
+            ("x <!-- <foo> @a --> @b", &["b"]),
+            ("<!--\nnote\n> @a\n-->\n\n@b", &["b"]),
+            ("x <!--> @a", &["a"]),
+            ("<a href=https://example.com/>@a</a> @b", &["b"]),
             ("**x**@a", &["a"]),
         ] {
             // Given text with code or a link in a form that GitHub Flavored Markdown names, or
