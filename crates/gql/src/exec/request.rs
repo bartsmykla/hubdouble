@@ -56,9 +56,11 @@ pub(crate) fn execute(
         registry,
         doc: &doc,
         vars: &vars,
+        lone_low_vars: &request.variables.1,
         errors: Vec::new(),
         warnings: Vec::new(),
         omit_data: false,
+        failed_internally: false,
     };
     let read_jobs = ReadJobs::default();
     let data = match op.operation_type {
@@ -91,6 +93,20 @@ pub(crate) fn execute(
             }]));
         }
     };
+    if ex.failed_internally {
+        return Ok(failed(vec![ResponseError {
+            kind: ErrorType::Validation,
+            message: format!(
+                "Something went wrong while executing your query on {}. Please include `{}` \
+                 when reporting this issue.",
+                request.clock.now(),
+                request.request_id
+            ),
+            path: Vec::new(),
+            locations: Vec::new(),
+            extensions: None,
+        }]));
+    }
     read_jobs.run(git, store)?;
     let extensions = (!ex.warnings.is_empty()).then(|| {
         let mut m = Map::new();

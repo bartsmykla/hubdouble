@@ -117,9 +117,10 @@ pub(crate) fn infinite(value: &Value) -> Option<&str> {
 }
 
 /// GraphQL request variables. An integer past 64 bits keeps its digits in a form that only
-/// [`Variables::parse`] makes: a request that sends the same form gets its object back.
+/// [`Variables::parse`] makes: a request that sends the same form gets its object back. The
+/// second field names each variable whose value holds a lone low surrogate.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Variables(pub(crate) Map<String, Value>);
+pub struct Variables(pub(crate) Map<String, Value>, pub(crate) Vec<String>);
 
 impl Variables {
     /// Reads the `variables` member of a GraphQL request body, keeping the digits of each
@@ -131,14 +132,16 @@ impl Variables {
     ///
     /// The `serde_json` error when `text` is not a JSON object or nests deeper than that.
     pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
-        Exact::new(text).whole_object().map(Self)
+        let mut exact = Exact::new(text);
+        let fields = exact.whole_object()?;
+        Ok(Self(fields, exact.lone_low_members))
     }
 }
 
 impl From<Map<String, Value>> for Variables {
     fn from(mut fields: Map<String, Value>) -> Self {
         escape_keys(&mut fields);
-        Self(fields)
+        Self(fields, Vec::new())
     }
 }
 
@@ -265,6 +268,8 @@ fn invalid(what: &str) -> serde_json::Error {
 struct Exact<'t> {
     text: &'t str,
     at: usize,
+    lone_low: bool,
+    lone_low_members: Vec<String>,
     #[cfg(test)]
     parsed: usize,
 }
@@ -274,6 +279,8 @@ impl<'t> Exact<'t> {
         Self {
             text,
             at: 0,
+            lone_low: false,
+            lone_low_members: Vec::new(),
             #[cfg(test)]
             parsed: 0,
         }
@@ -314,7 +321,7 @@ impl<'t> Exact<'t> {
         Ok(token)
     }
 
-    fn whole_object(mut self) -> Result<Map<String, Value>, serde_json::Error> {
+    fn whole_object(&mut self) -> Result<Map<String, Value>, serde_json::Error> {
         let fields = self.object(1)?;
         match self.peek() {
             None => Ok(fields),
@@ -346,10 +353,14 @@ impl<'t> Exact<'t> {
             if self.peek() != Some(b'"') {
                 return Err(invalid("key must be a string"));
             }
-            let name = self.string()?;
+            let name = escaped(self.string()?);
             self.eat(b':')?;
+            self.lone_low = false;
             let value = self.value(depth + 1)?;
-            fields.insert(escaped(name), value);
+            if depth == 1 && self.lone_low {
+                self.lone_low_members.push(name.clone());
+            }
+            fields.insert(name, value);
             match self.peek() {
                 Some(b',') => self.bump(),
                 Some(b'}') => {
@@ -394,9 +405,10 @@ impl<'t> Exact<'t> {
                 _ => end += 1,
             }
         }
-        json_string(self.token(end + 1)?)
-            .map(|(text, _)| text)
-            .ok_or_else(|| invalid("invalid string"))
+        let (text, lone_low) =
+            json_string(self.token(end + 1)?).ok_or_else(|| invalid("invalid string"))?;
+        self.lone_low |= lone_low;
+        Ok(text)
     }
 
     fn scalar(&mut self) -> Result<Value, serde_json::Error> {
@@ -586,7 +598,7 @@ mod tests {
         );
 
         // When
-        let Variables(vars) = Variables::parse(&raw).unwrap();
+        let Variables(vars, _) = Variables::parse(&raw).unwrap();
 
         // Then only the wide integers change form, and an Int and a Float take them
         assert_eq!(wide_digits(&vars["a"][1]), Some("-99999999999999999999"));
@@ -645,7 +657,7 @@ mod tests {
         let read: Map<String, Value> = serde_json::from_str(raw).unwrap();
 
         // When the variables are read exactly, and from what serde_json read
-        for Variables(vars) in [Variables::parse(raw).unwrap(), Variables::from(read)] {
+        for Variables(vars, _) in [Variables::parse(raw).unwrap(), Variables::from(read)] {
             // Then no value reads as an integer, and each shows the object that was sent
             for value in [&vars["n"], &vars["l"][0], &vars["o"]["x"]] {
                 assert_eq!(wide_digits(value), None);

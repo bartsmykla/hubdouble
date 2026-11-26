@@ -87,9 +87,11 @@ struct Exec<'r> {
     registry: &'r Registry,
     doc: &'r ExecutableDocument,
     vars: &'r Map<String, Value>,
+    lone_low_vars: &'r [String],
     errors: Vec<ResponseError>,
     warnings: Vec<Value>,
     omit_data: bool,
+    failed_internally: bool,
 }
 
 impl<'r> Exec<'r> {

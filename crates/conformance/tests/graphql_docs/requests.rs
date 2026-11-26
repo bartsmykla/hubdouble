@@ -575,6 +575,116 @@ async fn a_body_error_keeps_the_answer_that_github_gives() {
     }
 }
 
+fn bodies_that_reach_a_lookup_with_text_github_cannot_store() -> Vec<(String, bool)> {
+    let (low, emoji, joined, high, fffd) = (
+        r"\udc00",
+        r"\ud83d\ude00",
+        r"\ud800\ud800",
+        r"\ud800",
+        r"\ufffd\ufffd\ufffd",
+    );
+    let docs = r#"repository(owner:\"acme\",name:\"docs\")"#;
+    let refs = format!(r#"{docs}{{refs(refPrefix:\"refs/heads/\",first:1,"#);
+    let owner = r#"repository(owner:$s,name:\"docs\"){id}"#;
+    let lookups = [
+        owner.to_owned(),
+        r#"repository(owner:\"acme\",name:$s){id}"#.to_owned(),
+        "organization(login:$s){id}".to_owned(),
+        format!("{refs}query:$s){{totalCount}}}}"),
+        format!("{refs}after:$s){{totalCount}}}}"),
+        format!(r#"{docs}{{refs(refPrefix:\"refs/heads/\",last:1,before:$s){{totalCount}}}}"#),
+        format!("{docs}{{collaborators(first:1,login:$s){{totalCount}}}}"),
+        format!("{docs}{{pullRequest(number:1){{reviewThreads(first:1,after:$s){{totalCount}}}}}}"),
+        r#"organization(login:\"acme\"){teams(first:1,after:$s){totalCount}}"#.to_owned(),
+        format!("viewer{{login}} {owner}"),
+    ];
+    let mut cases = Vec::new();
+    for lookup in &lookups {
+        cases.push(("String!", lookup.clone(), low, true));
+    }
+    for value in [emoji, joined] {
+        cases.push(("String!", lookups[0].clone(), value, true));
+        cases.push(("String!", lookups[2].clone(), value, false));
+        cases.push(("String!", lookups[4].clone(), value, false));
+    }
+    cases.push(("String!", lookups[1].clone(), emoji, true));
+    for value in [high, fffd] {
+        cases.push(("String!", lookups[0].clone(), value, false));
+    }
+    for (ty, lookup) in [
+        ("String!", format!("{docs}{{object(expression:$s){{oid}}}}")),
+        ("String!", format!("{docs}{{ref(qualifiedName:$s){{name}}}}")),
+        ("String!", "search(query:$s,type:ISSUE,first:1){issueCount}".to_owned()),
+        ("ID!", "node(id:$s){id}".to_owned()),
+        ("ID!", "nodes(ids:[$s]){id}".to_owned()),
+        (
+            "String!",
+            r#"repository(owner:\"acme\",name:\"gone\"){refs(refPrefix:\"refs/heads/\",first:1,query:$s){totalCount}}"#.to_owned(),
+        ),
+        ("String!", "viewer{login} organization(login:$s) @skip(if:true){id}".to_owned()),
+    ] {
+        cases.push((ty, lookup, low, false));
+    }
+    let mut bodies: Vec<(String, bool)> = cases
+        .into_iter()
+        .map(|(ty, lookup, value, internal)| {
+            let body = format!(
+                r#"{{"query":"query($s:{ty}){{{lookup}}}","variables":{{"s":"{value}"}}}}"#
+            );
+            (body, internal)
+        })
+        .collect();
+    bodies.push((
+        format!(
+            r#"{{"query":"query($s:String!){{{owner}}}","variables":"{{\"s\":\"\\udc00\"}}"}}"#
+        ),
+        true,
+    ));
+    bodies.push((
+        format!(r#"{{"query":"{{repository(owner:\"{emoji}\",name:\"docs\"){{id}}}}"}}"#),
+        true,
+    ));
+    bodies.push((
+        format!(r#"{{"query":"{{viewer{{login}}}}","variables":{{"s":"{low}"}}}}"#),
+        false,
+    ));
+    bodies
+}
+
+#[tokio::test]
+async fn a_lookup_of_text_that_github_cannot_store_fails_the_whole_query() {
+    // Given lone low surrogates and code points past U+FFFF in variables and in the query, each
+    // before a lookup of the inventory documents or a field that GitHub reads without failing
+    let server = server().await;
+    let api = client(&server, fixture::ALICE_TOKEN);
+    for (body, internal) in bodies_that_reach_a_lookup_with_text_github_cannot_store() {
+        // When the query runs
+        let answer = api
+            .call_bytes(Method::POST, "graphql", body.clone().into_bytes())
+            .await;
+        // Then the lookups that live GitHub failed on 2026-11-26 answer only its internal error,
+        // which names the request id, and the others answer data, as live GitHub did
+        assert_eq!(answer.status, StatusCode::OK, "{body}");
+        let json = answer.json();
+        if internal {
+            let error = json["errors"][0].as_object().unwrap();
+            assert_eq!(json.as_object().unwrap().len(), 1, "{body}");
+            assert_eq!(json["errors"].as_array().unwrap().len(), 1, "{body}");
+            assert_eq!(error.keys().collect::<Vec<_>>(), ["message"], "{body}");
+            let message = error["message"].as_str().unwrap();
+            assert!(
+                message.contains(answer.header("x-github-request-id")),
+                "{body}"
+            );
+        } else {
+            assert!(
+                json.get("data").is_some_and(|d| !d.is_null()),
+                "{body} {json}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn an_int_past_64_bits_keeps_its_digits() {
     // Given an issue next to the pulls, and integers past 64 bits, past 128 bits and past the

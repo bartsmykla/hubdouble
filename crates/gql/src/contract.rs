@@ -488,6 +488,8 @@ pub struct Request<'a> {
     pub variables: &'a crate::Variables,
     pub clock: &'a dyn Clock,
     pub urls: &'a Urls,
+    /// The `x-github-request-id` of the answer, which GitHub's internal error names.
+    pub request_id: &'a str,
 }
 
 /// One error of a [`Response`], with GitHub's `type`.

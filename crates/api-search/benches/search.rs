@@ -172,6 +172,7 @@ fn bench(c: &mut Criterion) {
                     variables: &variables,
                     clock: &clock,
                     urls: &urls,
+                    request_id: "",
                 },
             );
             black_box(answer)

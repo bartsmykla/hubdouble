@@ -239,6 +239,7 @@ fn bench(c: &mut Criterion) {
                         variables: vars,
                         clock: &clock,
                         urls: &urls,
+                        request_id: "",
                     },
                 )
                 .unwrap_or_else(|e| panic!("{e}"));

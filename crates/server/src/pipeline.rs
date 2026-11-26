@@ -388,6 +388,7 @@ impl Inner {
             .ok()
             .and_then(|r| r.variables.take())
             .unwrap_or_default();
+        let request_id = self.request_id();
         let result = catch_unwind(AssertUnwindSafe(|| {
             if let Some(unsupported) = unsupported_accept(&parts.headers, &[]) {
                 return Err(unsupported);
@@ -421,9 +422,12 @@ impl Inner {
                     variables: &variables,
                     clock: services.clock.as_ref(),
                     urls,
+                    request_id: &request_id,
                 },
             )?;
-            Reply::json(&response)
+            let mut reply = Reply::json(&response)?;
+            set(&mut reply.headers, "x-github-request-id", &request_id);
+            Ok(reply)
         }))
         .unwrap_or_else(|_| Err(ApiError::internal("Internal Server Error")));
         self.finish(Call {
@@ -629,6 +633,12 @@ impl Inner {
         });
     }
 
+    fn request_id(&self) -> String {
+        let seq = self.request_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let unix = self.services.clock.now().unix();
+        format!("0000:{seq:04X}:{seq:06X}:{seq:06X}:{unix:08X}")
+    }
+
     fn common_headers(
         &self,
         out: &mut HeaderMap,
@@ -636,18 +646,15 @@ impl Inner {
         resource: &str,
         selected: Option<&str>,
     ) -> String {
-        let seq = self.request_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let now = self.services.clock.now();
         let default = if resource == "graphql" { "v4" } else { "v3" };
         let media = media_type(
             request.get(header::ACCEPT).and_then(|v| v.to_str().ok()),
             default,
         );
-        set(
-            out,
-            "x-github-request-id",
-            &format!("0000:{seq:04X}:{seq:06X}:{seq:06X}:{:08X}", now.unix()),
-        );
+        if !out.contains_key("x-github-request-id") {
+            set(out, "x-github-request-id", &self.request_id());
+        }
         set(out, "x-github-media-type", &media);
         set(out, "x-ratelimit-limit", &RATE_LIMIT.to_string());
         set(out, "x-ratelimit-remaining", &(RATE_LIMIT - 1).to_string());

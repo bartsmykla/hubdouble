@@ -1,4 +1,5 @@
 use apollo_compiler::Node;
+use apollo_compiler::ast::Value as Ast;
 use apollo_compiler::executable::Field;
 use apollo_compiler::schema::FieldDefinition;
 use serde_json::Value;
@@ -25,6 +26,10 @@ impl Exec<'_> {
         serde: &mut Option<Value>,
     ) -> Result<Out<'v>, GqlError> {
         let name = def.name.as_str();
+        if self.fails_internally(type_name, name, f, args) {
+            self.failed_internally = true;
+            return Err(GqlError::new(ErrorType::Internal, String::new()));
+        }
         let obj = match parent {
             Parent::Edge(e) => {
                 return match name {
@@ -106,5 +111,30 @@ impl Exec<'_> {
             ErrorType::NotImplemented,
             not_implemented(type_name, name),
         ))
+    }
+
+    fn fails_internally(&self, type_name: &str, field: &str, f: &Field, args: &Args) -> bool {
+        f.arguments.iter().any(|arg| {
+            let name = arg.name.as_str();
+            let repository = type_name == QUERY && field == "repository";
+            let reads_text = matches!(
+                (type_name, field, name),
+                (QUERY, "repository", "owner" | "name")
+                    | (QUERY, "organization", "login")
+                    | ("Repository", "refs", "query")
+                    | ("Repository", "collaborators", "login")
+                    | (_, _, "after" | "before")
+            );
+            let lone_low = reads_text
+                && matches!(&*arg.value, Ast::Variable(v) if self.lone_low_vars.iter().any(|l| l == v.as_str()));
+            let astral = repository
+                && matches!(name, "owner" | "name")
+                && args
+                    .0
+                    .get(name)
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.chars().any(|c| c > '\u{FFFF}'));
+            lone_low || astral
+        })
     }
 }

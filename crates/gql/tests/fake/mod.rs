@@ -384,6 +384,7 @@ impl World {
                 variables: &variables,
                 clock: &self.clock,
                 urls: &self.urls,
+                request_id: "",
             },
         );
         match response {
