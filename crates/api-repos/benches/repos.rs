@@ -13,10 +13,10 @@ fn branch_rule_matching(c: &mut Criterion) {
             ))
         });
     });
-    let stars = format!("{}b", "a*".repeat(15));
-    let deep = format!("{}b", "**/".repeat(7));
-    let long_ref = "a".repeat(255);
-    let long_path = "a/".repeat(127);
+    let stars = format!("{}c*b", "a*".repeat(15));
+    let deep = format!("{}c/*b", "**/".repeat(7));
+    let long_ref = format!("{}b", "a".repeat(254));
+    let long_path = format!("{}ab", "a/".repeat(126));
     c.bench_function("ruleset glob that backtracks on stars and fails", |b| {
         b.iter(|| {
             black_box(glob(black_box(&stars), black_box(&long_ref)))
