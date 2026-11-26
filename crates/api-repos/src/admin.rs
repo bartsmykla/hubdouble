@@ -5,7 +5,8 @@ use bytes::Bytes;
 use http::{Method, StatusCode};
 use http_body_util::Full;
 use hubdouble_admin::{
-    AdminHandler, AdminRequest, Registrar, Services, error_response, json_response, read_json,
+    AdminHandler, AdminRequest, Registrar, Services, clear_repository_properties, error_response,
+    json_response, read_json,
 };
 use hubdouble_git::{Git, ObjectId};
 use hubdouble_model::{AccountKind, ApiError, Release, Repo, Visibility};
@@ -236,6 +237,7 @@ fn edit_repo(
     };
     if let Some(to) = transferred {
         new.owner_id = to;
+        clear_repository_properties(tx, old.id);
     }
     if let Some(v) = visibility(e.visibility.as_deref(), e.private, &old)? {
         new.visibility = v;
@@ -321,20 +323,22 @@ fn delete_repo(
     let s: SenderOnly = decode(body)?;
     let sender = sender(tx, s.sender.as_deref(), repo.owner_id)?;
     crate::emit(tx, "repository", "deleted", repo.id, sender, Map::new());
-    let owner = tx
-        .table::<Accounts>()
-        .get(repo.owner_id)
-        .map_or_else(String::new, |a| a.login.clone());
-    tx.table_mut::<DeletedRepos>()
-        .get_mut()
-        .0
-        .insert(repo.id, format!("{owner}/{}", repo.name));
+    if !repo.is_private() {
+        let owner = tx
+            .table::<Accounts>()
+            .get(repo.owner_id)
+            .map_or_else(String::new, |a| a.login.clone());
+        tx.table_mut::<DeletedRepos>()
+            .get_mut()
+            .0
+            .insert(repo.id, format!("{owner}/{}", repo.name));
+    }
+    clear_repository_properties(tx, repo.id);
     tx.table_mut::<Repos>().remove(repo.id);
     Ok(None)
 }
 
-/// The last `owner/name` of each deleted repository. An issue event keeps naming a commit of
-/// one in its `commit_url`, as GitHub does for a deleted fork.
+/// The last `owner/name` of deleted public repositories for issue event commit URLs.
 #[derive(Clone, Default)]
 pub struct DeletedRepos(HashMap<i64, String>);
 

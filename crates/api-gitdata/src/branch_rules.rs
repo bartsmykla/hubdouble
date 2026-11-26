@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use hubdouble_admin::ruleset_repository;
 use hubdouble_auth::{Actor, ruleset_bypass};
 use hubdouble_git::{Commit, Git, GitError, ObjectData, ObjectId, SignatureState};
 use hubdouble_model::{ApiError, Conclusion, Repo, Rule, Ruleset, RunStatus, StatusState, glob};
@@ -139,11 +140,12 @@ pub fn rules<'t>(
     branch: &str,
     pull_request: bool,
 ) -> Vec<&'t Rule> {
+    let target = ruleset_repository(tx, repo);
     active(
         tx,
         actor,
         repo,
-        |r| r.applies_to_branch(repo, branch),
+        |r| r.applies_to_branch(target, branch),
         pull_request,
     )
 }
@@ -152,9 +154,10 @@ pub fn rules<'t>(
 /// an active branch ruleset of the repository or of its owner covers it.
 #[must_use]
 pub fn protected(tx: &Tx, repo: &Repo, branch: &str) -> bool {
+    let target = ruleset_repository(tx, repo);
     tx.table::<Rulesets>()
         .iter()
-        .any(|r| r.applies_to_branch(repo, branch))
+        .any(|r| r.applies_to_branch(target, branch))
 }
 
 /// A `parameters` value of a rule.
@@ -449,11 +452,12 @@ pub fn tag_violations(
     tag: &str,
     (old, new): (Option<ObjectId>, Option<ObjectId>),
 ) -> Result<Vec<String>, ApiError> {
+    let target = ruleset_repository(tx, repo);
     let rules = active(
         tx,
         Some(actor),
         repo,
-        |r| r.applies_to_tag(repo, tag),
+        |r| r.applies_to_tag(target, tag),
         false,
     );
     let mut out = Vec::new();
@@ -503,7 +507,9 @@ fn commit_of(tx: &Tx, git: &Git, repo: &Repo, id: ObjectId) -> Result<Option<Obj
     }
 }
 
-fn fork_root<'t>(tx: &'t Tx, repo: &'t Repo) -> &'t Repo {
+/// The last available ancestor in a repository's fork network.
+#[must_use]
+pub fn fork_root<'t>(tx: &'t Tx, repo: &'t Repo) -> &'t Repo {
     let repos = tx.table::<Repos>();
     let mut root = repo;
     for _ in 0..64 {
@@ -550,11 +556,13 @@ pub fn push_violations(
         return Ok(Vec::new());
     };
     let root = fork_root(tx, repo);
+    let target = ruleset_repository(tx, repo);
+    let root_target = ruleset_repository(tx, root);
     let rules = active(
         tx,
         Some(actor),
         root,
-        |r| r.applies_to_push(repo, root),
+        |r| r.applies_to_push(target, root_target),
         false,
     );
     if rules.is_empty() {

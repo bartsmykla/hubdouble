@@ -1,7 +1,8 @@
 /// GitHub's ruleset patterns, Ruby's `File.fnmatch` with `FNM_PATHNAME` and without escapes:
 /// `*` matches within one path segment, `?` one character other than `/`, `[...]` one
 /// character other than `/` in the set (with `a-z` ranges, and `!` or `^` first to negate it),
-/// `**/` zero or more whole segments, and `**` anything. A `[` without its `]` matches nothing.
+/// `**/` at a segment boundary matches zero or more whole segments.
+/// A `[` without its `]` matches nothing.
 /// The cost is at most a small multiple of the pattern length times the text length, and the
 /// stack depth is bounded whatever the pattern.
 #[must_use]
@@ -36,25 +37,27 @@ fn matches(pattern: &str, text: &str, sets: bool) -> bool {
     let Some(text) = text.strip_prefix(head) else {
         return false;
     };
+    let segment_start = head.is_empty() || head.ends_with('/');
     match pattern {
         "" => return text.is_empty(),
         "*" => return !text.as_bytes().contains(&b'/'),
-        "**" | "**/*" => return true,
+        "**" => return !sets || !text.as_bytes().contains(&b'/'),
+        "**/*" if !sets || segment_start => return true,
         _ => {}
     }
     if pattern.is_ascii() && text.is_ascii() {
-        run(pattern.as_bytes(), text.as_bytes(), sets)
+        run(pattern.as_bytes(), text.as_bytes(), sets, segment_start)
     } else {
         let pattern: Vec<char> = pattern.chars().collect();
         let text: Vec<char> = text.chars().collect();
-        run(&pattern, &text, sets)
+        run(&pattern, &text, sets, segment_start)
     }
 }
 
-fn run<U: Unit>(pattern: &[U], text: &[U], sets: bool) -> bool {
+fn run<U: Unit>(pattern: &[U], text: &[U], sets: bool, segment_start: bool) -> bool {
     let mut budget = (pattern.len() + 1) * (text.len() + 1);
-    backtrack(pattern, text, sets, &mut budget, 0)
-        .unwrap_or_else(|| tokens_match(pattern, text, sets))
+    backtrack(pattern, text, sets, &mut budget, 0, segment_start)
+        .unwrap_or_else(|| tokens_match(pattern, text, sets, segment_start))
 }
 
 #[derive(Clone, Copy)]
@@ -68,15 +71,22 @@ enum Token<'p, U> {
     Segments,
 }
 
-fn next_token<U: Unit>(pattern: &[U], sets: bool) -> Option<(Token<'_, U>, usize)> {
+fn next_token<U: Unit>(
+    pattern: &[U],
+    sets: bool,
+    segment_start: bool,
+) -> Option<(Token<'_, U>, usize)> {
     let &first = pattern.first()?;
     let at = |i: usize| pattern.get(i).copied();
     let star = |i: usize| at(i).is_some_and(|u| is(u, b'*'));
     Some(if is(first, b'*') {
         if !star(1) {
             (Token::InSegment, 1)
-        } else if at(2).is_some_and(|u| is(u, b'/')) {
+        } else if (!sets || segment_start) && at(2).is_some_and(|u| is(u, b'/')) {
             (Token::Segments, 3)
+        } else if sets {
+            let stars = pattern.iter().take_while(|&&u| is(u, b'*')).count();
+            (Token::InSegment, stars)
         } else {
             (Token::Anything, 2)
         }
@@ -145,12 +155,13 @@ fn backtrack<U: Unit>(
     sets: bool,
     budget: &mut usize,
     depth: usize,
+    mut segment_start: bool,
 ) -> Option<bool> {
     if depth > MAX_DEPTH {
         return None;
     }
     loop {
-        let Some((token, len)) = next_token(pattern, sets) else {
+        let Some((token, len)) = next_token(pattern, sets, segment_start) else {
             return Some(text.is_empty());
         };
         *budget = budget.checked_sub(len)?;
@@ -164,12 +175,12 @@ fn backtrack<U: Unit>(
             }
             Token::Segments => {
                 *budget = budget.checked_sub(text.len())?;
-                if backtrack(rest, text, sets, budget, depth + 1)? {
+                if backtrack(rest, text, sets, budget, depth + 1, true)? {
                     return Some(true);
                 }
                 for (at, u) in text.iter().enumerate() {
                     let after = text.get(at + 1..).unwrap_or_default();
-                    if slash(u) && backtrack(rest, after, sets, budget, depth + 1)? {
+                    if slash(u) && backtrack(rest, after, sets, budget, depth + 1, true)? {
                         return Some(true);
                     }
                 }
@@ -182,24 +193,29 @@ fn backtrack<U: Unit>(
                 };
                 for at in 0..=end {
                     let after = text.get(at..).unwrap_or_default();
-                    if backtrack(rest, after, sets, budget, depth + 1)? {
+                    if backtrack(rest, after, sets, budget, depth + 1, false)? {
                         return Some(true);
                     }
                 }
                 return Some(false);
             }
             fixed => match text.split_first() {
-                Some((&u, after)) if fits(fixed, u) => (pattern, text) = (rest, after),
+                Some((&u, after)) if fits(fixed, u) => {
+                    (pattern, text) = (rest, after);
+                    segment_start = matches!(fixed, Token::Unit(v) if is(v, b'/'));
+                }
                 _ => return Some(false),
             },
         }
     }
 }
 
-fn tokens_match<U: Unit>(pattern: &[U], text: &[U], sets: bool) -> bool {
+fn tokens_match<U: Unit>(pattern: &[U], text: &[U], sets: bool, mut segment_start: bool) -> bool {
     let mut tokens = Vec::new();
     let mut rest = pattern;
-    while let Some((token, len)) = next_token(rest, sets) {
+    while let Some((token, len)) = next_token(rest, sets, segment_start) {
+        segment_start =
+            matches!(token, Token::Segments) || matches!(token, Token::Unit(v) if is(v, b'/'));
         tokens.push(token);
         rest = rest.get(len..).unwrap_or_default();
     }

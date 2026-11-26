@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use hubdouble_admin::{Registrar, SeedCtx};
+use hubdouble_admin::{Registrar, SeedCtx, ruleset_repository};
+use hubdouble_api_gitdata::branch_rules::fork_root;
 use hubdouble_auth::ruleset_bypass;
 use hubdouble_model::{
     AccountKind, ApiError, BypassActor, Enforcement, Rule, Ruleset, RulesetSource, RulesetTarget,
@@ -41,12 +42,13 @@ fn get_ruleset(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let tx = ctx.tx();
     let id = ctx.param_i64("ruleset_id")?;
     let parents = ctx.query().get("includes_parents") != Some("false");
+    let target = ruleset_repository(tx, repo);
     let r = tx
         .table::<Rulesets>()
         .get(id)
         .filter(|r| match r.source_type {
             RulesetSource::Repository => r.repo_id == Some(repo.id),
-            RulesetSource::Organization => parents && r.governs(repo),
+            RulesetSource::Organization => parents && r.governs(target),
         })
         .ok_or_else(ApiError::not_found)?;
     let mut out = render::Ruleset::new(ctx.urls(), r, &source_name(tx, r)?);
@@ -69,12 +71,14 @@ fn branch_rules(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let repo = ctx.repo()?;
     let tx = ctx.tx();
     let branch = ctx.param("branch")?;
+    let target = ruleset_repository(tx, repo);
+    let root = ruleset_repository(tx, fork_root(tx, repo));
     let mut rules: Vec<(&Rule, &Ruleset, Arc<str>)> = Vec::new();
-    for r in tx
-        .table::<Rulesets>()
-        .iter()
-        .filter(|r| r.applies_to_branch(repo, branch) || r.applies_to_repository(repo))
-    {
+    for r in tx.table::<Rulesets>().iter().filter(|r| {
+        r.applies_to_branch(target, branch)
+            || r.applies_to_repository(target)
+            || r.applies_to_push(target, root)
+    }) {
         let source: Arc<str> = source_name(tx, r)?.into();
         rules.extend(
             r.rules

@@ -541,6 +541,34 @@ async fn branch_rules_list_the_active_matching_rules_in_pages() {
 }
 
 #[tokio::test]
+async fn branch_rules_include_active_push_rules_from_the_fork_root() {
+    let server = start(vec![
+        json!({"kind": "repository", "owner": "alice", "name": "fork", "private": true,
+               "fork_of": "acme/private"}),
+        json!({"kind": "ruleset", "id": 8251, "repository": "acme/private", "name": "push",
+               "target": "push", "enforcement": "active",
+               "rules": [{"type": "file_path_restriction",
+                          "parameters": {"restricted_file_paths": ["test/**"]}}]}),
+        json!({"kind": "ruleset", "id": 8252, "repository": "acme/private", "name": "evaluate",
+               "target": "push", "enforcement": "evaluate",
+               "rules": [{"type": "file_extension_restriction",
+                          "parameters": {"restricted_file_extensions": ["zip"]}}]}),
+    ])
+    .await;
+    let answer = alice(&server)
+        .get("repos/alice/fork/rules/branches/new-branch")
+        .await;
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(
+        valid("repos/get-branch-rules", &answer),
+        json!([{"type": "file_path_restriction",
+                "parameters": {"restricted_file_paths": ["test/**"]},
+                "ruleset_source_type": "Repository", "ruleset_source": "acme/private",
+                "ruleset_id": 8251}])
+    );
+}
+
+#[tokio::test]
 async fn branch_rules_list_the_rules_of_an_organizations_repository_rulesets() {
     // Given an organization ruleset that targets repositories, as live nodejs/node listed
     // repository_create, repository_delete and repository_visibility among its branch rules on
@@ -584,6 +612,49 @@ async fn branch_rules_list_the_rules_of_an_organizations_repository_rulesets() {
         listed[2]["parameters"],
         json!({"internal": false, "private": false})
     );
+}
+
+#[tokio::test]
+async fn repository_rules_match_all_included_properties_and_no_excluded_property() {
+    let server = start(vec![
+        json!({"kind": "repository", "owner": "acme", "name": "service", "private": true,
+               "custom_properties": {"team": ["edge", "core"]}}),
+        json!({"kind": "repository", "owner": "acme", "name": "public-service",
+               "custom_properties": {"team": ["core"]}}),
+        json!({"kind": "repository", "owner": "acme", "name": "legacy-service", "private": true,
+               "custom_properties": {"team": ["core"], "tier": ["legacy"]}}),
+        json!({"kind": "ruleset", "id": 8260, "org": "acme", "name": "service rules",
+               "target": "repository", "enforcement": "active",
+               "conditions": {"repository_property": {
+                   "include": [{"name": "team", "property_values": ["infra", "core"]},
+                               {"name": "visibility", "source": "system",
+                                "property_values": ["private"]}],
+                   "exclude": [{"name": "tier", "property_values": ["legacy"]}]
+               }},
+               "rules": [{"type": "repository_transfer"}]}),
+    ])
+    .await;
+    for (repo, matches) in [
+        ("service", true),
+        ("public-service", false),
+        ("legacy-service", false),
+    ] {
+        let response = alice(&server)
+            .get(&format!("repos/acme/{repo}/rules/branches/main"))
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let rules = valid("repos/get-branch-rules", &response);
+        let expected = json!({"type": "repository_transfer", "ruleset_source_type": "Organization",
+                   "ruleset_source": "acme", "ruleset_id": 8260});
+        assert_eq!(
+            rules,
+            if matches {
+                json!([expected])
+            } else {
+                json!([])
+            }
+        );
+    }
 }
 
 #[tokio::test]
