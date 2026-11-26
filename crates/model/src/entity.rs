@@ -102,7 +102,7 @@ rest_enum!(Conclusion {
 });
 rest_enum!(StatusState { Error => "error", Failure => "failure", Pending => "pending", Success => "success" });
 rest_enum!(AnnotationLevel { Notice => "notice", Warning => "warning", Failure => "failure" });
-rest_enum!(RulesetTarget { Branch => "branch", Tag => "tag", Push => "push" });
+rest_enum!(RulesetTarget { Branch => "branch", Tag => "tag", Push => "push", Repository => "repository" });
 rest_enum!(RulesetSource { Repository => "Repository", Organization => "Organization" });
 rest_enum!(Enforcement { Disabled => "disabled", Active => "active", Evaluate => "evaluate" });
 rest_enum!(AssetState { Uploaded => "uploaded", Open => "open" });

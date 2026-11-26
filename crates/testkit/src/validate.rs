@@ -189,6 +189,18 @@ pub(crate) fn read_around_description_defects(
     {
         object.insert("anyOf".to_owned(), one_of);
     }
+    if (operation_id, status) == ("repos/get-branch-rules", 200)
+        && let Some(items) = schema.get_mut("items")
+    {
+        let repository_rule = json!({"allOf": [
+            {"type": "object", "required": ["type"], "properties": {
+                "type": {"type": "string", "enum": ["repository_create", "repository_delete",
+                                                    "repository_transfer",
+                                                    "repository_visibility"]},
+                "parameters": {"type": "object"}}},
+            {"$ref": "#/components/schemas/repository-rule-ruleset-info"}]});
+        *items = json!({"anyOf": [items.take(), repository_rule]});
+    }
     schema
 }
 

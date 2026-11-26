@@ -73,7 +73,7 @@ fn branch_rules(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     for r in tx
         .table::<Rulesets>()
         .iter()
-        .filter(|r| r.applies_to_branch(repo, branch))
+        .filter(|r| r.applies_to_branch(repo, branch) || r.applies_to_repository(repo))
     {
         let source: Arc<str> = source_name(tx, r)?.into();
         rules.extend(
@@ -170,9 +170,14 @@ fn ruleset_kind(ctx: &mut SeedCtx<'_>, v: Value) -> Result<(), ApiError> {
     let target = match s.target.as_deref() {
         None => RulesetTarget::Branch,
         Some(t) => RulesetTarget::from_rest(t).ok_or_else(|| {
-            ApiError::unprocessable(format!("target {t} is not branch, tag or push"))
+            ApiError::unprocessable(format!("target {t} is not branch, tag, push or repository"))
         })?,
     };
+    if target == RulesetTarget::Repository && source_type != RulesetSource::Organization {
+        return Err(ApiError::unprocessable(
+            "only an organization ruleset targets repositories",
+        ));
+    }
     let enforcement = match s.enforcement.as_deref() {
         None => Enforcement::Active,
         Some(e) => Enforcement::from_rest(e).ok_or_else(|| {

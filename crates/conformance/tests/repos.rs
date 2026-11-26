@@ -541,6 +541,52 @@ async fn branch_rules_list_the_active_matching_rules_in_pages() {
 }
 
 #[tokio::test]
+async fn branch_rules_list_the_rules_of_an_organizations_repository_rulesets() {
+    // Given an organization ruleset that targets repositories, as live nodejs/node listed
+    // repository_create, repository_delete and repository_visibility among its branch rules on
+    // 2026-11-26, and one whose custom property condition admits no repository here
+    let server = start(vec![
+        json!({"kind": "ruleset", "id": 8201, "org": "acme", "name": "repos",
+               "target": "repository", "enforcement": "active",
+               "conditions": {"repository_name": {"include": ["~ALL"], "exclude": []}},
+               "rules": [{"type": "repository_create"}, {"type": "repository_delete"},
+                         {"type": "repository_visibility",
+                          "parameters": {"internal": false, "private": false}}]}),
+        json!({"kind": "ruleset", "id": 8202, "org": "acme", "name": "property",
+               "target": "repository", "enforcement": "active",
+               "conditions": {"repository_property": {"include": [{"name": "team",
+                              "property_values": ["core"]}], "exclude": []}},
+               "rules": [{"type": "repository_transfer"}]}),
+    ])
+    .await;
+    // When
+    let answer = alice(&server)
+        .get("repos/acme/public/rules/branches/main")
+        .await;
+    // Then
+    let listed = valid("repos/get-branch-rules", &answer);
+    let listed = listed.as_array().unwrap();
+    let types: Vec<&str> = listed.iter().map(|r| r["type"].as_str().unwrap()).collect();
+    assert_eq!(
+        types,
+        [
+            "repository_create",
+            "repository_delete",
+            "repository_visibility"
+        ]
+    );
+    for rule in listed {
+        assert_eq!(rule["ruleset_id"], json!(8201));
+        assert_eq!(rule["ruleset_source_type"], json!("Organization"));
+        assert_eq!(rule["ruleset_source"], json!("acme"));
+    }
+    assert_eq!(
+        listed[2]["parameters"],
+        json!({"internal": false, "private": false})
+    );
+}
+
+#[tokio::test]
 async fn a_ruleset_tells_the_caller_whether_it_can_bypass() {
     // Given
     let server = start(vec![

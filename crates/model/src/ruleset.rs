@@ -84,6 +84,15 @@ impl Ruleset {
             && tag_matches(self.conditions.as_ref(), tag)
     }
 
+    /// Whether the ruleset is an active repository ruleset of the repository's organization
+    /// that governs it. GitHub lists its rules among the rules of every branch.
+    #[must_use]
+    pub fn applies_to_repository(&self, repo: &Repo) -> bool {
+        self.enforcement == Enforcement::Active
+            && self.target == RulesetTarget::Repository
+            && self.governs(repo)
+    }
+
     /// Whether the ruleset is an active push ruleset of the repository or of `root`, the
     /// repository at the root of its fork network: GitHub applies a push ruleset to the whole
     /// network.
