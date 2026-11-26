@@ -48,7 +48,17 @@ pub(crate) struct Section9 {
     pub(crate) goal: Goal,
     pub(crate) unit: &'static str,
     pub(crate) scaled: bool,
+    /// The parts between `prefix` and `suffix` of the rows that must each be there, or none
+    /// when any row that the two name will do.
+    pub(crate) each: &'static [&'static str],
 }
+
+pub(crate) const PUSH_SHAPES: [&str; 4] = [
+    "100",
+    "a CODEOWNERS of 20000 rules and 100",
+    "a CODEOWNERS of 20000 rules that each push changes and 100",
+    "a CODEOWNERS of 20000 rules under one root that each push changes and 100",
+];
 
 impl Section9 {
     const fn scaled(mut self) -> Section9 {
@@ -76,6 +86,7 @@ const fn exact(
         goal,
         unit,
         scaled: false,
+        each: &[],
     }
 }
 
@@ -101,6 +112,7 @@ pub(crate) const SECTION_9: [Section9; 11] = [
         goal: Goal::Below(100.0),
         unit: "µs",
         scaled: true,
+        each: &[],
     },
     Section9 {
         target: "REST GET p99",
@@ -109,6 +121,7 @@ pub(crate) const SECTION_9: [Section9; 11] = [
         goal: Goal::Below(1000.0),
         unit: "µs",
         scaled: true,
+        each: &[],
     },
     Section9 {
         target: INVENTORY_TARGET,
@@ -117,6 +130,7 @@ pub(crate) const SECTION_9: [Section9; 11] = [
         goal: Goal::Below(3.0),
         unit: "ms",
         scaled: false,
+        each: &[],
     },
     Section9 {
         target: "Push to a base branch with 100 open pull requests",
@@ -125,6 +139,7 @@ pub(crate) const SECTION_9: [Section9; 11] = [
         goal: Goal::Below(3.0),
         unit: "ms",
         scaled: false,
+        each: &PUSH_SHAPES,
     },
     Section9 {
         target: "REST read of a pull request, the first after each such push",
@@ -133,6 +148,7 @@ pub(crate) const SECTION_9: [Section9; 11] = [
         goal: Goal::Below(1000.0),
         unit: "µs",
         scaled: true,
+        each: &PUSH_SHAPES,
     },
     exact(
         "Mixed inventory load, reads and writes",

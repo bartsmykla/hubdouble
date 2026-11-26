@@ -8,7 +8,8 @@ mod row;
 use std::path::Path;
 
 use row::{
-    CALIBRATION, Goal, INVENTORY_TARGET, REFERENCE_CALIBRATION_US, REFERENCE_CPU, Row, SECTION_9,
+    CALIBRATION, Goal, INVENTORY_TARGET, PUSH_SHAPES, REFERENCE_CALIBRATION_US, REFERENCE_CPU, Row,
+    SECTION_9,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -54,6 +55,12 @@ fn section_9_rows(without: Option<&str>) -> Vec<Value> {
                     .collect()
             } else if m.suffix.is_empty() {
                 vec![String::new()]
+            } else if !m.each.is_empty() {
+                m.each
+                    .iter()
+                    .filter(|shape| without != Some(**shape))
+                    .map(|shape| (*shape).to_owned())
+                    .collect()
             } else {
                 vec!["100".to_owned()]
             };
@@ -353,6 +360,13 @@ fn the_targets_gate_needs_every_section_9_measure_in_every_report_of_each_side()
             Some("teams"),
         )
     };
+    let no_shared_root = |_| {
+        report_without(
+            &[(&LATENCY, Some(10.0))],
+            Some(REFERENCE_CALIBRATION_US),
+            Some(PUSH_SHAPES[3]),
+        )
+    };
     let empty = |_| json!({"rows": []});
     let only_later = |n: u32| {
         let mut r = full(n);
@@ -365,8 +379,9 @@ fn the_targets_gate_needs_every_section_9_measure_in_every_report_of_each_side()
         r
     };
 
-    // When the gate judges them, with one measure removed from all five head reports, from one base report, with empty reports, with a row only the later head rounds hold, and with one inventory document absent on both sides
+    // When the gate judges them, with one measure removed from all five head reports, from one base report, with empty reports, with a row only the later head rounds hold, with one inventory document absent on both sides, and with one push shape absent on both sides
     let complete = judge(&full, &full);
+    let push_shape_absent = judge(&no_shared_root, &no_shared_root);
     let head_without = judge(&|n| without(n, None), &full);
     let base_once_without = judge(&full, &|n| without(n, Some(3)));
     let both_without = judge(&|n| without(n, None), &|n| without(n, None));
@@ -385,9 +400,10 @@ fn the_targets_gate_needs_every_section_9_measure_in_every_report_of_each_side()
         base_empty,
         later,
         document_absent,
+        push_shape_absent,
     ]
     .map(|n| n > 0);
-    assert_eq!(failed, [true; 7]);
+    assert_eq!(failed, [true; 8]);
 }
 
 #[test]

@@ -128,6 +128,12 @@ fn section_9(rounds: &[Round], out: &mut String) -> usize {
                 let names: Names<'_> = Box::new(move |m| m == row);
                 checks.push((format!("{INVENTORY_TARGET} {name}"), measure, names));
             }
+        } else if !measure.each.is_empty() {
+            for shape in measure.each {
+                let row = format!("{}{shape}{}", measure.prefix, measure.suffix);
+                let names: Names<'_> = Box::new(move |m| m == row);
+                checks.push((format!("{} with {shape}", measure.target), measure, names));
+            }
         } else {
             let names: Names<'_> = Box::new(|m| measure.names(m));
             checks.push((measure.target.to_owned(), measure, names));
