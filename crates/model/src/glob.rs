@@ -36,6 +36,12 @@ fn matches(pattern: &str, text: &str, sets: bool) -> bool {
     let Some(text) = text.strip_prefix(head) else {
         return false;
     };
+    match pattern {
+        "" => return text.is_empty(),
+        "*" => return !text.as_bytes().contains(&b'/'),
+        "**" | "**/*" => return true,
+        _ => {}
+    }
     if pattern.is_ascii() && text.is_ascii() {
         run(pattern.as_bytes(), text.as_bytes(), sets)
     } else {
@@ -280,13 +286,16 @@ mod tests {
     }
 
     #[test]
-    fn a_question_mark_and_a_set_take_one_character_of_any_width() {
+    fn ruleset_globs_match_unicode_text() {
         for (pattern, text, want) in [
             ("refs/heads/v?", "refs/heads/vé", true),
             ("refs/heads/v??", "refs/heads/vé", false),
             ("refs/heads/[éa]", "refs/heads/é", true),
             ("refs/heads/[a-z]", "refs/heads/é", false),
             ("*é", "café", true),
+            ("refs/heads/*", "refs/heads/vé", true),
+            ("refs/heads/*", "refs/heads/vé/hotfix", false),
+            ("refs/heads/**/*", "refs/heads/vé/hotfix", true),
         ] {
             assert_eq!(glob(pattern, text), want, "{pattern} against {text}");
         }
