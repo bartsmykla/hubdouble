@@ -6,7 +6,7 @@ FROM --platform=$BUILDPLATFORM ${RUST} AS vendored
 ARG VERSION=dev
 WORKDIR /hubdouble
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,sharing=locked,target=/usr/local/cargo/registry \
     cargo vendor --locked --versioned-dirs vendor >> .cargo/config.toml \
     && sed "s/@VERSION@/$VERSION/g" notices/BUILD > BUILD \
     && tar -cf /hubdouble-source.tar .
@@ -16,7 +16,7 @@ COPY --from=vendored /hubdouble-source.tar /hubdouble-source.tar
 
 FROM ${RUST} AS build
 ARG VERSION=dev
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,sharing=locked,target=/usr/local/cargo/registry \
     cargo install --locked --features cli cargo-about@0.9.3 --root /about
 WORKDIR /src
 COPY --from=vendored /hubdouble-source.tar /hubdouble-source.tar

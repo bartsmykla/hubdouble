@@ -41,6 +41,7 @@ jobs:
           } >> "$GITHUB_ENV"
           rm -rf target/criterion
       - name: build the benchmarks and the image of the base and the head
+        shell: bash
         run: |
           for side in base head; do
             if [ "$side" = base ]; then sha=$BASE_SHA; else sha=$HEAD_SHA; fi
@@ -51,7 +52,15 @@ jobs:
                         and (.target.kind | index("bench"))) | "\(.target.name) \(.executable)"' \
               | while read -r name exe; do cp "$exe" "$RUNNER_TEMP/$side/$name"; done
             test -x "$RUNNER_TEMP/$side/targets"
-            docker build -q -t "hubdouble:bench-$side" .
+            echo "Build the $side image"
+            df -h .
+            log="$RUNNER_TEMP/$side-image.log"
+            docker build --progress=plain -t "hubdouble:bench-$side" . >"$log" 2>&1 || {
+              status=$?
+              cat "$log"
+              df -h / "$(docker info --format '{{.DockerRootDir}}')" || true
+              exit "$status"
+            }
           done
       - name: the criterion benchmarks that the base and the head have
         run: |
