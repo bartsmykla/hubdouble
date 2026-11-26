@@ -306,10 +306,10 @@ fn problems(
     let name = ty.inner_named_type();
     let fits = match schema.inner.types.get(name) {
         Some(ExtendedType::InputObject(def)) => {
-            if let Some(fields) = value
-                .as_object()
-                .filter(|_| crate::scalar::wide_digits(value).is_none())
-            {
+            if let Some(fields) = value.as_object().filter(|_| {
+                crate::scalar::wide_digits(value).is_none()
+                    && crate::scalar::infinite(value).is_none()
+            }) {
                 input_problems(schema, name, def, fields, path, out);
                 return;
             }
@@ -334,7 +334,9 @@ fn problems(
 }
 
 fn literal(value: &Value, out: &mut String) {
-    if let Some(digits) = crate::scalar::wide_digits(value) {
+    if let Some(digits) =
+        crate::scalar::wide_digits(value).or_else(|| crate::scalar::infinite(value))
+    {
         out.push_str(digits);
         return;
     }

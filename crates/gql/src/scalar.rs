@@ -9,7 +9,7 @@ pub(crate) fn matches(name: &str, value: &Value) -> bool {
     match name {
         "Boolean" => value.is_boolean(),
         "Int" => value.is_i64() || value.is_u64() || wide_digits(value).is_some(),
-        "Float" => value.is_number() || wide_digits(value).is_some(),
+        "Float" => value.is_number() || wide_digits(value).is_some() || infinite(value).is_some(),
         "String" | "ID" => value.is_string(),
         "CustomPropertyValue" => {
             value.is_string()
@@ -47,6 +47,74 @@ pub(crate) fn digits(s: &str) -> bool {
 }
 
 const WIDE_INT: &str = "\0int";
+const INFINITE: &str = "\0inf";
+
+/// Decodes a JSON string token as GitHub's parser does. A high surrogate escape and the
+/// `\u` escape after it make one code point, a high surrogate with no `\u` escape after it
+/// is `?`, and a lone low surrogate is three U+FFFD, the bytes that GitHub keeps for it and
+/// cannot write as UTF-8. The flag is true when the token holds a lone low surrogate.
+/// `None` when `token` is not a JSON string.
+#[must_use]
+pub fn json_string(token: &str) -> Option<(String, bool)> {
+    if let Ok(text) = serde_json::from_str::<String>(token) {
+        return Some((text, false));
+    }
+    let mut rest = token.strip_prefix('"')?.strip_suffix('"')?;
+    let mut text = String::with_capacity(rest.len());
+    let mut lone_low = false;
+    while let Some(at) = rest.find('\\') {
+        text.push_str(rest.get(..at)?);
+        let escape = rest.get(at + 1..)?;
+        let kind = escape.chars().next()?;
+        rest = escape.get(kind.len_utf8()..)?;
+        match kind {
+            '"' | '\\' | '/' => text.push(kind),
+            'b' => text.push('\u{8}'),
+            'f' => text.push('\u{c}'),
+            'n' => text.push('\n'),
+            'r' => text.push('\r'),
+            't' => text.push('\t'),
+            'u' => {
+                let unit = hex4(rest)?;
+                rest = rest.get(4..)?;
+                if unit & 0xFC00 == 0xD800 {
+                    match rest.strip_prefix("\\u").and_then(hex4) {
+                        Some(next) => {
+                            rest = rest.get(6..)?;
+                            text.push(char::from_u32(
+                                (0x10000 + ((unit & 0x3FF) << 10)) | (next & 0x3FF),
+                            )?);
+                        }
+                        None => text.push('?'),
+                    }
+                } else if unit & 0xFC00 == 0xDC00 {
+                    lone_low = true;
+                    text.push_str("\u{FFFD}\u{FFFD}\u{FFFD}");
+                } else {
+                    text.push(char::from_u32(unit)?);
+                }
+            }
+            _ => return None,
+        }
+    }
+    text.push_str(rest);
+    Some((text, lone_low))
+}
+
+fn hex4(text: &str) -> Option<u32> {
+    let digits = text.get(..4)?;
+    if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(digits, 16).ok()
+}
+
+/// The value that stands for a number past the range of a double, which GitHub reads as
+/// `Infinity` or `-Infinity`.
+pub(crate) fn infinite(value: &Value) -> Option<&str> {
+    let entry = value.as_object().filter(|o| o.len() == 1)?;
+    entry.get(INFINITE)?.as_str()
+}
 
 /// GraphQL request variables. An integer past 64 bits keeps its digits in a form that only
 /// [`Variables::parse`] makes: a request that sends the same form gets its object back.
@@ -55,8 +123,9 @@ pub struct Variables(pub(crate) Map<String, Value>);
 
 impl Variables {
     /// Reads the `variables` member of a GraphQL request body, keeping the digits of each
-    /// integer past 64 bits. It takes the nesting that GitHub takes in that member: 255 levels,
-    /// the object of the member included.
+    /// integer past 64 bits and a number past the range of a double as GitHub's `Infinity`.
+    /// It takes the nesting that GitHub takes in that member: 255 levels, the object of the
+    /// member included. Strings decode as [`json_string`] decodes them.
     ///
     /// # Errors
     ///
@@ -120,6 +189,9 @@ impl serde::Serialize for Sent<'_> {
             return RawValue::from_string(digits.to_owned())
                 .map_err(serde::ser::Error::custom)?
                 .serialize(s);
+        }
+        if infinite(self.0).is_some() {
+            return s.serialize_unit();
         }
         match self.0 {
             Value::Array(items) => s.collect_seq(items.iter().map(Sent)),
@@ -322,7 +394,9 @@ impl<'t> Exact<'t> {
                 _ => end += 1,
             }
         }
-        serde_json::from_str(self.token(end + 1)?)
+        json_string(self.token(end + 1)?)
+            .map(|(text, _)| text)
+            .ok_or_else(|| invalid("invalid string"))
     }
 
     fn scalar(&mut self) -> Result<Value, serde_json::Error> {
@@ -340,7 +414,15 @@ impl<'t> Exact<'t> {
         {
             return Ok(wide_int(token));
         }
-        serde_json::from_str(token)
+        serde_json::from_str(token).or_else(|e| match token.parse::<f64>() {
+            Ok(x) if x.is_infinite() => {
+                let shown = if x < 0.0 { "-Infinity" } else { "Infinity" };
+                let mut entry = Map::new();
+                entry.insert(INFINITE.to_owned(), Value::String(shown.to_owned()));
+                Ok(Value::Object(entry))
+            }
+            _ => Err(e),
+        })
     }
 }
 

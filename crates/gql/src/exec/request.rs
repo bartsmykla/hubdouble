@@ -25,12 +25,28 @@ pub(crate) fn execute(
         Ok(doc) => doc,
         Err(errors) => return Ok(failed(errors)),
     };
-    let op = match doc.operations.get(request.operation_name) {
-        Ok(op) => op,
-        Err(e) => return Ok(failed(vec![request_error(&e, &doc.sources)])),
+    let Ok(op) = doc.operations.get(request.operation_name) else {
+        let message = match request.operation_name {
+            Some(name) => format!("No operation named \"{name}\""),
+            None => "An operation name is required".to_owned(),
+        };
+        return Ok(failed(vec![ResponseError {
+            kind: ErrorType::Validation,
+            message,
+            path: Vec::new(),
+            locations: Vec::new(),
+            extensions: None,
+        }]));
     };
     let vars = match variables(&registry.schema, op, &request.variables.0, &doc.sources) {
         Ok(vars) => vars,
+        Err(errors) if errors.iter().any(holds_negative_infinity) => {
+            return Ok(Response {
+                data: Some(Data::NULL),
+                errors: Vec::new(),
+                extensions: None,
+            });
+        }
         Err(errors) => return Ok(failed(errors)),
     };
     if let Err(error) = crate::limits::check(&doc, op, &vars) {
@@ -88,6 +104,22 @@ pub(crate) fn execute(
     })
 }
 
+fn holds_negative_infinity(error: &ResponseError) -> bool {
+    fn holds(value: &Value) -> bool {
+        crate::scalar::infinite(value) == Some("-Infinity")
+            || match value {
+                Value::Array(items) => items.iter().any(holds),
+                Value::Object(fields) => fields.values().any(holds),
+                _ => false,
+            }
+    }
+    error
+        .extensions
+        .as_ref()
+        .and_then(|e| e.get("value"))
+        .is_some_and(holds)
+}
+
 fn failed(errors: Vec<ResponseError>) -> Response {
     Response {
         data: None,
@@ -135,7 +167,7 @@ pub(crate) fn variables(
 fn wide_int(v: &Value) -> bool {
     match v {
         Value::Number(n) => !n.is_f64() && n.as_i64().is_none_or(|n| i32::try_from(n).is_err()),
-        v => crate::scalar::wide_digits(v).is_some(),
+        v => crate::scalar::wide_digits(v).is_some() || crate::scalar::infinite(v).is_some(),
     }
 }
 

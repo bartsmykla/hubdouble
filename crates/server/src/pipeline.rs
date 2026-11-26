@@ -47,8 +47,10 @@ const RATE_LIMIT_DOCS: &str =
     "https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting";
 const GRAPHQL_AUTH_DOCS: &str =
     "https://docs.github.com/graphql/guides/forming-calls-with-graphql#authenticating-with-graphql";
+const GRAPHQL_DOCS: &str = "https://docs.github.com/graphql";
 const GRAPHQL_NO_QUERY: &str = "A query attribute must be specified and must be a string.";
 const GRAPHQL_BAD_VARIABLES: &str = "Failed to parse variables";
+const GRAPHQL_VARIABLES_DEPTH: usize = 255;
 
 pub(crate) type HttpResponse = Response<Full<Bytes>>;
 
@@ -392,8 +394,16 @@ impl Inner {
             }
             let request = match &request {
                 Ok(request) => request,
-                Err(Unread::NotJson) => return Err(ApiError::bad_request("Problems parsing JSON")),
-                Err(Unread::TooDeep) => {
+                Err(Unread::NotJson) => {
+                    return Err(
+                        ApiError::bad_request("Problems parsing JSON").with_docs(GRAPHQL_DOCS)
+                    );
+                }
+                Err(Unread::NotObject) => {
+                    return Err(ApiError::bad_request("Body should be a JSON object")
+                        .with_docs(GRAPHQL_DOCS));
+                }
+                Err(Unread::TooDeep | Unread::BrokenQuery) => {
                     return Ok(Reply::raw(hubdouble_rest::JSON, Vec::new())
                         .status(StatusCode::INTERNAL_SERVER_ERROR));
                 }
@@ -672,39 +682,62 @@ struct GraphqlBody {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Unread {
     NotJson,
+    NotObject,
     TooDeep,
     NoQuery,
+    BrokenQuery,
     BadVariables,
 }
 
 impl GraphqlBody {
     fn parse(body: &[u8]) -> Result<Self, Unread> {
-        let members = unbounded::<Members<'_>>(body).ok_or(Unread::NotJson)?;
+        let body = spaced(body);
+        let members = match body.iter().copied().find(|b| !b.is_ascii_whitespace()) {
+            None => return Err(Unread::NoQuery),
+            Some(b'{') => unbounded::<Members<'_>>(&body).ok_or(Unread::NotJson)?,
+            Some(_) => {
+                let raw = unbounded::<&RawValue>(&body).ok_or(Unread::NotJson)?;
+                return Err(match raw.get() {
+                    "null" | "false" => Unread::NoQuery,
+                    _ => Unread::NotObject,
+                });
+            }
+        };
+        let raw = members
+            .variables
+            .map(RawValue::get)
+            .filter(|raw| !raw.starts_with('"'));
+        let sent = raw.map(raw_variables).transpose()?.flatten();
+        let Some((query, lone_low)) = members
+            .query
+            .and_then(|raw| hubdouble_gql::json_string(raw.get()))
+        else {
+            return Err(
+                if raw.is_some_and(|raw| nesting(raw) > GRAPHQL_VARIABLES_DEPTH) {
+                    Unread::TooDeep
+                } else {
+                    Unread::NoQuery
+                },
+            );
+        };
+        if lone_low {
+            return Err(Unread::BrokenQuery);
+        }
         let variables = match members.variables {
             Some(raw) if raw.get().starts_with('"') => {
-                let text: String = serde_json::from_str(raw.get()).map_err(|_| Unread::NotJson)?;
+                let (text, _) = hubdouble_gql::json_string(raw.get()).ok_or(Unread::NotJson)?;
                 let text = text.trim_matches([' ', '\t', '\n', '\r']);
                 if text.is_empty() {
                     None
                 } else {
                     let inner =
                         unbounded::<&RawValue>(text.as_bytes()).ok_or(Unread::BadVariables)?;
-                    object_variables(inner)?
+                    raw_variables(inner.get())?
                 }
             }
-            Some(raw) => object_variables(raw)?,
-            None => None,
+            _ => sent,
         };
-        let query = members
-            .query
-            .and_then(|raw| serde_json::from_str::<String>(raw.get()).ok())
-            .ok_or(Unread::NoQuery)?;
-        let operation_name = members
-            .operation_name
-            .map(|raw| serde_json::from_str::<Option<String>>(raw.get()))
-            .transpose()
-            .map_err(|_| Unread::NotJson)?
-            .flatten();
+        let operation_name = members.operation_name.and_then(|raw| ruby_text(raw.get()));
         Ok(Self {
             query,
             operation_name,
@@ -717,13 +750,202 @@ fn graphql_error(message: &str) -> Result<Reply, ApiError> {
     Reply::json(&serde_json::json!({ "errors": [{ "message": message }] }))
 }
 
-fn object_variables(raw: &RawValue) -> Result<Option<hubdouble_gql::Variables>, Unread> {
-    if !raw.get().starts_with('{') {
+/// GitHub's parser also takes a vertical tab and a form feed between tokens.
+fn spaced(body: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if !body.iter().any(|b| matches!(b, 0x0B | 0x0C)) {
+        return std::borrow::Cow::Borrowed(body);
+    }
+    let mut out = body.to_vec();
+    let (mut in_string, mut escaped) = (false, false);
+    for b in &mut out {
+        if in_string {
+            match *b {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+        } else if *b == b'"' {
+            in_string = true;
+        } else if matches!(*b, 0x0B | 0x0C) {
+            *b = b' ';
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+fn raw_variables(text: &str) -> Result<Option<hubdouble_gql::Variables>, Unread> {
+    if !text.starts_with('{') {
         return Ok(None);
     }
-    hubdouble_gql::Variables::parse(raw.get())
+    if nesting(text) > GRAPHQL_VARIABLES_DEPTH {
+        return Err(Unread::TooDeep);
+    }
+    hubdouble_gql::Variables::parse(text)
         .map(Some)
-        .map_err(|_| Unread::TooDeep)
+        .map_err(|_| Unread::BadVariables)
+}
+
+fn nesting(text: &str) -> usize {
+    let (mut depth, mut deepest) = (0_usize, 0_usize);
+    let (mut in_string, mut escaped) = (false, false);
+    for b in text.bytes() {
+        if in_string {
+            match b {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
+}
+
+/// The text that GitHub's Ruby server makes of an `operationName` member: a string as it is,
+/// `null` as no name, and any other value in Ruby's `inspect` form.
+fn ruby_text(raw: &str) -> Option<String> {
+    if raw == "null" {
+        return None;
+    }
+    if raw.starts_with('"') {
+        return hubdouble_gql::json_string(raw).map(|(text, _)| text);
+    }
+    let mut out = String::new();
+    let mut rest = raw;
+    while let Some(&b) = rest.as_bytes().first() {
+        let len = match b {
+            b'{' | b'}' | b'[' | b']' => {
+                out.push(char::from(b));
+                1
+            }
+            b',' => {
+                out.push_str(", ");
+                1
+            }
+            b':' => {
+                out.push_str(" => ");
+                1
+            }
+            b'"' => {
+                let len = string_len(rest);
+                let (text, _) = hubdouble_gql::json_string(rest.get(..len)?)?;
+                ruby_inspect(&text, &mut out);
+                len
+            }
+            b'n' => {
+                out.push_str("nil");
+                4
+            }
+            b't' | b'f' => {
+                let len = if b == b't' { 4 } else { 5 };
+                out.push_str(rest.get(..len)?);
+                len
+            }
+            _ if b.is_ascii_whitespace() => 1,
+            _ => {
+                let len = rest
+                    .bytes()
+                    .position(|b| matches!(b, b',' | b']' | b'}') || b.is_ascii_whitespace())
+                    .unwrap_or(rest.len());
+                out.push_str(&ruby_number(rest.get(..len)?));
+                len
+            }
+        };
+        rest = rest.get(len..)?;
+    }
+    Some(out)
+}
+
+fn string_len(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut end = 1;
+    while let Some(b) = bytes.get(end) {
+        match b {
+            b'\\' => end += 2,
+            b'"' => return end + 1,
+            _ => end += 1,
+        }
+    }
+    bytes.len()
+}
+
+fn ruby_inspect(text: &str, out: &mut String) {
+    out.push('"');
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\u{c}' => out.push_str("\\f"),
+            '\u{b}' => out.push_str("\\v"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{7}' => out.push_str("\\a"),
+            '\u{1b}' => out.push_str("\\e"),
+            '#' if matches!(chars.peek(), Some('{' | '$' | '@')) => out.push_str("\\#"),
+            c if c.is_ascii_control() => {
+                let _ = write!(out, "\\u{:04X}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+fn ruby_number(token: &str) -> String {
+    if !token.contains(['.', 'e', 'E']) {
+        return if token == "-0" { "0" } else { token }.to_owned();
+    }
+    let Ok(x) = token.parse::<f64>() else {
+        return token.to_owned();
+    };
+    let sign = if x.is_sign_negative() { "-" } else { "" };
+    if x.is_infinite() {
+        return format!("{sign}Infinity");
+    }
+    if x.classify() == std::num::FpCategory::Zero {
+        return format!("{sign}0.0");
+    }
+    let shortest = format!("{:e}", x.abs());
+    let Some((mantissa, exponent)) = shortest.split_once('e') else {
+        return token.to_owned();
+    };
+    let digits = mantissa.replace('.', "");
+    let exponent: i32 = exponent.parse().unwrap_or_default();
+    let point = exponent + 1;
+    match usize::try_from(point) {
+        Ok(point @ 1..=15) => {
+            if digits.len() <= point {
+                format!("{sign}{digits}{}.0", "0".repeat(point - digits.len()))
+            } else {
+                let (whole, fraction) = digits.split_at(point);
+                format!("{sign}{whole}.{fraction}")
+            }
+        }
+        Err(_) | Ok(0) if point >= -3 => {
+            let zeros = usize::try_from(-point).unwrap_or_default();
+            format!("{sign}0.{}{digits}", "0".repeat(zeros))
+        }
+        _ => {
+            let (first, rest) = digits.split_at(1);
+            let rest = if rest.is_empty() { "0" } else { rest };
+            let mark = if exponent < 0 { '-' } else { '+' };
+            format!("{sign}{first}.{rest}e{mark}{:02}", exponent.unsigned_abs())
+        }
+    }
 }
 
 fn unbounded<'de, T: Deserialize<'de>>(body: &'de [u8]) -> Option<T> {
@@ -1378,6 +1600,8 @@ mod unit {
             (objects(255), used),
             (objects(256), Err(Unread::TooDeep)),
             (arrays.clone(), unused),
+            (format!("[{}]", objects(300)), unused),
+            ("[[[1]]]".to_owned(), unused),
             (format!(r#"{},"variables":{{}}"#, objects(300)), used),
             (
                 format!(r#"{{}},"variables":{}"#, objects(300)),
@@ -1392,6 +1616,11 @@ mod unit {
             (quoted(&objects(255)), used),
             (quoted(&objects(256)), Err(Unread::TooDeep)),
             (quoted(&arrays), unused),
+            (quoted(&format!("[{}]", objects(300))), unused),
+            (r#"{"x":1e309,"y":-1e309}"#.to_owned(), used),
+            (quoted(r#"{"x":1e309}"#), used),
+            (r#"{"a":"\ud800","\udc00":1}"#.to_owned(), used),
+            (quoted(r#"{"a":"\ud800"}"#), used),
             (quoted(""), unused),
             (quoted("null"), unused),
             (quoted("[1]"), unused),
@@ -1431,12 +1660,214 @@ mod unit {
             (r#"{"query":null}"#.to_owned(), Unread::NoQuery),
             (r#"{"query":1}"#.to_owned(), Unread::NoQuery),
             (r#"{"variables":{"a":1}}"#.to_owned(), Unread::NoQuery),
+            (format!(r#"{{"variables":[{deep}]}}"#), Unread::TooDeep),
+            (
+                format!(
+                    r#"{{"query":1,"variables":{}1{}}}"#,
+                    "[".repeat(256),
+                    "]".repeat(256)
+                ),
+                Unread::TooDeep,
+            ),
+            (
+                format!(r#"{{"variables":{}1{}}}"#, "[".repeat(255), "]".repeat(255)),
+                Unread::NoQuery,
+            ),
+            (
+                format!(r#"{{"variables":{deep},"query":1}}"#),
+                Unread::TooDeep,
+            ),
+            (r#"{"variables":"not json"}"#.to_owned(), Unread::NoQuery),
+            (
+                r#"{"query":1,"variables":"not json"}"#.to_owned(),
+                Unread::NoQuery,
+            ),
+            (
+                format!(
+                    r#"{{"variables":{}}}"#,
+                    serde_json::to_string(&deep).unwrap_or_default()
+                ),
+                Unread::NoQuery,
+            ),
+            (
+                format!(
+                    r#"{{"query":"q","variables":{}}}"#,
+                    serde_json::to_string(&deep).unwrap_or_default()
+                ),
+                Unread::TooDeep,
+            ),
+            (r#"{"query":"q \udc00"}"#.to_owned(), Unread::BrokenQuery),
+            (String::new(), Unread::NoQuery),
+            ("   ".to_owned(), Unread::NoQuery),
+            ("\n".to_owned(), Unread::NoQuery),
+            ("null".to_owned(), Unread::NoQuery),
+            (" null ".to_owned(), Unread::NoQuery),
+            ("false".to_owned(), Unread::NoQuery),
+            ("{bad".to_owned(), Unread::NotJson),
+            ("[]x".to_owned(), Unread::NotJson),
+            ("[]".to_owned(), Unread::NotObject),
+            (r#"[{"query":"q"}]"#.to_owned(), Unread::NotObject),
+            ("[[[[1]]]]".to_owned(), Unread::NotObject),
+            (r#""x""#.to_owned(), Unread::NotObject),
+            (r#""\ud800""#.to_owned(), Unread::NotObject),
+            (r#""{\"query\":\"q\"}""#.to_owned(), Unread::NotObject),
+            ("1".to_owned(), Unread::NotObject),
+            ("-1".to_owned(), Unread::NotObject),
+            ("1e400".to_owned(), Unread::NotObject),
+            ("true".to_owned(), Unread::NotObject),
+            (" \u{c}[]".to_owned(), Unread::NotObject),
         ] {
-            // Given a body that GitHub refuses
+            // Given a body that GitHub refuses, as live GitHub answered it
             // When the body is parsed
             let parsed = GraphqlBody::parse(body.as_bytes());
             // Then the first failed check names the answer
             assert_eq!(parsed.err(), Some(want), "{}", &body[..body.len().min(40)]);
+        }
+    }
+
+    #[test]
+    fn a_vertical_tab_or_form_feed_between_tokens_is_space_and_other_bytes_are_not() {
+        let positions: [fn(&str) -> String; 10] = [
+            |x| format!(r#"{x}{{"query":"q"}}"#),
+            |x| format!(r#"{{"query":"q"}}{x}"#),
+            |x| format!(r#"{{{x}"query":"q"}}"#),
+            |x| format!(r#"{{"query"{x}:"q"}}"#),
+            |x| format!(r#"{{"query":{x}"q"}}"#),
+            |x| format!(r#"{{"query":"q"{x},"variables":{{"n":1}}}}"#),
+            |x| format!(r#"{{"query":"q",{x}"variables":{{"n":1}}}}"#),
+            |x| format!(r#"{{"query":"q"{x}}}"#),
+            |x| format!(r#"{{"query":"q","variables":{{"n":{x}1}}}}"#),
+            |x| format!(r#"{{"query":"q","variables":{{"n":1{x}}}}}"#),
+        ];
+        for (at, make) in positions.iter().enumerate() {
+            for byte in ["\u{b}", "\u{c}"] {
+                // Given a body with a vertical tab or a form feed at this position
+                let body = make(byte);
+                // When the body is parsed
+                let parsed = GraphqlBody::parse(body.as_bytes()).map(|b| b.query);
+                // Then it parses as live GitHub took it
+                assert_eq!(parsed, Ok("q".to_owned()), "{at} {byte:?}");
+            }
+            for byte in [
+                "\0", "\u{8}", "\u{e}", "\u{1f}", "\u{7f}", "\u{a0}", "\u{feff}", "\u{2028}",
+                "\u{3000}",
+            ] {
+                // Given a body with another byte that is not JSON whitespace at this position
+                let body = make(byte);
+                // When the body is parsed
+                let parsed = GraphqlBody::parse(body.as_bytes()).map(|b| b.query);
+                // Then it is not JSON, as live GitHub answered
+                assert_eq!(parsed, Err(Unread::NotJson), "{at} {byte:?}");
+            }
+        }
+        // Given a form feed inside the query string, escaped
+        let body = r#"{"query":"a\fb"}"#;
+        // When the body is parsed
+        let parsed = GraphqlBody::parse(body.as_bytes()).map(|b| b.query);
+        // Then the string keeps it
+        assert_eq!(parsed, Ok("a\u{c}b".to_owned()));
+    }
+
+    #[test]
+    fn an_operation_name_of_any_json_value_is_the_text_that_github_names() {
+        for (sent, want) in [
+            ("null", None),
+            ("0", Some("0")),
+            ("-0", Some("0")),
+            ("-1", Some("-1")),
+            (
+                "123456789012345678901234567890",
+                Some("123456789012345678901234567890"),
+            ),
+            ("1.5", Some("1.5")),
+            ("1.0", Some("1.0")),
+            ("-0.0", Some("-0.0")),
+            ("1e3", Some("1000.0")),
+            ("1E2", Some("100.0")),
+            ("100.0", Some("100.0")),
+            ("0.1", Some("0.1")),
+            ("0.0001", Some("0.0001")),
+            ("0.00001", Some("1.0e-05")),
+            ("1.25e-7", Some("1.25e-07")),
+            ("1e15", Some("1.0e+15")),
+            ("1e16", Some("1.0e+16")),
+            ("1e20", Some("1.0e+20")),
+            ("1e308", Some("1.0e+308")),
+            ("-2.5e+30", Some("-2.5e+30")),
+            ("123456789012345678.0", Some("1.2345678901234568e+17")),
+            ("1e400", Some("Infinity")),
+            ("-1e309", Some("-Infinity")),
+            ("true", Some("true")),
+            ("false", Some("false")),
+            ("[]", Some("[]")),
+            ("[[]]", Some("[[]]")),
+            (r#"[1,"a",null,true]"#, Some(r#"[1, "a", nil, true]"#)),
+            (r#"["a\\b"]"#, Some(r#"["a\\b"]"#)),
+            (r#"["é"]"#, Some(r#"["é"]"#)),
+            ("{}", Some("{}")),
+            (r#"{"a":1}"#, Some(r#"{"a" => 1}"#)),
+            (r#"{"":1}"#, Some(r#"{"" => 1}"#)),
+            (r#"{"a":1.5}"#, Some(r#"{"a" => 1.5}"#)),
+            (r#"{"a":[]}"#, Some(r#"{"a" => []}"#)),
+            (r#"{"a":{}}"#, Some(r#"{"a" => {}}"#)),
+            (r#"{"a":1,"b":"x"}"#, Some(r#"{"a" => 1, "b" => "x"}"#)),
+            (
+                r#"{"a":{"b":[1,null,true,"c"]}}"#,
+                Some(r#"{"a" => {"b" => [1, nil, true, "c"]}}"#),
+            ),
+            (r#"{"a":"q\"r"}"#, Some(r#"{"a" => "q\"r"}"#)),
+            (
+                r#"{"a":"\n\t\u0001\u007f#{x}#$y#@z"}"#,
+                Some(r#"{"a" => "\n\t\u0001\u007F\#{x}\#$y\#@z"}"#),
+            ),
+            (r#""0""#, Some("0")),
+            (r#""""#, Some("")),
+            (r#""x\"y""#, Some(r#"x"y"#)),
+            (r#""a\\b""#, Some(r"a\b")),
+            (r#""a\nb""#, Some("a\nb")),
+            (r#""\ud800""#, Some("?")),
+            (r#""a\ud800b""#, Some("a?b")),
+            (r#""\ud800\ud800""#, Some("\u{10000}")),
+            (r#""􏿿""#, Some("\u{10ffff}")),
+            (r#""😀""#, Some("\u{1f600}")),
+            (r#""\udc00""#, Some("\u{fffd}\u{fffd}\u{fffd}")),
+        ] {
+            // Given a body whose operationName member is this value
+            let body = format!(r#"{{"query":"q","operationName":{sent}}}"#);
+            // When the body is parsed
+            let parsed = GraphqlBody::parse(body.as_bytes()).map(|b| b.operation_name);
+            // Then the name is the text in live GitHub's "No operation named" answer
+            assert_eq!(parsed, Ok(want.map(str::to_owned)), "{sent}");
+        }
+    }
+
+    #[test]
+    fn a_lone_surrogate_decodes_as_github_decodes_it() {
+        for (sent, want) in [
+            (r"\ud800", "?"),
+            (r"a\ud800b", "a?b"),
+            (r"\ud800\ud800", "\u{10000}"),
+            (r"\udc00", "\u{fffd}\u{fffd}\u{fffd}"),
+        ] {
+            // Given a variable and a query string that hold this escape
+            let body = format!(
+                r#"{{"query":"{{repository(owner:\"{sent}\")}}","variables":{{"s":"{sent}"}}}}"#
+            );
+            // When the body is parsed
+            let parsed = GraphqlBody::parse(body.as_bytes());
+            // Then the variable holds the text that live GitHub echoed, and the query is read
+            // unless it holds a lone low surrogate, which live GitHub answers with an empty 500
+            let echoed = serde_json::json!({ "s": want }).to_string();
+            let variables = parsed.as_ref().ok().and_then(|b| b.variables.clone());
+            if sent == r"\udc00" {
+                assert_eq!(parsed.err(), Some(Unread::BrokenQuery));
+            } else {
+                assert_eq!(
+                    variables,
+                    hubdouble_gql::Variables::parse(&echoed).ok(),
+                    "{sent}"
+                );
+            }
         }
     }
 

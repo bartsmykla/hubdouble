@@ -462,7 +462,7 @@ async fn variables_nest_255_levels_and_a_deeper_body_answers_an_empty_500() {
 }
 
 #[tokio::test]
-async fn the_token_is_checked_before_the_body_and_a_body_error_keeps_its_answer() {
+async fn the_token_is_checked_before_the_body() {
     let server = server().await;
     let deep = format!(
         r#"{{"query":"{{ viewer {{ login }} }}","variables":{}1{}}}"#,
@@ -479,22 +479,89 @@ async fn the_token_is_checked_before_the_body_and_a_body_error_keeps_its_answer(
         // Then it answers 401 whatever the body, as on live GitHub on 2026-11-26
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{}", &body[..4]);
     }
+}
+
+#[tokio::test]
+async fn a_body_error_keeps_the_answer_that_github_gives() {
+    let server = server().await;
     let api = client(&server, fixture::ALICE_TOKEN);
     let failed = |message: &str| json!({"errors":[{"message":message}]});
+    let refused = |message: &str| json!({"message":message,"documentation_url":"https://docs.github.com/graphql","status":"400"});
     let no_query = failed("A query attribute must be specified and must be a string.");
     let used = json!({"data":{"viewer":{"login":fixture::ALICE}}});
     let quoted = r#"{"query":"query($s: Boolean!) { viewer { login @include(if: $s) } }","variables":"{\"s\":true}"}"#;
     let not_json = r#"{"query":"{ viewer { login } }","variables":"not json"}"#;
     for (body, status, want) in [
         ("{}", StatusCode::OK, Some(no_query.clone())),
-        (r#"{"query":1}"#, StatusCode::OK, Some(no_query)),
+        (r#"{"query":1}"#, StatusCode::OK, Some(no_query.clone())),
         (
             not_json,
             StatusCode::OK,
             Some(failed("Failed to parse variables")),
         ),
-        (quoted, StatusCode::OK, Some(used)),
+        (quoted, StatusCode::OK, Some(used.clone())),
         (r#"{"query":1,}"#, StatusCode::BAD_REQUEST, None),
+        (
+            "{bad",
+            StatusCode::BAD_REQUEST,
+            Some(refused("Problems parsing JSON")),
+        ),
+        (
+            "[]",
+            StatusCode::BAD_REQUEST,
+            Some(refused("Body should be a JSON object")),
+        ),
+        (
+            "\"x\"",
+            StatusCode::BAD_REQUEST,
+            Some(refused("Body should be a JSON object")),
+        ),
+        ("null", StatusCode::OK, Some(no_query.clone())),
+        ("", StatusCode::OK, Some(no_query.clone())),
+        (
+            r#"{"variables":"not json"}"#,
+            StatusCode::OK,
+            Some(no_query),
+        ),
+        (
+            "\u{c}{\"query\":\u{b}\"{ viewer { login } }\"}\u{c}",
+            StatusCode::OK,
+            Some(used.clone()),
+        ),
+        (
+            r#"{"query":"{ viewer { login } }","variables":{"x":1e309,"y":"\ud800"}}"#,
+            StatusCode::OK,
+            Some(used.clone()),
+        ),
+        (
+            r#"{"query":"{ viewer { login } }","operationName":null}"#,
+            StatusCode::OK,
+            Some(used),
+        ),
+        (
+            r#"{"query":"{ viewer { login } }","operationName":0}"#,
+            StatusCode::OK,
+            Some(failed(r#"No operation named "0""#)),
+        ),
+        (
+            r#"{"query":"{ viewer { login } }","operationName":{"a":[1,null]}}"#,
+            StatusCode::OK,
+            Some(failed(r#"No operation named "{"a" => [1, nil]}""#)),
+        ),
+        (
+            r#"{"query":"query($x:Int){viewer{repositories(first:$x){totalCount}}}","variables":{"x":1e309}}"#,
+            StatusCode::OK,
+            Some(json!({"errors":[{
+                "extensions":{"value":null,"problems":[{"path":[],"explanation":"Could not coerce value Infinity to Int"}]},
+                "locations":[{"line":1,"column":7}],
+                "message":"Variable $x of type Int was provided invalid value",
+            }]})),
+        ),
+        (
+            r#"{"query":"query($x:Int){viewer{repositories(first:$x){totalCount}}}","variables":{"x":-1e309}}"#,
+            StatusCode::OK,
+            Some(json!({"data":null})),
+        ),
     ] {
         // When a body is posted with a known token
         let answer = api
