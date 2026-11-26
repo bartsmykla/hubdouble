@@ -80,7 +80,7 @@ fn reference_at<'t>(word: &'t str, web: &str, at: usize) -> Option<(usize, &'t s
     let mut parts = path.splitn(4, '/');
     let (owner, name) = (parts.next()?, parts.next()?);
     let valid = |s: &str| !s.is_empty() && s.bytes().all(name_byte);
-    if !valid(owner) || !valid(name) || parts.next()? != "issues" {
+    if !valid(owner) || !valid(name) || !matches!(parts.next()?, "issues" | "pull") {
         return None;
     }
     let from = at + web.len() + 1;
@@ -523,7 +523,16 @@ mod tests {
                 &[("python/mypy", 22063)],
             ),
             (
-                "#13abc a#14 x/y/z#15 nogh-16 https://example.com/a/b/issues/17",
+                "Reverts https://github.com/cli/cli/pull/11370",
+                &[("cli/cli", 11370)],
+            ),
+            (
+                "PR-URL: https://github.com/nodejs/node/pull/64034",
+                &[("nodejs/node", 64034)],
+            ),
+            (
+                "#13abc a#14 x/y/z#15 nogh-16 https://example.com/a/b/issues/17 \
+                 https://github.com/a/b/pulls/18 https://github.com/a/b/commit/19",
                 &[],
             ),
             (
