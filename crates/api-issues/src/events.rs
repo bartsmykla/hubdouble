@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use hubdouble_api_pulls::{Reviewer, StateEvent, StateEvents, StateKind};
-use hubdouble_auth::Actor;
+use hubdouble_auth::{Actor, Target};
 use hubdouble_git::ObjectId;
-use hubdouble_model::{ApiError, Issue, IssueState, StateReason, Timestamp, node_id};
+use hubdouble_model::{
+    ApiError, Grant, Issue, IssueState, Requirement, Scope, StateReason, Timestamp, node_id,
+};
 use hubdouble_render::{self as r, Urls};
 use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::{Accounts, Entity, Issues, Repos, Rows, Teams, Tx, TxMut};
@@ -366,18 +368,27 @@ fn commit_in(
     sha: impl std::fmt::Display,
 ) -> (Option<String>, Option<String>) {
     match tx.table::<Repos>().get(repo_id) {
-        Some(repo) if !hubdouble_auth::can_see(tx, actor, repo) => (None, None),
-        Some(repo) => (
-            Some(sha.to_string()),
-            Some(format!(
-                "{}/repos/{}/commits/{sha}",
-                urls.api,
-                full_name(tx, repo)
-            )),
-        ),
-        None => (Some(sha.to_string()), None),
+        Some(repo)
+            if hubdouble_auth::authorize(tx, actor, &READ_COMMIT, Target::Repo(repo)).is_ok() =>
+        {
+            (
+                Some(sha.to_string()),
+                Some(format!(
+                    "{}/repos/{}/commits/{sha}",
+                    urls.api,
+                    full_name(tx, repo)
+                )),
+            )
+        }
+        _ => (None, None),
     }
 }
+
+const READ_COMMIT: Requirement = Requirement {
+    any_of: &[Grant::read("contents")],
+    scope: Scope::Repo,
+    scopes: &[],
+};
 
 fn team(tx: &Tx, urls: &Urls, id: i64) -> Option<r::Team> {
     let teams = tx.table::<Teams>();

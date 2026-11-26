@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use http::{Method, StatusCode};
 use hubdouble_git::{Commit, ObjectData, ObjectId, Signature};
-use hubdouble_model::{Clock, node_id};
+use hubdouble_model::{Clock, Timestamp, Token, TokenKind, node_id};
 use hubdouble_testkit::fixture::{
     ALICE_ID, ALICE_TOKEN, BOB_ID, CAROL_TOKEN, PRIVATE_REPO_ID, PUBLIC_REPO_ID,
 };
@@ -528,6 +530,118 @@ async fn a_commit_in_a_private_repository_shows_only_to_a_viewer_who_can_read_it
         assert_eq!(referenced[0]["commit_id"], id, "{reads}");
         assert_eq!(referenced[0]["commit_url"], url, "{reads}");
     }
+}
+
+fn installation(id: i64, permissions: &Value) -> [Value; 2] {
+    [
+        json!({"kind": "app", "id": id, "slug": format!("reader-{id}"), "name": format!("Reader {id}"),
+               "owner": "acme", "public_key": hubdouble_testkit::fixture::APP_PUBLIC_KEY,
+               "permissions": permissions, "events": []}),
+        json!({"kind": "installation", "id": id + 1, "app": format!("reader-{id}"), "account": "acme",
+               "repositories": ["public", "private"], "permissions": permissions}),
+    ]
+}
+
+fn installation_token(server: &TestServer, app: i64, secret: &str) {
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            tx.table_mut::<hubdouble_store::Tokens>()
+                .insert(Token {
+                    id: app + 2,
+                    token: secret.into(),
+                    kind: TokenKind::Installation,
+                    app_id: Some(app),
+                    installation_id: Some(app + 1),
+                    user_id: None,
+                    repo_ids: None,
+                    permissions: BTreeMap::new(),
+                    scopes: vec![],
+                    expires_at: None,
+                    revoked: false,
+                    owner_seeded: false,
+                    created_at: Timestamp::SEED,
+                })
+                .map_err(|e| hubdouble_model::ApiError::internal(format!("{e:?}")))?;
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("insert the installation token: {e:?}"));
+}
+
+#[tokio::test]
+async fn a_commit_shows_only_to_a_viewer_who_may_read_the_commit_and_only_while_its_repository_exists()
+ {
+    // Given an installation that reads issues but not contents, one that reads both, and a
+    // public issue that a commit in the private repository names
+    let issues = json!({"issues": "read", "metadata": "read"});
+    let contents = json!({"issues": "read", "contents": "read", "metadata": "read"});
+    let [app, install] = installation(4200, &issues);
+    let [other_app, other_install] = installation(4300, &contents);
+    let server = TestServer::builder()
+        .fixture()
+        .entry(app)
+        .entry(install)
+        .entry(other_app)
+        .entry(other_install)
+        .frame(hubdouble_api::register_all)
+        .start()
+        .await;
+    installation_token(&server, 4200, "ghs_issues_reader");
+    installation_token(&server, 4300, "ghs_contents_reader");
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let (number, path) = open_issue(&alice, PUBLIC).await;
+    let base = head_in(&server, PRIVATE_REPO_ID, MAIN);
+    let named = commit_in(
+        &server,
+        PRIVATE_REPO_ID,
+        base,
+        &format!("Touch acme/public#{number}"),
+    );
+    push_in(&server, (PRIVATE_REPO_ID, ALICE_ID), MAIN, (base, named));
+    let commit = |viewer: GoGithub| {
+        let path = path.clone();
+        async move {
+            let events = checked(&viewer.get(&format!("{path}/events")).await, StatusCode::OK);
+            let referenced: Vec<Value> = events.as_array().map_or_default(|a| {
+                a.iter()
+                    .filter(|e| e["event"] == "referenced")
+                    .cloned()
+                    .collect()
+            });
+            assert_eq!(referenced.len(), 1, "{events}");
+            (
+                referenced[0]["commit_id"].clone(),
+                referenced[0]["commit_url"].clone(),
+            )
+        }
+    };
+    let shown = (
+        json!(named),
+        json!(format!("{}/{PRIVATE}/commits/{named}", server.base)),
+    );
+    let hidden = (Value::Null, Value::Null);
+    // When each installation reads the events
+    let without_contents = commit(GoGithub::new(&server).with_token("ghs_issues_reader")).await;
+    let with_contents = commit(GoGithub::new(&server).with_token("ghs_contents_reader")).await;
+    // Then only the one that may read the commit sees it, as GET commits/{sha} requires
+    // Contents read
+    assert_eq!(without_contents, hidden);
+    assert_eq!(with_contents, shown);
+    // When the private repository is deleted
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            tx.table_mut::<hubdouble_store::Repos>()
+                .remove(PRIVATE_REPO_ID);
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("delete the private repository: {e:?}"));
+    // Then even its admin sees no commit
+    assert_eq!(commit(alice.clone()).await, hidden);
 }
 
 #[tokio::test]
