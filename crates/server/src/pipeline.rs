@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::collections::{HashMap, hash_map};
 use std::fmt::Write as _;
 use std::hash::{BuildHasher as _, Hash as _, Hasher as _};
 use std::io::Write as _;
@@ -732,8 +734,12 @@ impl GraphqlBody {
         }
         let variables = match members.variables {
             Some(raw) if raw.get().starts_with('"') => {
-                let (text, _) = hubdouble_gql::json_string(raw.get()).ok_or(Unread::NotJson)?;
-                let text = text.trim_matches([' ', '\t', '\n', '\r']);
+                let (text, _) =
+                    hubdouble_gql::json_string_of_json(raw.get()).ok_or(Unread::NotJson)?;
+                let text = spaced(text.as_bytes());
+                let text = std::str::from_utf8(&text)
+                    .map_err(|_| Unread::NotJson)?
+                    .trim_matches([' ', '\t', '\n', '\r']);
                 if text.is_empty() {
                     None
                 } else {
@@ -757,10 +763,9 @@ fn graphql_error(message: &str) -> Result<Reply, ApiError> {
     Reply::json(&serde_json::json!({ "errors": [{ "message": message }] }))
 }
 
-/// GitHub's parser also takes a vertical tab and a form feed between tokens.
-fn spaced(body: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+fn spaced(body: &[u8]) -> Cow<'_, [u8]> {
     if !body.iter().any(|b| matches!(b, 0x0B | 0x0C)) {
-        return std::borrow::Cow::Borrowed(body);
+        return Cow::Borrowed(body);
     }
     let mut out = body.to_vec();
     let (mut in_string, mut escaped) = (false, false);
@@ -778,7 +783,7 @@ fn spaced(body: &[u8]) -> std::borrow::Cow<'_, [u8]> {
             *b = b' ';
         }
     }
-    std::borrow::Cow::Owned(out)
+    Cow::Owned(out)
 }
 
 fn raw_variables(text: &str) -> Result<Option<hubdouble_gql::Variables>, Unread> {
@@ -819,8 +824,12 @@ fn nesting(text: &str) -> usize {
     deepest
 }
 
-/// The text that GitHub's Ruby server makes of an `operationName` member: a string as it is,
-/// `null` as no name, and any other value in Ruby's `inspect` form.
+enum RubyNode {
+    Leaf(String),
+    List(Vec<usize>),
+    Hash(Vec<(String, usize)>),
+}
+
 fn ruby_text(raw: &str) -> Option<String> {
     if raw == "null" {
         return None;
@@ -828,50 +837,119 @@ fn ruby_text(raw: &str) -> Option<String> {
     if raw.starts_with('"') {
         return hubdouble_gql::json_string(raw).map(|(text, _)| text);
     }
-    let mut out = String::new();
+    let mut nodes: Vec<RubyNode> = Vec::new();
+    let mut open: Vec<usize> = Vec::new();
+    let mut keys: HashMap<(usize, String), usize> = HashMap::new();
+    let mut key: Option<String> = None;
     let mut rest = raw;
     while let Some(&b) = rest.as_bytes().first() {
-        let len = match b {
-            b'{' | b'}' | b'[' | b']' => {
-                out.push(char::from(b));
-                1
-            }
-            b',' => {
-                out.push_str(", ");
-                1
-            }
-            b':' => {
-                out.push_str(" => ");
-                1
+        let (len, node) = match b {
+            b'[' => (1, RubyNode::List(Vec::new())),
+            b'{' => (1, RubyNode::Hash(Vec::new())),
+            b']' | b'}' => {
+                open.pop();
+                rest = rest.get(1..)?;
+                continue;
             }
             b'"' => {
                 let len = string_len(rest);
-                let (text, _) = hubdouble_gql::json_string(rest.get(..len)?)?;
-                ruby_inspect(&text, &mut out);
-                len
+                (len, RubyNode::Leaf(ruby_inspect(rest.get(..len)?)?))
             }
-            b'n' => {
-                out.push_str("nil");
-                4
+            b'n' => (4, RubyNode::Leaf("nil".to_owned())),
+            b't' => (4, RubyNode::Leaf("true".to_owned())),
+            b'f' => (5, RubyNode::Leaf("false".to_owned())),
+            b',' | b':' => {
+                rest = rest.get(1..)?;
+                continue;
             }
-            b't' | b'f' => {
-                let len = if b == b't' { 4 } else { 5 };
-                out.push_str(rest.get(..len)?);
-                len
+            _ if b.is_ascii_whitespace() => {
+                rest = rest.get(1..)?;
+                continue;
             }
-            _ if b.is_ascii_whitespace() => 1,
             _ => {
                 let len = rest
                     .bytes()
                     .position(|b| matches!(b, b',' | b']' | b'}') || b.is_ascii_whitespace())
                     .unwrap_or(rest.len());
-                out.push_str(&ruby_number(rest.get(..len)?));
-                len
+                (len, RubyNode::Leaf(ruby_number(rest.get(..len)?)))
             }
         };
         rest = rest.get(len..)?;
+        let id = nodes.len();
+        let parent = open.last().copied();
+        match parent.and_then(|p| nodes.get_mut(p)) {
+            Some(RubyNode::List(items)) => items.push(id),
+            Some(RubyNode::Hash(entries)) => {
+                let Some(name) = key.take() else {
+                    let RubyNode::Leaf(name) = node else {
+                        return None;
+                    };
+                    key = Some(name);
+                    continue;
+                };
+                match keys.entry((parent.unwrap_or_default(), name.clone())) {
+                    hash_map::Entry::Occupied(at) => {
+                        entries.get_mut(*at.get())?.1 = id;
+                    }
+                    hash_map::Entry::Vacant(at) => {
+                        at.insert(entries.len());
+                        entries.push((name, id));
+                    }
+                }
+            }
+            _ => {}
+        }
+        if matches!(node, RubyNode::List(_) | RubyNode::Hash(_)) {
+            open.push(id);
+        }
+        nodes.push(node);
+    }
+    ruby_print(&nodes)
+}
+
+fn ruby_print(nodes: &[RubyNode]) -> Option<String> {
+    let mut out = String::new();
+    let mut steps = vec![Step::Node(0)];
+    while let Some(step) = steps.pop() {
+        let id = match step {
+            Step::Node(id) => id,
+            Step::Text(text) => {
+                out.push_str(text);
+                continue;
+            }
+        };
+        match nodes.get(id)? {
+            RubyNode::Leaf(text) => out.push_str(text),
+            RubyNode::List(items) => {
+                out.push('[');
+                steps.push(Step::Text("]"));
+                for (i, &item) in items.iter().enumerate().rev() {
+                    steps.push(Step::Node(item));
+                    if i > 0 {
+                        steps.push(Step::Text(", "));
+                    }
+                }
+            }
+            RubyNode::Hash(entries) => {
+                out.push('{');
+                steps.push(Step::Text("}"));
+                for (i, (name, value)) in entries.iter().enumerate().rev() {
+                    steps.push(Step::Node(*value));
+                    steps.push(Step::Text(" => "));
+                    steps.push(Step::Text(name));
+                    if i > 0 {
+                        steps.push(Step::Text(", "));
+                    }
+                }
+            }
+        }
     }
     Some(out)
+}
+
+enum Step<'n> {
+    Node(usize),
+    Text(&'n str),
 }
 
 fn string_len(text: &str) -> usize {
@@ -887,10 +965,27 @@ fn string_len(text: &str) -> usize {
     bytes.len()
 }
 
-fn ruby_inspect(text: &str, out: &mut String) {
-    out.push('"');
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
+fn ruby_inspect(token: &str) -> Option<String> {
+    let mut units: Vec<Result<char, u32>> = Vec::new();
+    hubdouble_gql::json_pieces(token, |piece| match piece {
+        hubdouble_gql::JsonPiece::Text(text) => units.extend(text.chars().map(Ok)),
+        hubdouble_gql::JsonPiece::LoneLow(unit) => units.push(Err(unit)),
+    })?;
+    let mut out = String::from('"');
+    for (i, unit) in units.iter().enumerate() {
+        let c = match *unit {
+            Ok(c) => c,
+            Err(unit) => {
+                for byte in [
+                    0xE0 | (unit >> 12),
+                    0x80 | ((unit >> 6) & 0x3F),
+                    0x80 | (unit & 0x3F),
+                ] {
+                    let _ = write!(out, "\\x{byte:02X}");
+                }
+                continue;
+            }
+        };
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
@@ -902,7 +997,7 @@ fn ruby_inspect(text: &str, out: &mut String) {
             '\u{8}' => out.push_str("\\b"),
             '\u{7}' => out.push_str("\\a"),
             '\u{1b}' => out.push_str("\\e"),
-            '#' if matches!(chars.peek(), Some('{' | '$' | '@')) => out.push_str("\\#"),
+            '#' if matches!(units.get(i + 1), Some(Ok('{' | '$' | '@'))) => out.push_str("\\#"),
             c if c.is_ascii_control() => {
                 let _ = write!(out, "\\u{:04X}", u32::from(c));
             }
@@ -910,6 +1005,7 @@ fn ruby_inspect(text: &str, out: &mut String) {
         }
     }
     out.push('"');
+    Some(out)
 }
 
 fn ruby_number(token: &str) -> String {
@@ -970,16 +1066,6 @@ struct Members<'b> {
     variables: Option<&'b RawValue>,
 }
 
-#[derive(Deserialize)]
-#[serde(field_identifier, rename_all = "camelCase")]
-enum GraphqlField {
-    Query,
-    OperationName,
-    Variables,
-    #[serde(other)]
-    Other,
-}
-
 impl<'de> Deserialize<'de> for Members<'de> {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Fields;
@@ -995,12 +1081,19 @@ impl<'de> Deserialize<'de> for Members<'de> {
                 mut map: A,
             ) -> Result<Members<'de>, A::Error> {
                 let mut members = Members::default();
-                while let Some(field) = map.next_key()? {
-                    let last = match field {
-                        GraphqlField::Query => &mut members.query,
-                        GraphqlField::OperationName => &mut members.operation_name,
-                        GraphqlField::Variables => &mut members.variables,
-                        GraphqlField::Other => {
+                while let Some(key) = map.next_key::<&RawValue>()? {
+                    let key = key.get();
+                    let name = match key.get(1..key.len() - 1) {
+                        Some(plain) if !plain.contains('\\') => Cow::Borrowed(plain),
+                        _ => Cow::Owned(
+                            hubdouble_gql::json_string(key).map_or_default(|(text, _)| text),
+                        ),
+                    };
+                    let last = match &*name {
+                        "query" => &mut members.query,
+                        "operationName" => &mut members.operation_name,
+                        "variables" => &mut members.variables,
+                        _ => {
                             map.next_value::<serde::de::IgnoredAny>()?;
                             continue;
                         }

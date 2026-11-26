@@ -22,5 +22,5 @@ pub use answer::AnswerError;
 pub use contract::*;
 pub use data::Data;
 pub use pin::schema_sdl;
-pub use scalar::{Variables, json_string};
+pub use scalar::{JsonPiece, Variables, json_pieces, json_string, json_string_of_json};
 pub use schema::Schema;

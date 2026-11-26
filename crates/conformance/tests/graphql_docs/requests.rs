@@ -536,7 +536,7 @@ async fn a_body_error_keeps_the_answer_that_github_gives() {
         (
             r#"{"query":"{ viewer { login } }","operationName":null}"#,
             StatusCode::OK,
-            Some(used),
+            Some(used.clone()),
         ),
         (
             r#"{"query":"{ viewer { login } }","operationName":0}"#,
@@ -575,6 +575,120 @@ async fn a_body_error_keeps_the_answer_that_github_gives() {
     }
 }
 
+#[tokio::test]
+async fn an_operation_name_and_a_variables_string_read_as_github_reads_them() {
+    let server = server().await;
+    let api = client(&server, fixture::ALICE_TOKEN);
+    let failed = |message: &str| json!({"errors":[{"message":message}]});
+    let used = json!({"data":{"viewer":{"login":fixture::ALICE}}});
+    for (body, status, want) in [
+        (
+            r#"{"query":"{ viewer { login } }","operationName":{"a":1,"b":2,"a":3}}"#,
+            StatusCode::OK,
+            Some(failed(r#"No operation named "{"a" => 3, "b" => 2}""#)),
+        ),
+        (
+            r#"{"query":"{ viewer { login } }","operationName":{"a":{"b":1,"b":2}}}"#,
+            StatusCode::OK,
+            Some(failed(r#"No operation named "{"a" => {"b" => 2}}""#)),
+        ),
+        (
+            r#"{"query":"{ viewer { login } }","operationName":["a\udc00#{"]}"#,
+            StatusCode::OK,
+            Some(failed(r#"No operation named "["a\xED\xB0\x80\#{"]""#)),
+        ),
+        (
+            r#"{"query":"{ viewer { login } }","operationName":{"\udc00":1}}"#,
+            StatusCode::OK,
+            Some(failed(r#"No operation named "{"\xED\xB0\x80" => 1}""#)),
+        ),
+        (
+            r#"{"query":"{ viewer { login } }","operationName":["\ud800",{},[]]}"#,
+            StatusCode::OK,
+            Some(failed(r#"No operation named "["?", {}, []]""#)),
+        ),
+        (
+            r#"{"query":"query($s: Boolean!) { viewer { login @include(if: $s) } }","variables":"\u000b{\"s\":\u000ctrue}"}"#,
+            StatusCode::OK,
+            Some(used.clone()),
+        ),
+        (
+            r#"{"query":"{ viewer { login } }","variables":"\u000b\u000c"}"#,
+            StatusCode::OK,
+            Some(used.clone()),
+        ),
+        (
+            r#"{"query":"{ viewer { login } }","variables":"\u000bnull\u000c"}"#,
+            StatusCode::OK,
+            Some(used.clone()),
+        ),
+        (
+            r#"{"query":"{ viewer { login } }","\udc00":1,"variables":"{\"\udc00\":1,\"\\udc00\":2}"}"#,
+            StatusCode::OK,
+            Some(used),
+        ),
+    ] {
+        // When a body is posted with a known token
+        let answer = api
+            .call_bytes(Method::POST, "graphql", body.as_bytes().to_vec())
+            .await;
+        // Then it answers as live GitHub did on 2026-11-26
+        assert_eq!(answer.status, status, "{body}");
+        if let Some(want) = want {
+            assert_eq!(answer.json(), want, "{body}");
+        }
+    }
+}
+
+fn cursor_lookups(docs: &str) -> Vec<String> {
+    let mut lookups = Vec::new();
+    let pull = format!("{docs}{{pullRequest(number:1){{");
+    let acme = r#"organization(login:\"acme\"){"#;
+    for (open, connection, close) in [
+        (acme.to_owned(), "teams", "}"),
+        (format!("{acme}teams(first:2){{nodes{{"), "ancestors", "}}}"),
+        (format!("{docs}{{"), "collaborators", "}"),
+        (
+            format!(r#"{docs}{{refs(refPrefix:\"refs/heads/\","#),
+            "",
+            "}",
+        ),
+        (
+            format!(r#"{docs}{{ref(qualifiedName:\"feature\"){{"#),
+            "associatedPullRequests",
+            "}}",
+        ),
+        (pull.clone(), "commits", "}}"),
+        (pull.clone(), "reviews", "}}"),
+        (pull.clone(), "reviewThreads", "}}"),
+        (
+            format!("{pull}reviewThreads(first:1){{nodes{{"),
+            "comments",
+            "}}}}",
+        ),
+        (
+            String::new(),
+            r#"search(type:REPOSITORY,query:\"docs\","#,
+            "",
+        ),
+    ] {
+        for page in ["first:1,after:$s", "last:1,before:$s"] {
+            let args = match connection {
+                "" => format!("{page})"),
+                c if c.ends_with(',') => format!("{c}{page})"),
+                c => format!("{c}({page})"),
+            };
+            let total = if connection.starts_with("search") {
+                "repositoryCount"
+            } else {
+                "totalCount"
+            };
+            lookups.push(format!("{open}{args}{{{total}}}{close}"));
+        }
+    }
+    lookups
+}
+
 fn bodies_that_reach_a_lookup_with_text_github_cannot_store() -> Vec<(String, bool)> {
     let (low, emoji, joined, high, fffd) = (
         r"\udc00",
@@ -586,18 +700,16 @@ fn bodies_that_reach_a_lookup_with_text_github_cannot_store() -> Vec<(String, bo
     let docs = r#"repository(owner:\"acme\",name:\"docs\")"#;
     let refs = format!(r#"{docs}{{refs(refPrefix:\"refs/heads/\",first:1,"#);
     let owner = r#"repository(owner:$s,name:\"docs\"){id}"#;
-    let lookups = [
+    let mut lookups = vec![
         owner.to_owned(),
         r#"repository(owner:\"acme\",name:$s){id}"#.to_owned(),
         "organization(login:$s){id}".to_owned(),
         format!("{refs}query:$s){{totalCount}}}}"),
         format!("{refs}after:$s){{totalCount}}}}"),
-        format!(r#"{docs}{{refs(refPrefix:\"refs/heads/\",last:1,before:$s){{totalCount}}}}"#),
         format!("{docs}{{collaborators(first:1,login:$s){{totalCount}}}}"),
-        format!("{docs}{{pullRequest(number:1){{reviewThreads(first:1,after:$s){{totalCount}}}}}}"),
-        r#"organization(login:\"acme\"){teams(first:1,after:$s){totalCount}}"#.to_owned(),
         format!("viewer{{login}} {owner}"),
     ];
+    lookups.extend(cursor_lookups(docs));
     let mut cases = Vec::new();
     for lookup in &lookups {
         cases.push(("String!", lookup.clone(), low, true));
@@ -634,12 +746,19 @@ fn bodies_that_reach_a_lookup_with_text_github_cannot_store() -> Vec<(String, bo
             (body, internal)
         })
         .collect();
-    bodies.push((
-        format!(
-            r#"{{"query":"query($s:String!){{{owner}}}","variables":"{{\"s\":\"\\udc00\"}}"}}"#
-        ),
-        true,
-    ));
+    for (variables, internal) in [
+        (r#""{\"s\":\"\\udc00\"}""#, true),
+        (r#""{\"s\":\"\udc00\"}""#, true),
+        (r#"{"s":"\udc00","s":"acme"}"#, false),
+        (r#"{"s":"acme","s":"\udc00"}"#, true),
+    ] {
+        bodies.push((
+            format!(
+                r#"{{"query":"query($s:String!){{organization(login:$s){{id}}}}","variables":{variables}}}"#
+            ),
+            internal,
+        ));
+    }
     bodies.push((
         format!(r#"{{"query":"{{repository(owner:\"{emoji}\",name:\"docs\"){{id}}}}"}}"#),
         true,

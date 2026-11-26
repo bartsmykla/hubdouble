@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use hubdouble_model::Timestamp;
@@ -56,24 +58,62 @@ const INFINITE: &str = "\0inf";
 /// `None` when `token` is not a JSON string.
 #[must_use]
 pub fn json_string(token: &str) -> Option<(String, bool)> {
+    decode(token, false)
+}
+
+/// [`json_string`] for a token whose text is JSON again, as a variables string: a lone low
+/// surrogate stays its `\u` escape, so that the JSON inside still holds it.
+#[must_use]
+pub fn json_string_of_json(token: &str) -> Option<(String, bool)> {
+    decode(token, true)
+}
+
+fn decode(token: &str, keep_lone_low: bool) -> Option<(String, bool)> {
     if let Ok(text) = serde_json::from_str::<String>(token) {
         return Some((text, false));
     }
-    let mut rest = token.strip_prefix('"')?.strip_suffix('"')?;
-    let mut text = String::with_capacity(rest.len());
+    let mut text = String::with_capacity(token.len());
     let mut lone_low = false;
+    json_pieces(token, |piece| match piece {
+        JsonPiece::Text(part) => text.push_str(part),
+        JsonPiece::LoneLow(unit) => {
+            lone_low = true;
+            if keep_lone_low {
+                let _ = write!(text, "\\u{unit:04x}");
+            } else {
+                text.push_str("\u{FFFD}\u{FFFD}\u{FFFD}");
+            }
+        }
+    })?;
+    Some((text, lone_low))
+}
+
+/// A part of a JSON string token as GitHub's parser reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JsonPiece<'t> {
+    Text(&'t str),
+    /// A lone low surrogate, which GitHub keeps as the three bytes that UTF-8 would give it.
+    LoneLow(u32),
+}
+
+/// Gives `piece` the parts of a JSON string token in order, read as [`json_string`] reads
+/// them. `None` when `token` is not a JSON string, after the parts before the fault.
+#[must_use]
+pub fn json_pieces(token: &str, mut piece: impl FnMut(JsonPiece<'_>)) -> Option<()> {
+    let mut rest = token.strip_prefix('"')?.strip_suffix('"')?;
+    let mut buf = [0; 4];
     while let Some(at) = rest.find('\\') {
-        text.push_str(rest.get(..at)?);
+        piece(JsonPiece::Text(rest.get(..at)?));
         let escape = rest.get(at + 1..)?;
         let kind = escape.chars().next()?;
         rest = escape.get(kind.len_utf8()..)?;
-        match kind {
-            '"' | '\\' | '/' => text.push(kind),
-            'b' => text.push('\u{8}'),
-            'f' => text.push('\u{c}'),
-            'n' => text.push('\n'),
-            'r' => text.push('\r'),
-            't' => text.push('\t'),
+        let c = match kind {
+            '"' | '\\' | '/' => kind,
+            'b' => '\u{8}',
+            'f' => '\u{c}',
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
             'u' => {
                 let unit = hex4(rest)?;
                 rest = rest.get(4..)?;
@@ -81,24 +121,23 @@ pub fn json_string(token: &str) -> Option<(String, bool)> {
                     match rest.strip_prefix("\\u").and_then(hex4) {
                         Some(next) => {
                             rest = rest.get(6..)?;
-                            text.push(char::from_u32(
-                                (0x10000 + ((unit & 0x3FF) << 10)) | (next & 0x3FF),
-                            )?);
+                            char::from_u32((0x10000 + ((unit & 0x3FF) << 10)) | (next & 0x3FF))?
                         }
-                        None => text.push('?'),
+                        None => '?',
                     }
                 } else if unit & 0xFC00 == 0xDC00 {
-                    lone_low = true;
-                    text.push_str("\u{FFFD}\u{FFFD}\u{FFFD}");
+                    piece(JsonPiece::LoneLow(unit));
+                    continue;
                 } else {
-                    text.push(char::from_u32(unit)?);
+                    char::from_u32(unit)?
                 }
             }
             _ => return None,
-        }
+        };
+        piece(JsonPiece::Text(c.encode_utf8(&mut buf)));
     }
-    text.push_str(rest);
-    Some((text, lone_low))
+    piece(JsonPiece::Text(rest));
+    Some(())
 }
 
 fn hex4(text: &str) -> Option<u32> {
@@ -355,10 +394,15 @@ impl<'t> Exact<'t> {
             }
             let name = escaped(self.string()?);
             self.eat(b':')?;
-            self.lone_low = false;
+            if depth == 1 {
+                self.lone_low = false;
+            }
             let value = self.value(depth + 1)?;
-            if depth == 1 && self.lone_low {
-                self.lone_low_members.push(name.clone());
+            if depth == 1 {
+                self.lone_low_members.retain(|member| *member != name);
+                if self.lone_low {
+                    self.lone_low_members.push(name.clone());
+                }
             }
             fields.insert(name, value);
             match self.peek() {
@@ -611,6 +655,23 @@ mod tests {
         assert_eq!(vars["g"], json!(-5));
         assert!(matches("Int", &vars["b"]["c"]) && matches("Float", &vars["b"]["c"]));
         assert!(!matches("Int", &vars["d"]) && !matches("Int", &vars["e"]));
+    }
+
+    #[test]
+    fn a_variable_holds_a_lone_low_surrogate_when_its_last_value_does() {
+        // Given variables whose lone low surrogates sit beside later members of the same
+        // object, under repeated names, and in a variables string of one escape level
+        let raw = r#"{"a":{"x":"\udc00","y":"ok"},"b":["\udc00","ok"],"c":"\udc00","c":"ok",
+            "d":"ok","d":"\udc00","e":"ok"}"#;
+        let (inner, _) = json_string_of_json(r#""{\"f\":\"\udc00\"}""#).unwrap();
+
+        // When they are parsed
+        let Variables(_, members) = Variables::parse(raw).unwrap();
+        let Variables(_, of_json) = Variables::parse(&inner).unwrap();
+
+        // Then the members are those whose last value holds one at any depth
+        assert_eq!(members, ["a", "b", "d"]);
+        assert_eq!(of_json, ["f"]);
     }
 
     fn wide_ints_nested(arrays: usize) -> String {
