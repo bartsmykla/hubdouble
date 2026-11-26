@@ -278,21 +278,25 @@ pub fn create_run(
     };
     apply(&mut run, input, now)?;
     let run = tx.table_mut::<CheckRuns>().insert(run)?;
-    let named: Vec<i64> = tx
-        .table::<CheckRuns>()
-        .children(suite)
-        .filter(|held| held.name == run.name)
-        .map(|held| held.id)
-        .collect();
-    for old in named.iter().rev().skip(MAX_RUNS_PER_NAME) {
-        tx.table_mut::<CheckRuns>().remove(*old);
-    }
+    cap_runs_named(tx, &run);
     events::check_run(tx, git, &run, ("created", sender, To::Subscribers), None)?;
     if run.status == RunStatus::Completed {
         events::check_run(tx, git, &run, ("completed", sender, To::Subscribers), None)?;
     }
     suites::refresh(tx, git, suite, sender, now)?;
     Ok(run)
+}
+
+fn cap_runs_named(tx: &mut TxMut<'_>, run: &CheckRun) {
+    let named: Vec<i64> = tx
+        .table::<CheckRuns>()
+        .children(run.check_suite_id)
+        .filter(|held| held.name == run.name)
+        .map(|held| held.id)
+        .collect();
+    for old in named.iter().rev().skip(MAX_RUNS_PER_NAME) {
+        tx.table_mut::<CheckRuns>().remove(*old);
+    }
 }
 
 fn find(ctx: &Ctx<'_>) -> Result<Arc<CheckRun>, ApiError> {
@@ -343,6 +347,9 @@ pub fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let changed = Arc::new(changed);
     let (tx, git) = ctx.tx_mut_and_git()?;
     tx.table_mut::<CheckRuns>().replace(changed.clone())?;
+    if changed.name != run.name {
+        cap_runs_named(tx, &changed);
+    }
     if changed.status == RunStatus::Completed && run.status != RunStatus::Completed {
         events::check_run(
             tx,

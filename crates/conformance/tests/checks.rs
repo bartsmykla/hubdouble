@@ -391,7 +391,7 @@ async fn a_suite_keeps_the_1000_newest_runs_of_a_name() {
         })
         .collect();
     runs.push(
-        json!({"kind": "check_run", "id": 899_999, "repository": "acme/public",
+        json!({"kind": "check_run", "id": 901_500, "repository": "acme/public",
         "app": "fixture-app", "name": "lint", "head_sha": "main"}),
     );
     // When they are created, as the Checks docs say GitHub limits them
@@ -420,6 +420,26 @@ async fn a_suite_keeps_the_1000_newest_runs_of_a_name() {
     );
     assert_eq!(
         client.get(&format!("{RUNS}/900001")).await.status,
+        StatusCode::OK
+    );
+    // When the newer lint run is renamed to build
+    let renamed = client
+        .call_json(
+            Method::PATCH,
+            &format!("{RUNS}/901500"),
+            &json!({"name": "build"}),
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK);
+    // Then the limit holds for the new name, and the oldest build run goes
+    let builds = client.get(&named("build")).await.json();
+    assert_eq!(builds["total_count"], 1000);
+    assert_eq!(
+        client.get(&format!("{RUNS}/900001")).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        client.get(&format!("{RUNS}/901500")).await.status,
         StatusCode::OK
     );
 }
