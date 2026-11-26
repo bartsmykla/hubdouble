@@ -229,7 +229,7 @@ fn open(
     let issue = tx.table_mut::<Issues>().insert(issue)?;
     state::sync_refs(tx, git, &issue)?;
     events::emit(tx, git, &issue, sender, "opened", json!({}))?;
-    crate::mentions::record_mentions(tx, &issue, (None, issue.body.as_deref()), now)?;
+    crate::mentions::record_mentions(tx, &issue, sender, (None, issue.body.as_deref()), now)?;
     mergeability::start(tx, git, &issue, sender)?;
     let id = issue.id;
     tx.table::<Issues>()
@@ -319,6 +319,7 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         crate::mentions::record_mentions(
             tx,
             &issue,
+            author,
             (old_body.as_deref(), issue.body.as_deref()),
             now,
         )?;

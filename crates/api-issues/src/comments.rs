@@ -187,7 +187,8 @@ pub(crate) fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         last_edited_at: None,
     })?;
     comment_event(tx, &repo, &issue, &comment, "created", who.account.id, None)?;
-    hubdouble_api_pulls::record_mentions(tx, &issue, (None, Some(&comment.body)), now)?;
+    let author = who.account.id;
+    hubdouble_api_pulls::record_mentions(tx, &issue, author, (None, Some(&comment.body)), now)?;
     let view = comment_view(tx, &urls, &repo, &full_name(tx, &repo), &issue, &comment);
     created(&view, &view.url)
 }
@@ -225,6 +226,7 @@ pub(crate) fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         hubdouble_api_pulls::record_mentions(
             tx,
             &issue,
+            who.account.id,
             (Some(&old.body), Some(&comment.body)),
             now,
         )?;

@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use http::{Method, StatusCode};
 use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
-use hubdouble_testkit::fixture::{self, ALICE_ID, ALICE_TOKEN, BOB_TOKEN, PUBLIC_REPO_ID};
+use hubdouble_testkit::fixture::{
+    self, ALICE_ID, ALICE_TOKEN, BOB_TOKEN, CAROL_TOKEN, PUBLIC_REPO_ID,
+};
 use hubdouble_testkit::{GoGithub, Graphql, TestServer};
 use serde_json::{Value, json};
 
@@ -44,7 +46,6 @@ async fn server() -> TestServer {
 
 async fn server_with(extra: &[Value]) -> TestServer {
     let mut entries = fixture::seed();
-    entries.extend(extra.iter().cloned());
     for entry in &mut entries {
         if entry["kind"] == "repository" && entry["name"] == fixture::PUBLIC_REPO {
             entry["collaborators"] = json!([{"login": "bob", "permission": "write"}]);
@@ -53,6 +54,7 @@ async fn server_with(extra: &[Value]) -> TestServer {
     entries.push(json!({"kind": "team", "org": "acme", "name": "Reviewers",
         "privacy": "closed", "members": [{"login": "bob"}],
         "repositories": [{"repository": "acme/public", "permission": "write"}]}));
+    entries.extend(extra.iter().cloned());
     let mut builder = TestServer::builder().frame(hubdouble_api::register_all);
     for entry in entries {
         builder = builder.entry(entry);
@@ -76,9 +78,26 @@ async fn open(client: &GoGithub, draft: bool) -> Value {
 }
 
 async fn events(client: &GoGithub, number: &Value) -> Vec<Value> {
-    let answer = client.get(&format!("{REPO}/issues/{number}/events")).await;
+    events_in(client, REPO, number).await
+}
+
+async fn events_in(client: &GoGithub, repo: &str, number: &Value) -> Vec<Value> {
+    let answer = client.get(&format!("{repo}/issues/{number}/events")).await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.json());
     answer.json().as_array().cloned().unwrap_or_default()
+}
+
+fn subscriptions(events: &[Value]) -> Vec<(&str, &str)> {
+    events
+        .iter()
+        .filter(|e| e["event"] == "mentioned" || e["event"] == "subscribed")
+        .map(|e| {
+            (
+                e["event"].as_str().unwrap_or_default(),
+                e["actor"]["login"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect()
 }
 
 fn named<'a>(events: &'a [Value], name: &str) -> Vec<&'a Value> {
@@ -399,7 +418,7 @@ async fn a_force_push_to_a_fork_head_names_the_fork_in_its_commit_url() {
 }
 
 #[tokio::test]
-async fn a_mention_records_mentioned_and_subscribed_once_and_a_team_mention_only_subscribed() {
+async fn each_text_that_mentions_a_user_records_a_pair_and_a_team_mention_only_subscribed() {
     // Given an issue whose body mentions carol, and code that names dave
     let server = server().await;
     let alice = alice(&server);
@@ -411,19 +430,25 @@ async fn a_mention_records_mentioned_and_subscribed_once_and_a_team_mention_only
         .await;
     assert_eq!(opened.status, StatusCode::CREATED, "{}", opened.json());
     let number = opened.json()["number"].clone();
-    // When a comment mentions the reviewers team and carol again, and an edit mentions carol
-    let commented = alice
-        .post(
-            &format!("{REPO}/issues/{number}/comments"),
-            &json!({"body": "cc @acme/reviewers and @carol"}),
-        )
-        .await;
-    assert_eq!(
-        commented.status,
-        StatusCode::CREATED,
-        "{}",
-        commented.json()
-    );
+    // When a comment mentions the reviewers team and carol again, a comment quotes carol and
+    // mentions its author, and an edit names only carol, whom the body already names
+    for body in [
+        "cc @acme/reviewers and @carol",
+        "> @carol said so\n\nI agree, @alice",
+    ] {
+        let commented = alice
+            .post(
+                &format!("{REPO}/issues/{number}/comments"),
+                &json!({ "body": body }),
+            )
+            .await;
+        assert_eq!(
+            commented.status,
+            StatusCode::CREATED,
+            "{}",
+            commented.json()
+        );
+    }
     let edited = alice
         .call_json(
             Method::PATCH,
@@ -432,19 +457,22 @@ async fn a_mention_records_mentioned_and_subscribed_once_and_a_team_mention_only
         )
         .await;
     assert_eq!(edited.status, StatusCode::OK, "{}", edited.json());
-    // Then carol is mentioned and subscribed once, and bob of the team only subscribed
+    // Then each text gives its own pair for each user it names, as live GitHub did for
+    // kubernetes/kubernetes 144288 and cli/cli 14800, bob of the team is only subscribed, and
+    // the edit adds nothing
     let recorded = events(&alice, &number).await;
-    let seen: Vec<(&Value, &Value)> = recorded
-        .iter()
-        .filter(|e| e["event"] == "mentioned" || e["event"] == "subscribed")
-        .map(|e| (&e["event"], &e["actor"]["login"]))
-        .collect();
     assert_eq!(
-        seen,
+        subscriptions(&recorded),
         [
-            (&json!("mentioned"), &json!("carol")),
-            (&json!("subscribed"), &json!("carol")),
-            (&json!("subscribed"), &json!("bob")),
+            ("mentioned", "carol"),
+            ("subscribed", "carol"),
+            ("subscribed", "bob"),
+            ("mentioned", "carol"),
+            ("subscribed", "carol"),
+            ("mentioned", "carol"),
+            ("subscribed", "carol"),
+            ("mentioned", "alice"),
+            ("subscribed", "alice"),
         ]
     );
     for event in named(&recorded, "mentioned")
@@ -456,4 +484,67 @@ async fn a_mention_records_mentioned_and_subscribed_once_and_a_team_mention_only
     }
     assert_eq!(prefix(named(&recorded, "mentioned")[0]), Some("MEE"));
     assert_eq!(prefix(named(&recorded, "subscribed")[0]), Some("SE"));
+}
+
+#[tokio::test]
+async fn a_team_mention_reaches_child_teams_and_only_readers_as_the_docs_say() {
+    // Given a child team of the reviewers with alice, and a secret team with alice
+    let server = server_with(&[
+        json!({"kind": "team", "org": "acme", "name": "Core", "parent": "reviewers",
+            "members": [{"login": "alice"}]}),
+        json!({"kind": "team", "org": "acme", "name": "Hidden", "privacy": "secret",
+            "members": [{"login": "alice"}]}),
+    ])
+    .await;
+    let alice = alice(&server);
+    let bob = GoGithub::enterprise(&server).with_token(BOB_TOKEN);
+    let carol = GoGithub::enterprise(&server).with_token(CAROL_TOKEN);
+    let opened = alice
+        .post(&format!("{REPO}/issues"), &json!({"title": "A fault"}))
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED, "{}", opened.json());
+    let number = opened.json()["number"].clone();
+    // When alice names the reviewers, bob the secret team, alice the secret team, and carol,
+    // who is not in the organization, the reviewers
+    for (client, body) in [
+        (&alice, "@acme/reviewers"),
+        (&bob, "@acme/hidden"),
+        (&alice, "@acme/hidden"),
+        (&carol, "@acme/reviewers"),
+    ] {
+        let commented = client
+            .post(
+                &format!("{REPO}/issues/{number}/comments"),
+                &json!({ "body": body }),
+            )
+            .await;
+        assert_eq!(commented.status, StatusCode::CREATED, "{body}");
+    }
+    // Then the reviewers and the child team are subscribed, and the secret team only for the
+    // owner who names it
+    let recorded = events(&alice, &number).await;
+    assert_eq!(
+        subscriptions(&recorded),
+        [
+            ("subscribed", "bob"),
+            ("subscribed", "alice"),
+            ("subscribed", "alice"),
+        ]
+    );
+    // When an issue in the private repository names bob, who cannot read it, and carol
+    let private = "repos/acme/private";
+    let opened = alice
+        .post(
+            &format!("{private}/issues"),
+            &json!({"title": "A fault", "body": "@bob and @carol"}),
+        )
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED, "{}", opened.json());
+    let number = opened.json()["number"].clone();
+    // Then only carol gets the events
+    let recorded = events_in(&alice, private, &number).await;
+    assert_eq!(
+        subscriptions(&recorded),
+        [("mentioned", "carol"), ("subscribed", "carol")]
+    );
 }
