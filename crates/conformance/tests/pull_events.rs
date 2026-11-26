@@ -548,3 +548,50 @@ async fn a_team_mention_reaches_child_teams_and_only_readers_as_the_docs_say() {
         [("mentioned", "carol"), ("subscribed", "carol")]
     );
 }
+
+#[tokio::test]
+async fn one_text_subscribes_each_user_once_and_a_quiet_team_reaches_no_one() {
+    // Given a team with notifications off that holds alice, and a second team that holds bob
+    let server = server_with(&[
+        json!({"kind": "team", "org": "acme", "name": "Quiet", "notifications_enabled": false,
+            "members": [{"login": "alice"}]}),
+        json!({"kind": "team", "org": "acme", "name": "Pairs", "members": [{"login": "bob"}]}),
+    ])
+    .await;
+    let alice = alice(&server);
+    let opened = alice
+        .post(&format!("{REPO}/issues"), &json!({"title": "A fault"}))
+        .await;
+    assert_eq!(opened.status, StatusCode::CREATED, "{}", opened.json());
+    let number = opened.json()["number"].clone();
+    // When one comment names bob in two cases, his two teams and the quiet team, and an edit
+    // changes only the case of a login
+    let commented = alice
+        .post(
+            &format!("{REPO}/issues/{number}/comments"),
+            &json!({ "body": "@bob @BOB @acme/reviewers @acme/Pairs @acme/quiet" }),
+        )
+        .await;
+    assert_eq!(
+        commented.status,
+        StatusCode::CREATED,
+        "{}",
+        commented.json()
+    );
+    let id = commented.json()["id"].clone();
+    let edited = alice
+        .call_json(
+            Method::PATCH,
+            &format!("{REPO}/issues/comments/{id}"),
+            &json!({ "body": "@Bob @acme/reviewers @acme/Pairs @acme/quiet" }),
+        )
+        .await;
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.json());
+    // Then bob is mentioned and subscribed once, the quiet team subscribes no one, and the
+    // edit adds no mention, since logins and slugs match without case
+    let recorded = events(&alice, &number).await;
+    assert_eq!(
+        subscriptions(&recorded),
+        [("mentioned", "bob"), ("subscribed", "bob")]
+    );
+}

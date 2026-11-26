@@ -4,18 +4,28 @@ use hubdouble_model::{
     Visibility,
 };
 use hubdouble_store::{Accounts, Memberships, Repos, Teams, Tx, TxMut};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use crate::timeline::{self, StateKind};
 
 const MAX_LOGIN: usize = 39;
+const HIDING_ELEMENTS: [&str; 5] = ["pre", "code", "a", "style", "script"];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Named {
+    User(i64),
+    Team(i64),
+}
 
 /// Records the `mentioned` and `subscribed` issue events of the `@` mentions that `after`
 /// adds to `before`, in the order they appear, as live GitHub records them: each text that
 /// mentions a user gives a `mentioned` and then a `subscribed`, again for a user that an
 /// earlier text mentioned, and each member of a mentioned team, its child teams included, only
-/// a `subscribed`. A user who cannot read the repository gets none. `author` mentions a team
-/// only as a member of its organization, and a secret team only as one of its members or an
-/// owner. A mention in GitHub Flavored Markdown code does not count.
+/// a `subscribed`. One text subscribes a user once. A user who cannot read the repository gets
+/// none. `author` mentions a team only as a member of its organization, a secret team only as
+/// one of its members or an owner, and a team with notifications off reaches no one. Logins
+/// and team slugs match without case. A mention in GitHub Flavored Markdown code, in a link,
+/// or inside a `pre`, `code`, `a`, `style` or `script` element does not count.
 ///
 /// # Errors
 ///
@@ -33,34 +43,51 @@ pub fn record_mentions(
     let Some(repo) = tx.table::<Repos>().get(issue.repo_id).cloned() else {
         return Ok(());
     };
-    let old = before.map_or_default(mentions);
-    let mut added: Vec<&str> = Vec::new();
+    let mut counted: Vec<Named> = before
+        .map_or_default(mentions)
+        .iter()
+        .filter_map(|name| resolve(tx, name))
+        .collect();
+    let mut subscribed: Vec<i64> = Vec::new();
     for name in mentions(after) {
-        if !old.contains(&name) && !added.contains(&name) {
-            added.push(name);
+        let Some(named) = resolve(tx, &name) else {
+            continue;
+        };
+        if counted.contains(&named) {
+            continue;
         }
-    }
-    for name in added {
-        let (kinds, users): (&[StateKind], Vec<i64>) = match name.split_once('/') {
-            None => (
-                &[StateKind::Mentioned, StateKind::Subscribed],
-                account(tx, name, AccountKind::User).into_iter().collect(),
-            ),
-            Some((org, slug)) => (
-                &[StateKind::Subscribed],
-                team_members(tx, author, org, slug),
-            ),
+        counted.push(named);
+        let (mentioned, users) = match named {
+            Named::User(user) => (true, vec![user]),
+            Named::Team(team) => (false, team_members(tx, author, team)),
         };
         for user in users {
             if !can_read(tx, user, &repo) {
                 continue;
             }
-            for kind in kinds {
-                timeline::record_at(tx, issue, (user, None), kind.clone(), at)?;
+            if mentioned {
+                timeline::record_at(tx, issue, (user, None), StateKind::Mentioned, at)?;
+            }
+            if !subscribed.contains(&user) {
+                subscribed.push(user);
+                timeline::record_at(tx, issue, (user, None), StateKind::Subscribed, at)?;
             }
         }
     }
     Ok(())
+}
+
+fn resolve(tx: &Tx, name: &str) -> Option<Named> {
+    match name.split_once('/') {
+        None => account(tx, name, AccountKind::User).map(Named::User),
+        Some((org, slug)) => {
+            let org = account(tx, org, AccountKind::Organization)?;
+            let team = tx
+                .table::<Teams>()
+                .by_slug(org, &slug.to_ascii_lowercase())?;
+            Some(Named::Team(team.id))
+        }
+    }
 }
 
 fn account(tx: &Tx, login: &str, kind: AccountKind) -> Option<i64> {
@@ -74,19 +101,16 @@ fn can_read(tx: &Tx, user: i64, repo: &Repo) -> bool {
     repo.visibility == Visibility::Public || repo_role(tx, user, repo).is_some()
 }
 
-fn team_members(tx: &Tx, author: i64, org: &str, slug: &str) -> Vec<i64> {
-    let Some(org) = account(tx, org, AccountKind::Organization) else {
+fn team_members(tx: &Tx, author: i64, team: i64) -> Vec<i64> {
+    let teams = tx.table::<Teams>();
+    let Some(team) = teams.get(team).filter(|t| t.notifications_enabled) else {
         return Vec::new();
     };
     let Some(membership) = tx
         .table::<Memberships>()
-        .of(org, author)
+        .of(team.org_id, author)
         .filter(|m| m.state == MembershipState::Active)
     else {
-        return Vec::new();
-    };
-    let teams = tx.table::<Teams>();
-    let Some(team) = teams.by_slug(org, slug) else {
         return Vec::new();
     };
     let on_team = |team: &Team| team.members.iter().any(|m| m.user_id == author);
@@ -111,125 +135,121 @@ fn team_members(tx: &Tx, author: i64, org: &str, slug: &str) -> Vec<i64> {
     members
 }
 
-fn mentions(text: &str) -> Vec<&str> {
-    let mut found = Vec::new();
-    for prose in prose(text) {
-        mentions_in(prose, &mut found);
-    }
-    found
+#[derive(Default)]
+struct Scan {
+    found: Vec<String>,
+    prose: String,
+    hidden: usize,
+    elements: usize,
 }
 
-fn prose(text: &str) -> Vec<&str> {
-    let mut blocks = Vec::new();
-    let mut fence: Option<(u8, usize)> = None;
-    let mut paragraph: Option<usize> = None;
-    let mut at = 0;
-    for line in text.split_inclusive('\n') {
-        let start = at;
-        at += line.len();
-        let body = line.trim_end_matches(['\n', '\r']);
-        if let Some((mark, len)) = fence {
-            if closes_fence(body, mark, len) {
-                fence = None;
+impl Scan {
+    fn text(&mut self, text: &str) {
+        if self.hidden == 0 && self.elements == 0 {
+            self.prose.push_str(text);
+        }
+    }
+
+    fn flush(&mut self) {
+        mentions_in(&self.prose, &mut self.found);
+        self.prose.clear();
+    }
+
+    fn html(&mut self, chunk: &str) {
+        let mut rest = chunk;
+        while let Some(open) = rest.find('<') {
+            self.text(rest.get(..open).unwrap_or_default());
+            let tag_and_rest = rest.get(open + 1..).unwrap_or_default();
+            let Some(close) = tag_and_rest.find('>') else {
+                self.text(rest.get(open..).unwrap_or_default());
+                return;
+            };
+            self.flush();
+            let tag = tag_and_rest.get(..close).unwrap_or_default();
+            let (closing, name) = tag.strip_prefix('/').map_or((false, tag), |n| (true, n));
+            let name_len = name.bytes().take_while(u8::is_ascii_alphanumeric).count();
+            let name = name.get(..name_len).unwrap_or_default();
+            if !tag.ends_with('/')
+                && HIDING_ELEMENTS
+                    .iter()
+                    .any(|hiding| hiding.eq_ignore_ascii_case(name))
+            {
+                if closing {
+                    self.elements = self.elements.saturating_sub(1);
+                } else {
+                    self.elements += 1;
+                }
             }
-            continue;
+            rest = tag_and_rest.get(close + 1..).unwrap_or_default();
         }
-        let blank = body.trim_matches([' ', '\t']).is_empty();
-        let opened = opens_fence(body);
-        let indented = !blank && paragraph.is_none() && indent(body) >= 4;
-        if blank || opened.is_some() || indented {
-            if let Some(from) = paragraph.take() {
-                blocks.extend(text.get(from..start));
+        self.text(rest);
+    }
+}
+
+fn mentions(text: &str) -> Vec<String> {
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_GFM;
+    let mut scan = Scan::default();
+    for event in Parser::new_ext(text, options) {
+        match event {
+            Event::Text(text) => {
+                scan.text(&text);
+                continue;
             }
-            fence = opened;
-        } else if paragraph.is_none() {
-            paragraph = Some(start);
+            Event::SoftBreak | Event::HardBreak => {
+                scan.text("\n");
+                continue;
+            }
+            _ => scan.flush(),
+        }
+        match event {
+            Event::Start(Tag::Link { .. } | Tag::Image { .. } | Tag::CodeBlock(_)) => {
+                scan.hidden += 1;
+            }
+            Event::End(TagEnd::Link | TagEnd::Image | TagEnd::CodeBlock) => {
+                scan.hidden = scan.hidden.saturating_sub(1);
+            }
+            Event::Html(chunk) | Event::InlineHtml(chunk) => scan.html(&chunk),
+            _ => {}
         }
     }
-    if let Some(from) = paragraph {
-        blocks.extend(text.get(from..));
-    }
-    blocks
+    scan.flush();
+    scan.found
 }
 
-fn indent(line: &str) -> usize {
-    let mut width = 0;
-    for byte in line.bytes() {
-        match byte {
-            b' ' => width += 1,
-            b'\t' => width += 4 - width % 4,
-            _ => break,
-        }
-    }
-    width
-}
-
-fn fence_run(line: &str) -> Option<(u8, usize, &str)> {
-    let spaces = line.bytes().take_while(|b| *b == b' ').count();
-    if spaces > 3 {
-        return None;
-    }
-    let rest = line.get(spaces..)?;
-    let mark = *rest
-        .as_bytes()
-        .first()
-        .filter(|b| matches!(b, b'`' | b'~'))?;
-    let len = rest.bytes().take_while(|b| *b == mark).count();
-    (len >= 3).then(|| (mark, len, rest.get(len..).unwrap_or_default()))
-}
-
-fn opens_fence(line: &str) -> Option<(u8, usize)> {
-    let (mark, len, info) = fence_run(line)?;
-    (mark == b'~' || !info.contains('`')).then_some((mark, len))
-}
-
-fn closes_fence(line: &str, mark: u8, len: usize) -> bool {
-    fence_run(line).is_some_and(|(m, l, rest)| {
-        m == mark && l >= len && rest.trim_matches([' ', '\t']).is_empty()
-    })
-}
-
-fn mentions_in<'t>(prose: &'t str, found: &mut Vec<&'t str>) {
+fn mentions_in(prose: &str, found: &mut Vec<String>) {
     let bytes = prose.as_bytes();
     let mut i = 0;
     while let Some(&byte) = bytes.get(i) {
-        match byte {
-            b'\\' if bytes.get(i + 1) == Some(&b'`') => i += 2,
-            b'`' => {
-                let run = ticks(bytes, i);
-                i = span_end(bytes, i + run, run).unwrap_or(i + run);
-            }
-            b'@' if i == 0 || !word(bytes[i - 1]) => {
-                if let Some(name) = prose.get(i + 1..).and_then(mention) {
-                    found.push(name);
-                }
-                i += 1;
-            }
-            _ => i += 1,
+        let free = i == 0 || bytes.get(i - 1).is_some_and(|b| !word(*b));
+        let rest = prose.get(i..).unwrap_or_default();
+        if free
+            && ["http://", "https://", "www."]
+                .iter()
+                .any(|p| starts_with_ignoring_case(rest, p))
+        {
+            i += rest
+                .bytes()
+                .position(|b| b.is_ascii_whitespace())
+                .unwrap_or(rest.len());
+            continue;
         }
+        if byte == b'@'
+            && free
+            && let Some(name) = prose.get(i + 1..).and_then(mention)
+        {
+            found.push(name.to_owned());
+        }
+        i += 1;
     }
 }
 
-fn ticks(bytes: &[u8], from: usize) -> usize {
-    bytes
-        .get(from..)
-        .map_or(0, |rest| rest.iter().take_while(|b| **b == b'`').count())
-}
-
-fn span_end(bytes: &[u8], from: usize, run: usize) -> Option<usize> {
-    let mut i = from;
-    while i < bytes.len() {
-        if bytes.get(i) == Some(&b'`') {
-            let closing = ticks(bytes, i);
-            if closing == run {
-                return Some(i + closing);
-            }
-            i += closing;
-        } else {
-            i += 1;
-        }
-    }
-    None
+fn starts_with_ignoring_case(text: &str, prefix: &str) -> bool {
+    text.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
 fn word(byte: u8) -> bool {
@@ -282,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn no_form_of_gfm_code_holds_a_mention() {
+    fn no_form_of_gfm_code_or_link_holds_a_mention() {
         for (text, want) in [
             ("~~~\n@a\n~~~\n@b", &["b"][..]),
             ("````\n```\n@a\n````\n@b", &["b"]),
@@ -297,12 +317,24 @@ mod tests {
             ("`` @a\nspans a line `` @b", &["b"]),
             ("unclosed `@a", &["a"]),
             ("\\`@a` @b", &["a", "b"]),
+            ("\\\\`@a` @b", &["b"]),
             ("> quoted @a", &["a"]),
+            ("> ```\n> @a\n> ```\n@b", &["b"]),
+            ("- item\n\n      @a\n\n  @b", &["b"]),
+            ("- item\n\n    @a", &["a"]),
+            ("[@a](https://example.com) @b", &["b"]),
+            ("<https://example.com/@a> @b", &["b"]),
+            ("see https://medium.com/@a and @b", &["b"]),
+            ("<code>@a</code> @b", &["b"]),
+            ("<pre>@a</pre>\n\n@b", &["b"]),
+            ("<div>@a <script>@b</script></div>", &["a"]),
+            ("**x**@a", &["a"]),
         ] {
-            // Given text with code in one of the forms that GitHub Flavored Markdown names
+            // Given text with code or a link in a form that GitHub Flavored Markdown names, or
+            // an element that GitHub's mention filter skips
             // When its mentions are read
             let found = mentions(text);
-            // Then the mentions inside code are left out
+            // Then the mentions inside them are left out
             assert_eq!(found, want, "{text:?}");
         }
     }
