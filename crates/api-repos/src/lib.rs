@@ -12,6 +12,8 @@ use hubdouble_admin::Registrar;
 use hubdouble_model::{Account, ApiError, Event, Grant, Repo, Requirement, Scope};
 use hubdouble_store::{Accounts, Tx, TxMut};
 
+pub use admin::DeletedRepos;
+
 /// Registers what T10 owns: tables, REST operations, GraphQL fields, ref subscribers, seed kinds
 /// and admin routes.
 pub fn register(r: &mut Registrar<'_>) {

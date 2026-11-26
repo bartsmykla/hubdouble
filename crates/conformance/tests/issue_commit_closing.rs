@@ -630,18 +630,111 @@ async fn a_commit_shows_only_to_a_viewer_who_may_read_the_commit_and_only_while_
     assert_eq!(without_contents, hidden);
     assert_eq!(with_contents, shown);
     // When the private repository is deleted
-    server
-        .server
-        .services()
-        .store
-        .update(|tx| {
-            tx.table_mut::<hubdouble_store::Repos>()
-                .remove(PRIVATE_REPO_ID);
-            Ok(())
-        })
-        .unwrap_or_else(|e| panic!("delete the private repository: {e:?}"));
-    // Then even its admin sees no commit
-    assert_eq!(commit(alice.clone()).await, hidden);
+    let deleted = server
+        .admin(Method::DELETE, PRIVATE, Some(&json!({})))
+        .await;
+    assert!(deleted.status.is_success(), "{}", deleted.status);
+    // Then each viewer sees the commit at the repository's last name, as the
+    // head_ref_force_pushed event of cli/cli pull request 14054 named the commit of its
+    // deleted fork MumuTW/cli on 2026-11-26
+    let without_contents = commit(GoGithub::new(&server).with_token("ghs_issues_reader")).await;
+    assert_eq!(without_contents, shown);
+    assert_eq!(commit(alice.clone()).await, shown);
+}
+
+#[tokio::test]
+async fn a_merge_and_a_force_push_show_their_commit_only_to_a_viewer_who_may_read_it() {
+    // Given an installation that reads issues and pull requests but not contents, one that
+    // reads contents too, and a pull request of feature
+    let reads = |contents: bool| {
+        let mut permissions =
+            json!({"issues": "read", "pull_requests": "read", "metadata": "read"});
+        if contents {
+            permissions["contents"] = json!("read");
+        }
+        permissions
+    };
+    let [app, install] = installation(4200, &reads(false));
+    let [other_app, other_install] = installation(4300, &reads(true));
+    let server = TestServer::builder()
+        .fixture()
+        .entry(app)
+        .entry(install)
+        .entry(other_app)
+        .entry(other_install)
+        .frame(hubdouble_api::register_all)
+        .start()
+        .await;
+    installation_token(&server, 4200, "ghs_issues_reader");
+    installation_token(&server, 4300, "ghs_contents_reader");
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let pull = checked(
+        &alice
+            .post(
+                &format!("{PUBLIC}/pulls"),
+                &json!({"title": "feature", "head": "feature", "base": "main"}),
+            )
+            .await,
+        StatusCode::CREATED,
+    );
+    let number = &pull["number"];
+    // When feature is forced to a new commit on main, and the pull request merges
+    let rewrite = commit(&server, head(&server, MAIN), "Rewrite the feature");
+    checked(
+        &alice
+            .call_json(
+                Method::PATCH,
+                &format!("{PUBLIC}/git/refs/heads/feature"),
+                &json!({"sha": rewrite.to_string(), "force": true}),
+            )
+            .await,
+        StatusCode::OK,
+    );
+    let merged = checked(
+        &alice
+            .call_json(
+                Method::PUT,
+                &format!("{PUBLIC}/pulls/{number}/merge"),
+                &json!({}),
+            )
+            .await,
+        StatusCode::OK,
+    );
+    let commits = |token: &'static str| {
+        let viewer = GoGithub::new(&server).with_token(token);
+        async move {
+            let events = checked(
+                &viewer
+                    .get(&format!("{PUBLIC}/issues/{number}/events"))
+                    .await,
+                StatusCode::OK,
+            );
+            ["head_ref_force_pushed", "merged"].map(|name| {
+                let event = events
+                    .as_array()
+                    .and_then(|a| a.iter().find(|e| e["event"] == name))
+                    .cloned()
+                    .unwrap_or_else(|| panic!("no {name} in {events}"));
+                (event["commit_id"].clone(), event["commit_url"].clone())
+            })
+        }
+    };
+    let shown = |sha: String| {
+        (
+            json!(sha),
+            json!(format!("{}/{PUBLIC}/commits/{sha}", server.base)),
+        )
+    };
+    let hidden = (Value::Null, Value::Null);
+    // Then only the installation that reads contents sees either commit
+    assert_eq!(commits("ghs_issues_reader").await, [hidden.clone(), hidden]);
+    assert_eq!(
+        commits("ghs_contents_reader").await,
+        [
+            shown(rewrite.to_string()),
+            shown(merged["sha"].as_str().unwrap_or_default().to_owned())
+        ]
+    );
 }
 
 #[tokio::test]

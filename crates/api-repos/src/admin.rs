@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -10,7 +11,7 @@ use hubdouble_git::{Git, ObjectId};
 use hubdouble_model::{AccountKind, ApiError, Release, Repo, Visibility};
 use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
 use hubdouble_rest::Params;
-use hubdouble_store::{Accounts, Releases, RepoRedirects, Repos, Tx, TxMut};
+use hubdouble_store::{Accounts, Releases, RepoRedirects, Repos, Table, Tx, TxMut};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -27,6 +28,7 @@ pub(crate) fn register(r: &mut Registrar<'_>) {
             edit_repo(tx, services, params, body, refresh_workflows)
         }),
     );
+    r.store.register_table::<DeletedRepos>();
     r.admin
         .route(Method::DELETE, "/repos/{owner}/{repo}", route(delete_repo));
     r.admin
@@ -319,8 +321,30 @@ fn delete_repo(
     let s: SenderOnly = decode(body)?;
     let sender = sender(tx, s.sender.as_deref(), repo.owner_id)?;
     crate::emit(tx, "repository", "deleted", repo.id, sender, Map::new());
+    let owner = tx
+        .table::<Accounts>()
+        .get(repo.owner_id)
+        .map_or_else(String::new, |a| a.login.clone());
+    tx.table_mut::<DeletedRepos>()
+        .get_mut()
+        .0
+        .insert(repo.id, format!("{owner}/{}", repo.name));
     tx.table_mut::<Repos>().remove(repo.id);
     Ok(None)
+}
+
+/// The last `owner/name` of each deleted repository. An issue event keeps naming a commit of
+/// one in its `commit_url`, as GitHub does for a deleted fork.
+#[derive(Clone, Default)]
+pub struct DeletedRepos(HashMap<i64, String>);
+
+impl Table for DeletedRepos {}
+
+impl DeletedRepos {
+    #[must_use]
+    pub fn name(&self, repo_id: i64) -> Option<&str> {
+        self.0.get(&repo_id).map(String::as_str)
+    }
 }
 
 #[derive(Deserialize)]

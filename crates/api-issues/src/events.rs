@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use hubdouble_api_pulls::{Reviewer, StateEvent, StateEvents, StateKind};
+use hubdouble_api_repos::DeletedRepos;
 use hubdouble_auth::{Actor, Target};
 use hubdouble_git::ObjectId;
 use hubdouble_model::{
@@ -271,10 +272,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             What::Merged(Some(sha))
             | What::AtCommit {
                 repo_id: None, sha, ..
-            } => (
-                Some(sha.clone()),
-                Some(format!("{}/repos/{full}/commits/{sha}", urls.api)),
-            ),
+            } => commit_in(tx, urls, actor, repo.id, sha),
             What::AtCommit {
                 repo_id: Some(repo_id),
                 sha,
@@ -367,21 +365,22 @@ fn commit_in(
     repo_id: i64,
     sha: impl std::fmt::Display,
 ) -> (Option<String>, Option<String>) {
-    match tx.table::<Repos>().get(repo_id) {
+    let full = match tx.table::<Repos>().get(repo_id) {
         Some(repo)
             if hubdouble_auth::authorize(tx, actor, &READ_COMMIT, Target::Repo(repo)).is_ok() =>
         {
-            (
-                Some(sha.to_string()),
-                Some(format!(
-                    "{}/repos/{}/commits/{sha}",
-                    urls.api,
-                    full_name(tx, repo)
-                )),
-            )
+            full_name(tx, repo)
         }
-        _ => (None, None),
-    }
+        Some(_) => return (None, None),
+        None => match tx.table::<DeletedRepos>().name(repo_id) {
+            Some(name) => name.to_owned(),
+            None => return (None, None),
+        },
+    };
+    (
+        Some(sha.to_string()),
+        Some(format!("{}/repos/{full}/commits/{sha}", urls.api)),
+    )
 }
 
 const READ_COMMIT: Requirement = Requirement {
