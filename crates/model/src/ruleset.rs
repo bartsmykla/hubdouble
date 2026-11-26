@@ -3,29 +3,65 @@ use serde_json::Value;
 use crate::{Enforcement, Repo, Ruleset, RulesetSource, RulesetTarget};
 
 /// GitHub's ruleset `fnmatch` patterns: `*` matches within one path segment, `?` one character
-/// other than `/`, `**/` zero or more whole segments, and `**` anything.
+/// other than `/`, `**/` zero or more whole segments, and `**` anything. The cost is the
+/// pattern length times the text length.
 #[must_use]
 pub fn glob(pattern: &str, text: &str) -> bool {
-    matches(pattern.as_bytes(), text.as_bytes())
+    let literal = pattern
+        .bytes()
+        .take_while(|b| !matches!(b, b'*' | b'?'))
+        .count();
+    let (head, pattern) = pattern.as_bytes().split_at(literal);
+    let Some(text) = text.as_bytes().strip_prefix(head) else {
+        return false;
+    };
+    if pattern.is_empty() {
+        return text.is_empty();
+    }
+    let mut tokens = Vec::with_capacity(pattern.len());
+    let mut rest = pattern;
+    while let Some(&first) = rest.first() {
+        let (token, len) = match rest {
+            [b'*', b'*', b'/', ..] => (Token::Segments, 3),
+            [b'*', b'*', ..] => (Token::Anything, 2),
+            [b'*', ..] => (Token::InSegment, 1),
+            [b'?', ..] => (Token::One, 1),
+            _ => (Token::Byte(first), 1),
+        };
+        tokens.push(token);
+        rest = rest.get(len..).unwrap_or_default();
+    }
+    let n = text.len();
+    let mut later = vec![false; n + 1];
+    later[n] = true;
+    let mut row = vec![false; n + 1];
+    for token in tokens.iter().rev() {
+        let mut slash_ahead = false;
+        for j in (0..=n).rev() {
+            let c = text.get(j).copied();
+            let then = |row: &[bool]| row.get(j + 1).copied().unwrap_or(false);
+            row[j] = match token {
+                Token::Byte(b) => c == Some(*b) && then(&later),
+                Token::One => c.is_some_and(|c| c != b'/') && then(&later),
+                Token::InSegment => later[j] || (c.is_some_and(|c| c != b'/') && then(&row)),
+                Token::Anything => later[j] || (c.is_some() && then(&row)),
+                Token::Segments => {
+                    slash_ahead |= c == Some(b'/') && then(&later);
+                    later[j] || slash_ahead
+                }
+            };
+        }
+        std::mem::swap(&mut row, &mut later);
+    }
+    later[0]
 }
 
-fn matches(p: &[u8], t: &[u8]) -> bool {
-    match p {
-        [] => t.is_empty(),
-        [b'*', b'*', b'/', rest @ ..] => {
-            matches(rest, t)
-                || t.iter()
-                    .enumerate()
-                    .any(|(i, &c)| c == b'/' && matches(rest, &t[i + 1..]))
-        }
-        [b'*', b'*', rest @ ..] => (0..=t.len()).any(|i| matches(rest, &t[i..])),
-        [b'*', rest @ ..] => {
-            let segment = t.iter().position(|&c| c == b'/').unwrap_or(t.len());
-            (0..=segment).any(|i| matches(rest, &t[i..]))
-        }
-        [b'?', rest @ ..] => matches!(t, [c, ..] if *c != b'/') && matches(rest, &t[1..]),
-        [c, rest @ ..] => t.first() == Some(c) && matches(rest, &t[1..]),
-    }
+enum Token {
+    Byte(u8),
+    One,
+    InSegment,
+    Anything,
+    Segments,
 }
 
 fn admits(condition: &Value, name: &str, alias: impl Fn(&str) -> Option<bool>) -> bool {
@@ -147,8 +183,36 @@ mod tests {
             ("refs/heads/v?", "refs/heads/v1", true),
             ("refs/heads/v?", "refs/heads/v10", false),
             ("refs/heads/*-dev", "refs/heads/feature-dev", true),
+            ("refs/heads/**/*", "refs/heads/a", true),
+            ("refs/heads/**/x", "refs/heads/x", true),
+            ("refs/**/heads/x", "refs/heads/x", true),
+            ("refs/**/x", "refs/a/b/x", true),
+            ("refs/**/x", "refs/ax", false),
+            ("refs/**x", "refs/a/bx", true),
+            ("*", "a/b", false),
+            ("a*", "a", true),
+            ("?", "/", false),
+            ("", "", true),
+            ("", "a", false),
         ] {
             assert_eq!(glob(pattern, text), want, "{pattern} against {text}");
+        }
+    }
+
+    #[test]
+    fn a_pattern_that_backtracks_on_every_star_still_gets_its_answer() {
+        let stars = format!("{}b", "a*".repeat(15));
+        let deep = format!("{}b", "**/".repeat(7));
+        for (pattern, text, want) in [
+            (stars.clone(), "a".repeat(200), false),
+            (stars, format!("{}b", "a".repeat(200)), true),
+            (deep.clone(), "a/".repeat(100), false),
+            (deep, format!("{}b", "a/".repeat(100)), true),
+        ] {
+            // Given a pattern whose stars a backtracking match would retry at each position
+            // When it meets a long text
+            // Then it answers as the glob rules say
+            assert_eq!(glob(&pattern, &text), want, "{}", &pattern[..4]);
         }
     }
 
