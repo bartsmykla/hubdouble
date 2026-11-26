@@ -1,7 +1,9 @@
 use http::{Method, StatusCode};
 use hubdouble_git::{Commit, ObjectData, ObjectId, Signature};
 use hubdouble_model::{Clock, node_id};
-use hubdouble_testkit::fixture::{ALICE_ID, ALICE_TOKEN, CAROL_TOKEN, PUBLIC_REPO_ID};
+use hubdouble_testkit::fixture::{
+    ALICE_ID, ALICE_TOKEN, BOB_ID, CAROL_TOKEN, PRIVATE_REPO_ID, PUBLIC_REPO_ID,
+};
 use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer, validate};
 use serde_json::{Value, json};
 
@@ -19,20 +21,27 @@ fn checked(answer: &Answer, status: StatusCode) -> Value {
 }
 
 fn head(server: &TestServer, name: &str) -> ObjectId {
+    head_in(server, PUBLIC_REPO_ID, name)
+}
+
+fn head_in(server: &TestServer, repo: i64, name: &str) -> ObjectId {
     let services = server.server.services();
     services
         .store
-        .view(|tx| Ok(services.git.resolve_ref(tx, PUBLIC_REPO_ID, name)?))
+        .view(|tx| Ok(services.git.resolve_ref(tx, repo, name)?))
         .unwrap_or_else(|e| panic!("resolve {name}: {e:?}"))
 }
 
 fn commit(server: &TestServer, parent: ObjectId, message: &str) -> ObjectId {
+    commit_in(server, PUBLIC_REPO_ID, parent, message)
+}
+
+fn commit_in(server: &TestServer, repo: i64, parent: ObjectId, message: &str) -> ObjectId {
     let services = server.server.services();
     services
         .store
         .view(|tx| {
-            let ObjectData::Commit(base) = services.git.object(tx, PUBLIC_REPO_ID, parent)?.data
-            else {
+            let ObjectData::Commit(base) = services.git.object(tx, repo, parent)?.data else {
                 panic!("{parent} is not a commit");
             };
             let author = Signature {
@@ -43,7 +52,7 @@ fn commit(server: &TestServer, parent: ObjectId, message: &str) -> ObjectId {
             };
             Ok(services.git.write_commit(
                 tx,
-                PUBLIC_REPO_ID,
+                repo,
                 &Commit {
                     tree: base.tree,
                     parents: vec![parent],
@@ -58,19 +67,22 @@ fn commit(server: &TestServer, parent: ObjectId, message: &str) -> ObjectId {
 }
 
 fn push(server: &TestServer, name: &str, before: ObjectId, after: ObjectId) {
+    push_in(server, (PUBLIC_REPO_ID, ALICE_ID), name, (before, after));
+}
+
+fn push_in(
+    server: &TestServer,
+    (repo, pusher): (i64, i64),
+    name: &str,
+    (before, after): (ObjectId, ObjectId),
+) {
     let services = server.server.services();
     services
         .store
         .update(|tx| {
-            Ok(services.git.update_ref(
-                tx,
-                PUBLIC_REPO_ID,
-                ALICE_ID,
-                name,
-                Some(before),
-                Some(after),
-                false,
-            )?)
+            Ok(services
+                .git
+                .update_ref(tx, repo, pusher, name, Some(before), Some(after), false)?)
         })
         .unwrap_or_else(|e| panic!("move {name} to {after}: {e:?}"));
 }
@@ -474,4 +486,82 @@ async fn a_pushed_commit_that_names_an_issue_without_closing_it_records_referenc
         .as_array()
         .map_or_default(|a| a.iter().map(|e| &e["event"]).collect());
     assert_eq!(kinds, [&json!("referenced"), &json!("closed")]);
+}
+
+#[tokio::test]
+async fn a_commit_in_a_private_repository_shows_only_to_a_viewer_who_can_read_it() {
+    // Given a public issue, and a commit in the private repository that names it
+    let server = TestServer::builder()
+        .fixture()
+        .frame(hubdouble_api::register_all)
+        .start()
+        .await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let (number, path) = open_issue(&alice, PUBLIC).await;
+    let base = head_in(&server, PRIVATE_REPO_ID, MAIN);
+    let named = commit_in(
+        &server,
+        PRIVATE_REPO_ID,
+        base,
+        &format!("Touch acme/public#{number}"),
+    );
+    // When the commit goes to the private main
+    push_in(&server, (PRIVATE_REPO_ID, ALICE_ID), MAIN, (base, named));
+    let reader = GoGithub::new(&server).with_token(CAROL_TOKEN);
+    let stranger = GoGithub::new(&server);
+    for (viewer, reads) in [(&reader, true), (&stranger, false)] {
+        // Then each viewer gets the referenced event, with the commit only when it reads
+        // the private repository
+        let events = checked(&viewer.get(&format!("{path}/events")).await, StatusCode::OK);
+        let referenced: Vec<&Value> = events
+            .as_array()
+            .map_or_default(|a| a.iter().filter(|e| e["event"] == "referenced").collect());
+        assert_eq!(referenced.len(), 1, "{events}");
+        let (id, url) = if reads {
+            (
+                json!(named),
+                json!(format!("{}/{PRIVATE}/commits/{named}", server.base)),
+            )
+        } else {
+            (Value::Null, Value::Null)
+        };
+        assert_eq!(referenced[0]["commit_id"], id, "{reads}");
+        assert_eq!(referenced[0]["commit_url"], url, "{reads}");
+    }
+}
+
+#[tokio::test]
+async fn a_push_references_a_private_issue_only_when_the_pusher_can_read_it() {
+    // Given an issue in the private repository, which bob cannot read
+    let server = TestServer::builder()
+        .fixture()
+        .frame(hubdouble_api::register_all)
+        .start()
+        .await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let (number, path) = open_issue(&alice, PRIVATE).await;
+    let base = head(&server, MAIN);
+    let by_bob = commit(&server, base, &format!("Touch acme/private#{number}"));
+    let by_alice = commit(
+        &server,
+        by_bob,
+        &format!("Touch acme/private#{number} again"),
+    );
+    // When bob pushes the first commit, and alice the second
+    push_in(&server, (PUBLIC_REPO_ID, BOB_ID), MAIN, (base, by_bob));
+    push_in(
+        &server,
+        (PUBLIC_REPO_ID, ALICE_ID),
+        MAIN,
+        (by_bob, by_alice),
+    );
+    // Then only alice's push records a referenced event
+    let events = checked(&alice.get(&format!("{path}/events")).await, StatusCode::OK);
+    let commits: Vec<&Value> = events.as_array().map_or_default(|a| {
+        a.iter()
+            .filter(|e| e["event"] == "referenced")
+            .map(|e| &e["commit_id"])
+            .collect()
+    });
+    assert_eq!(commits, [&json!(by_alice)]);
 }

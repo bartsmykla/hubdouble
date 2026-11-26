@@ -18,27 +18,21 @@ const PULLS_READ: Requirement = Requirement {
     ..ISSUES_READ
 };
 
-fn closes(text: &str, full_name: &str, number: i64, local: bool) -> bool {
-    closing_references(text).any(|(qualifier, target)| {
+fn closes(text: &str, (web, full_name, number): (&str, &str, i64), local: bool) -> bool {
+    closing_references(text, web).any(|(qualifier, target)| {
         target == number
             && ((local && qualifier.is_empty()) || qualifier.eq_ignore_ascii_case(full_name))
     })
 }
 
-fn keyword_link(
-    source: &Repo,
-    pull: &Issue,
-    issue_repo: i64,
-    full_name: &str,
-    number: i64,
-) -> bool {
+fn keyword_link(source: &Repo, pull: &Issue, issue_repo: i64, named: (&str, &str, i64)) -> bool {
     pull.pull
         .as_ref()
         .is_some_and(|p| p.base.ref_name == source.default_branch)
         && pull
             .body
             .as_deref()
-            .is_some_and(|body| closes(body, full_name, number, source.id == issue_repo))
+            .is_some_and(|body| closes(body, named, source.id == issue_repo))
 }
 
 fn association(cx: &Ctx<'_>, repo_id: i64, user_id: i64) -> Result<Resolved, GqlError> {
@@ -135,7 +129,11 @@ fn closed_by(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError
     let exclude_user_linked = args.get::<bool>("excludeUserLinked")?.unwrap_or(false);
     let repo = read_repo(ctx, issue.repo_id, &PULLS_READ)?;
     let full = full_name(ctx.tx, repo);
-    let full = full.as_str();
+    let named = (
+        ctx.tx.config().web_url.as_str(),
+        full.as_str(),
+        issue.number,
+    );
     let issues = ctx.tx.table::<Issues>();
     let mut pulls: Vec<&Arc<Issue>> = if user_linked_only {
         Vec::new()
@@ -147,7 +145,7 @@ fn closed_by(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError
             .flat_map(|source| {
                 issues
                     .in_repo(source.id)
-                    .filter(move |i| keyword_link(source, i, repo.id, full, issue.number))
+                    .filter(move |i| keyword_link(source, i, repo.id, named))
             })
             .collect()
     };
@@ -290,17 +288,13 @@ mod tests {
 
     #[test]
     fn a_closing_keyword_links_the_issue_it_names() {
-        assert!(closes("Fixes #12", "acme/public", 12, true));
-        assert!(closes(
-            "This resolves: acme/public#12.",
-            "acme/public",
-            12,
-            false
-        ));
-        assert!(closes("(closes #12)", "ACME/Public", 12, true));
-        assert!(!closes("Fixes #12", "acme/public", 12, false));
-        assert!(!closes("Fixes #123", "acme/public", 12, true));
-        assert!(!closes("See #12", "acme/public", 12, true));
-        assert!(!closes("fixes other/repo#12", "acme/public", 12, true));
+        let named = ("https://github.com", "acme/public", 12);
+        assert!(closes("Fixes #12", named, true));
+        assert!(closes("This resolves: acme/public#12.", named, false));
+        assert!(closes("(closes #12)", ("", "ACME/Public", 12), true));
+        assert!(!closes("Fixes #12", named, false));
+        assert!(!closes("Fixes #123", named, true));
+        assert!(!closes("See #12", named, true));
+        assert!(!closes("fixes other/repo#12", named, true));
     }
 }

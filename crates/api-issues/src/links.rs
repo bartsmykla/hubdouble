@@ -4,7 +4,7 @@ use hubdouble_admin::SeedCtx;
 use hubdouble_auth::repo_role;
 use hubdouble_git::{Git, ObjectId, RefChange};
 use hubdouble_model::{
-    Access, ApiError, Issue, IssueState, Repo, RepoRole, RepositorySelection, Timestamp,
+    Access, ApiError, Issue, IssueState, Repo, RepoRole, RepositorySelection, Timestamp, Visibility,
 };
 use hubdouble_store::{Accounts, Entity, Installations, Issues, Repos, Rows, Tx, TxMut};
 use serde::Deserialize;
@@ -18,22 +18,90 @@ const CLOSING_KEYWORDS: [&str; 9] = [
     "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
 ];
 
-pub(crate) fn closing_references(text: &str) -> impl Iterator<Item = (&str, i64)> {
+pub(crate) fn closing_references<'t>(
+    text: &'t str,
+    web: &'t str,
+) -> impl Iterator<Item = (&'t str, i64)> {
     let mut previous = "";
     text.split_whitespace().filter_map(move |word| {
         let last = std::mem::replace(&mut previous, word);
-        let target = word.trim_end_matches(['.', ',', ';', ')', '!', '?']);
-        let (qualifier, digits) = target.split_once('#')?;
         let keyword = last.trim_start_matches('(').trim_end_matches(':');
-        if CLOSING_KEYWORDS
+        if !CLOSING_KEYWORDS
             .iter()
             .any(|k| k.eq_ignore_ascii_case(keyword))
         {
-            Some((qualifier, digits.parse().ok()?))
-        } else {
-            None
+            return None;
         }
+        let (at, qualifier, number) = references_in(word.trim_start_matches('('), web).next()?;
+        (at == 0).then_some((qualifier, number))
     })
+}
+
+fn references<'t>(text: &'t str, web: &'t str) -> impl Iterator<Item = (&'t str, i64)> {
+    text.split_whitespace()
+        .flat_map(move |word| references_in(word, web).map(|(_, q, n)| (q, n)))
+}
+
+fn references_in<'t>(word: &'t str, web: &'t str) -> impl Iterator<Item = (usize, &'t str, i64)> {
+    word.char_indices()
+        .filter_map(move |(at, _)| reference_at(word, web, at))
+}
+
+fn reference_at<'t>(word: &'t str, web: &str, at: usize) -> Option<(usize, &'t str, i64)> {
+    let bytes = word.as_bytes();
+    let rest = word.get(at..)?;
+    let free = |i: usize| i == 0 || bytes.get(i - 1).is_none_or(|b| !word_byte(*b));
+    if bytes.get(at) == Some(&b'#') {
+        let start = (0..at)
+            .rev()
+            .take_while(|&i| bytes.get(i).is_some_and(|b| name_byte(*b) || *b == b'/'))
+            .last()
+            .unwrap_or(at);
+        let qualifier = word.get(start..at)?;
+        let named = qualifier
+            .split_once('/')
+            .is_some_and(|(o, n)| !o.is_empty() && !n.is_empty() && !n.contains('/'));
+        return (qualifier.is_empty() || named).then_some((
+            start,
+            qualifier,
+            number(rest.get(1..)?)?,
+        ));
+    }
+    if !free(at) {
+        return None;
+    }
+    if rest
+        .get(..3)
+        .is_some_and(|gh| gh.eq_ignore_ascii_case("gh-"))
+    {
+        return Some((at, "", number(rest.get(3..)?)?));
+    }
+    let path = rest.strip_prefix(web)?.strip_prefix('/')?;
+    let mut parts = path.splitn(4, '/');
+    let (owner, name) = (parts.next()?, parts.next()?);
+    let valid = |s: &str| !s.is_empty() && s.bytes().all(name_byte);
+    if !valid(owner) || !valid(name) || parts.next()? != "issues" {
+        return None;
+    }
+    let from = at + web.len() + 1;
+    let qualifier = word.get(from..from + owner.len() + 1 + name.len())?;
+    Some((at, qualifier, number(parts.next()?)?))
+}
+
+fn number(digits: &str) -> Option<i64> {
+    let len = digits.bytes().take_while(u8::is_ascii_digit).count();
+    if digits.as_bytes().get(len).is_some_and(|b| word_byte(*b)) {
+        return None;
+    }
+    digits.get(..len)?.parse().ok()
+}
+
+fn word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn name_byte(b: u8) -> bool {
+    word_byte(b) || matches!(b, b'-' | b'.')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,19 +196,6 @@ pub(crate) fn ref_updated(
     Ok(())
 }
 
-fn references(text: &str) -> impl Iterator<Item = (&str, i64)> {
-    text.split_whitespace().filter_map(|word| {
-        let target = word
-            .trim_start_matches('(')
-            .trim_end_matches(['.', ',', ';', ':', ')', '!', '?']);
-        let (qualifier, digits) = target.split_once('#')?;
-        if !qualifier.is_empty() && qualifier.matches('/').count() != 1 {
-            return None;
-        }
-        Some((qualifier, digits.parse().ok()?))
-    })
-}
-
 fn from_commits(
     tx: &mut TxMut<'_>,
     git: &Git,
@@ -151,18 +206,21 @@ fn from_commits(
     let sender = change.sender;
     let via_app = tx.table::<Accounts>().get(sender).and_then(|a| a.app_id);
     let now = git.now();
+    let web = tx.config().web_url.clone();
     for (sha, commit) in git.newly_reachable_commits(tx, change)? {
+        let message = (commit.message.as_str(), web.as_str());
         let closed = if default {
-            let Some(closed) = close_from(tx, (source, sender, now), sha, &commit.message)? else {
+            let Some(closed) = close_from(tx, (source, sender, now), sha, message)? else {
                 continue;
             };
             closed
         } else {
             Vec::new()
         };
-        let mut named: Vec<Arc<Issue>> = references(&commit.message)
+        let mut named: Vec<Arc<Issue>> = references(message.0, message.1)
             .filter_map(|(qualifier, number)| named_issue(tx, source, qualifier, number))
             .filter(|i| !closed.contains(&i.id))
+            .filter(|i| i.repo_id == source || can_read(tx, sender, i.repo_id))
             .cloned()
             .collect();
         named.sort_unstable_by_key(|i| i.id);
@@ -184,9 +242,9 @@ fn close_from(
     tx: &mut TxMut<'_>,
     (source, sender, now): (i64, i64, Timestamp),
     sha: ObjectId,
-    message: &str,
+    (message, web): (&str, &str),
 ) -> Result<Option<Vec<i64>>, ApiError> {
-    let mut refs = closing_references(message);
+    let mut refs = closing_references(message, web);
     let Some(first) = refs.next() else {
         return Ok(Some(Vec::new()));
     };
@@ -213,6 +271,32 @@ fn close_from(
 }
 
 fn can_push(tx: &Tx, sender: i64, repo_id: i64) -> bool {
+    reaches(
+        tx,
+        sender,
+        repo_id,
+        ("contents", Access::Write, RepoRole::Write),
+    )
+}
+
+fn can_read(tx: &Tx, sender: i64, repo_id: i64) -> bool {
+    tx.table::<Repos>()
+        .get(repo_id)
+        .is_some_and(|r| r.visibility == Visibility::Public)
+        || reaches(
+            tx,
+            sender,
+            repo_id,
+            ("metadata", Access::Read, RepoRole::Read),
+        )
+}
+
+fn reaches(
+    tx: &Tx,
+    sender: i64,
+    repo_id: i64,
+    (permission, access, role): (&str, Access, RepoRole),
+) -> bool {
     let Some(repo) = tx.table::<Repos>().get(repo_id) else {
         return false;
     };
@@ -224,9 +308,9 @@ fn can_push(tx: &Tx, sender: i64, repo_id: i64) -> bool {
                 i.suspended_at.is_none()
                     && (i.repository_selection == RepositorySelection::All
                         || i.repo_ids.contains(&repo.id))
-                    && i.permissions.get("contents") >= Some(&Access::Write)
+                    && i.permissions.get(permission) >= Some(&access)
             }),
-        None => repo_role(tx, sender, repo) >= Some(RepoRole::Write),
+        None => repo_role(tx, sender, repo) >= Some(role),
     }
 }
 
@@ -242,7 +326,8 @@ fn closed_by_merge(tx: &Tx, pull: &Issue, sender: i64) -> Vec<Arc<Issue>> {
     {
         return Vec::new();
     }
-    let mut closed: Vec<Arc<Issue>> = closing_references(pull.body.as_deref().unwrap_or_default())
+    let body = pull.body.as_deref().unwrap_or_default();
+    let mut closed: Vec<Arc<Issue>> = closing_references(body, &tx.config().web_url)
         .filter_map(|(qualifier, number)| referenced_issue(tx, repo.id, qualifier, number))
         .chain(
             tx.table::<IssueLinks>()
@@ -343,7 +428,7 @@ pub fn closing_links(tx: &Tx) -> Vec<(i64, i64)> {
         if p.base.ref_name != source.default_branch {
             continue;
         }
-        for (qualifier, number) in closing_references(body) {
+        for (qualifier, number) in closing_references(body, &tx.config().web_url) {
             let target = if qualifier.is_empty() {
                 Some(source.id)
             } else {
@@ -398,14 +483,59 @@ pub(crate) fn seed(ctx: &mut SeedCtx<'_>, body: Value) -> Result<(), ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use super::closing_references;
+    use super::{closing_references, references};
+
+    const WEB: &str = "https://github.com";
 
     #[test]
     fn closing_references_return_only_the_named_targets() {
-        let text = "See #2. (Fixes #12), resolves: Acme/other#13!\nClosed #bad; close #15.";
+        let text = "See #2. (Fixes #12), resolves: Acme/other#13!\nClosed #bad; close #15.\n\
+                    Fixes GH-25284 fixes: https://github.com/H3rmt/hyprshell/issues/533 \
+                    closes see#16";
         assert_eq!(
-            closing_references(text).collect::<Vec<_>>(),
-            [("", 12), ("Acme/other", 13), ("", 15)]
+            closing_references(text, WEB).collect::<Vec<_>>(),
+            [
+                ("", 12),
+                ("Acme/other", 13),
+                ("", 15),
+                ("", 25284),
+                ("H3rmt/hyprshell", 533)
+            ]
         );
+    }
+
+    #[test]
+    fn references_find_each_complete_reference_in_a_word() {
+        for (text, want) in [
+            (
+                "WIP: add data migration to change regex\n\nThe plan is to add '\\b' or \
+                 similar before and after the regex, in order\nto limit the boundaries of a \
+                 word.  So strings like 'i#1', '[i#1]', '\ni#1', etc. match but strings like \
+                 'gh#cli/cli#1' don't match with the\nregular expression \"i#(\\d+)\".",
+                &[("cli/cli", 1)][..],
+            ),
+            (
+                "gh-159207: Bound Tachyon replay memory on Linux and Windows (#162580)",
+                &[("", 159_207), ("", 162_580)],
+            ),
+            (
+                "Ref https://github.com/python/mypy/issues/22063",
+                &[("python/mypy", 22063)],
+            ),
+            (
+                "#13abc a#14 x/y/z#15 nogh-16 https://example.com/a/b/issues/17",
+                &[],
+            ),
+            (
+                "<https://github.com/a/b/issues/18#issuecomment-1> a/b#19,a/b#20",
+                &[("a/b", 18), ("a/b", 19), ("a/b", 20)],
+            ),
+        ] {
+            // Given text that names issues, from live commits where GitHub recorded them
+            // When its references are read
+            let found: Vec<_> = references(text, WEB).collect();
+            // Then each complete reference counts once, and no partial one
+            assert_eq!(found, want, "{text}");
+        }
     }
 }

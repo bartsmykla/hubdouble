@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use hubdouble_api_pulls::{Reviewer, StateEvent, StateEvents, StateKind};
+use hubdouble_auth::Actor;
 use hubdouble_git::ObjectId;
 use hubdouble_model::{ApiError, Issue, IssueState, StateReason, Timestamp, node_id};
 use hubdouble_render::{self as r, Urls};
@@ -261,6 +262,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     events.extend(extra);
     events.sort_by_key(|e| e.created_at);
     let urls = ctx.urls();
+    let actor = ctx.actor();
     let full = full_name(tx, &repo);
     ctx.page(&events, |e| {
         let (commit_id, commit_url) = match &e.what {
@@ -275,10 +277,8 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
                 repo_id: Some(repo_id),
                 sha,
                 ..
-            } => (Some(sha.clone()), commit_url(tx, urls, *repo_id, sha)),
-            What::CommitClosed { repo_id, sha } => {
-                (Some(sha.to_string()), commit_url(tx, urls, *repo_id, sha))
-            }
+            } => commit_in(tx, urls, actor, *repo_id, sha),
+            What::CommitClosed { repo_id, sha } => commit_in(tx, urls, actor, *repo_id, sha),
             _ => (None, None),
         };
         let mut v = json!({
@@ -358,13 +358,25 @@ fn fields_of(tx: &Tx, urls: &Urls, e: &IssueEvent) -> Vec<(&'static str, Value)>
     }
 }
 
-fn commit_url(tx: &Tx, urls: &Urls, repo_id: i64, sha: impl std::fmt::Display) -> Option<String> {
-    let repo = tx.table::<Repos>().get(repo_id)?;
-    Some(format!(
-        "{}/repos/{}/commits/{sha}",
-        urls.api,
-        full_name(tx, repo)
-    ))
+fn commit_in(
+    tx: &Tx,
+    urls: &Urls,
+    actor: &Actor,
+    repo_id: i64,
+    sha: impl std::fmt::Display,
+) -> (Option<String>, Option<String>) {
+    match tx.table::<Repos>().get(repo_id) {
+        Some(repo) if !hubdouble_auth::can_see(tx, actor, repo) => (None, None),
+        Some(repo) => (
+            Some(sha.to_string()),
+            Some(format!(
+                "{}/repos/{}/commits/{sha}",
+                urls.api,
+                full_name(tx, repo)
+            )),
+        ),
+        None => (Some(sha.to_string()), None),
+    }
 }
 
 fn team(tx: &Tx, urls: &Urls, id: i64) -> Option<r::Team> {
