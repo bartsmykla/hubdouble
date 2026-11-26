@@ -383,7 +383,8 @@ async fn an_app_cannot_set_the_states_only_github_sets() {
 
 #[tokio::test]
 async fn a_suite_keeps_the_1000_newest_runs_of_a_name() {
-    // Given 1001 runs named build in the suite of one App, and one run of another name
+    // Given 1001 runs named build in the suite of one App, and an older and a newer run of
+    // other names
     let mut runs: Vec<Value> = (0..1001)
         .map(|n| {
             json!({"kind": "check_run", "id": 900_000 + n, "repository": "acme/public",
@@ -393,6 +394,11 @@ async fn a_suite_keeps_the_1000_newest_runs_of_a_name() {
     runs.push(
         json!({"kind": "check_run", "id": 901_500, "repository": "acme/public",
         "app": "fixture-app", "name": "lint", "head_sha": "main"}),
+    );
+    runs.insert(
+        0,
+        json!({"kind": "check_run", "id": 899_000, "repository": "acme/public",
+        "app": "fixture-app", "name": "deploy", "head_sha": "main"}),
     );
     // When they are created, as the Checks docs say GitHub limits them
     let server = start(runs).await;
@@ -441,6 +447,28 @@ async fn a_suite_keeps_the_1000_newest_runs_of_a_name() {
     assert_eq!(
         client.get(&format!("{RUNS}/901500")).await.status,
         StatusCode::OK
+    );
+    // When the run older than every build run is renamed to build
+    let renamed = client
+        .call_json(
+            Method::PATCH,
+            &format!("{RUNS}/899000"),
+            &json!({"name": "build"}),
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK);
+    // Then the renamed run stays and the oldest other build run goes
+    let builds = client.get(&named("build")).await.json();
+    assert_eq!(builds["total_count"], 1000);
+    let kept = checked(
+        &client.get(&format!("{RUNS}/899000")).await,
+        200,
+        "checks/get",
+    );
+    assert_eq!(kept["name"], "build");
+    assert_eq!(
+        client.get(&format!("{RUNS}/900002")).await.status,
+        StatusCode::NOT_FOUND
     );
 }
 

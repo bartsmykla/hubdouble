@@ -291,10 +291,10 @@ fn cap_runs_named(tx: &mut TxMut<'_>, run: &CheckRun) {
     let named: Vec<i64> = tx
         .table::<CheckRuns>()
         .children(run.check_suite_id)
-        .filter(|held| held.name == run.name)
+        .filter(|held| held.name == run.name && held.id != run.id)
         .map(|held| held.id)
         .collect();
-    for old in named.iter().rev().skip(MAX_RUNS_PER_NAME) {
+    for old in named.iter().rev().skip(MAX_RUNS_PER_NAME - 1) {
         tx.table_mut::<CheckRuns>().remove(*old);
     }
 }
