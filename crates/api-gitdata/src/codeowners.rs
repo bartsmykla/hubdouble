@@ -82,7 +82,8 @@ fn tokens(line: &str) -> impl Iterator<Item = (usize, &str)> {
 /// follows: a pattern without a slash matches a file or directory name at any depth, a pattern
 /// with a leading or inner slash matches from the root, a trailing slash matches only a
 /// directory, and a pattern that names a directory covers every file below it unless its last
-/// part holds a single `*` (`docs/*` owns `docs/a.md` but not `docs/b/c.md`).
+/// part holds a single `*` and no trailing slash (`docs/*` owns `docs/a.md` but not
+/// `docs/b/c.md`, and `docs/*/` owns `docs/b/c.md` but not `docs/a.md`).
 #[must_use]
 pub fn covers(pattern: &str, path: &str) -> bool {
     let dir_only = pattern.ends_with('/');
@@ -102,7 +103,7 @@ pub fn covers(pattern: &str, path: &str) -> bool {
         }
         prefix.push_str(segment);
         let is_file = i + 1 == segments.len();
-        if (is_file && dir_only) || (!is_file && !into_dirs) {
+        if (is_file && dir_only) || (!is_file && !into_dirs && !dir_only) {
             continue;
         }
         let hit = if anchored {
@@ -374,6 +375,12 @@ mod tests {
             ("**/logs", "deep/logs/x.log", true),
             ("/scripts/ci.sh", "scripts/ci.sh", true),
             ("/scripts/ci.sh", "other/scripts/ci.sh", false),
+            ("docs/*/", "docs/sub/a.md", true),
+            ("docs/*/", "docs/sub/deeper/a.md", true),
+            ("docs/*/", "docs/a.md", false),
+            ("a*/", "apps/main.go", true),
+            ("a*/", "src/apps/main.go", true),
+            ("a*/", "apps", false),
         ] {
             assert_eq!(covers(pattern, path), want, "{pattern} against {path}");
         }
@@ -419,8 +426,12 @@ mod tests {
             "src/apps/main.go",
             "/",
             "logs",
+            "docs/*/",
+            "a*/",
         ];
         let paths = [
+            "docs/sub/a.md",
+            "apps/main.go",
             "apps",
             "apps/x",
             "src/apps/main.go",
