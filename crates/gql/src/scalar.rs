@@ -64,13 +64,6 @@ impl Variables {
     pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
         Exact::new(text).whole_object().map(Self)
     }
-
-    /// Whether `fields`, as `serde_json` read them, may have lost the digits of an integer past
-    /// 64 bits, so that [`Variables::parse`] must read them again.
-    #[must_use]
-    pub fn may_be_wide(fields: &Map<String, Value>) -> bool {
-        fields.values().any(holds_a_large_double)
-    }
 }
 
 impl From<Map<String, Value>> for Variables {
@@ -187,16 +180,11 @@ fn escape_value(value: &mut Value) {
     }
 }
 
-fn holds_a_large_double(value: &Value) -> bool {
-    match value {
-        Value::Number(n) => n.is_f64() && n.as_f64().is_some_and(|f| f.abs() >= 2f64.powi(63)),
-        Value::Array(items) => items.iter().any(holds_a_large_double),
-        Value::Object(fields) => fields.values().any(holds_a_large_double),
-        _ => false,
-    }
-}
-
 const MAX_DEPTH: usize = 255;
+
+fn json_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+}
 
 fn invalid(what: &str) -> serde_json::Error {
     serde::de::Error::custom(what)
@@ -221,7 +209,7 @@ impl<'t> Exact<'t> {
 
     fn peek(&mut self) -> Option<u8> {
         while let Some(b) = self.text.as_bytes().get(self.at) {
-            if !b.is_ascii_whitespace() {
+            if !json_space(*b) {
                 return Some(*b);
             }
             self.bump();
@@ -341,10 +329,12 @@ impl<'t> Exact<'t> {
         let rest = self.text.as_bytes().get(self.at..).unwrap_or_default();
         let len = rest
             .iter()
-            .position(|b| matches!(b, b',' | b']' | b'}') || b.is_ascii_whitespace())
+            .position(|&b| matches!(b, b',' | b']' | b'}') || json_space(b))
             .unwrap_or(rest.len());
         let token = self.token(self.at + len)?;
-        if digits(token.strip_prefix('-').unwrap_or(token))
+        let unsigned = token.strip_prefix('-').unwrap_or(token);
+        if digits(unsigned)
+            && !unsigned.starts_with('0')
             && token.parse::<i64>().is_err()
             && token.parse::<u64>().is_err()
         {
@@ -581,6 +571,25 @@ mod tests {
                 let sent = serde_json::to_string(&Sent(value)).unwrap();
                 assert_eq!(sent, r#"{"\u0000int":"5"}"#);
             }
+        }
+    }
+
+    #[test]
+    fn only_json_whitespace_and_numbers_without_leading_zeros_parse() {
+        for (raw, parses) in [
+            ("{\"n\":\t1\r\n}", true),
+            ("{\"n\":18446744073709551616}", true),
+            ("{\"n\":\u{c}1}", false),
+            ("{\"n\":1\u{c}}", false),
+            ("{\"n\":01}", false),
+            ("{\"n\":018446744073709551616}", false),
+            ("{\"n\":-018446744073709551616}", false),
+        ] {
+            // Given variables that RFC 8259 accepts or refuses
+            // When they are read exactly
+            let read = Variables::parse(raw);
+            // Then only what JSON accepts parses
+            assert_eq!(read.is_ok(), parses, "{raw:?}");
         }
     }
 }
