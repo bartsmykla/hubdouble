@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use hubdouble_auth::repo_role;
 use hubdouble_git::{Git, GitError, ObjectData, ObjectId};
-use hubdouble_model::{AccountKind, ApiError, Repo, RepoRole, Team, TeamPrivacy, glob};
+use hubdouble_model::{AccountKind, ApiError, Repo, RepoRole, Team, TeamPrivacy, codeowners_glob};
 use hubdouble_store::{Accounts, Teams, Tx};
 use serde::Serialize;
 
@@ -107,9 +107,9 @@ pub fn covers(pattern: &str, path: &str) -> bool {
             continue;
         }
         let hit = if anchored {
-            glob(p, &prefix)
+            codeowners_glob(p, &prefix)
         } else {
-            glob(p, segment)
+            codeowners_glob(p, segment)
         };
         if hit {
             return true;

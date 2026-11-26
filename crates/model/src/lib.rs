@@ -4,6 +4,7 @@ mod entity;
 mod error;
 mod event;
 mod git_date;
+mod glob;
 pub mod node_id;
 mod ruby_datetime;
 mod ruby_time;
@@ -15,7 +16,8 @@ pub use config::Config;
 pub use entity::*;
 pub use error::{ApiError, DOCS, FieldError};
 pub use event::Event;
-pub use ruleset::{glob, ref_matches};
+pub use glob::{codeowners_glob, glob};
+pub use ruleset::ref_matches;
 pub use time::{
     Clock, ManualClock, QueryTime, SystemClock, Timestamp, TimestampError, civil_from_days,
 };
