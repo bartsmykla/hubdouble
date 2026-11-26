@@ -133,11 +133,26 @@ impl Inner {
         };
         let graphql_read = (parts.method == Method::GET || parts.method == Method::HEAD)
             && (api_path == "/graphql" || parts.uri.path() == "/api/graphql");
-        if (graphql || graphql_read) && self.anonymous(&parts.headers) {
-            return self.graphql_rate_limited(&parts, peer);
+        let mut who = Who::default();
+        let mut graphql_actor = Actor::Anonymous;
+        if graphql || graphql_read {
+            match self.graphql_sign_in(&parts.headers, &mut who) {
+                Ok(Actor::Anonymous) => return self.graphql_rate_limited(&parts, peer),
+                Ok(actor) => graphql_actor = actor,
+                Err(e) => {
+                    return self.finish(Call {
+                        operation_id: "graphql",
+                        resource: "graphql",
+                        version: "",
+                        result: Err(e),
+                        who,
+                        parts: &parts,
+                    });
+                }
+            }
         }
         if graphql_read {
-            return self.graphql_schema(&parts);
+            return self.graphql_schema(&parts, who);
         }
         let resource = if graphql { "graphql" } else { "core" };
         let version = if graphql {
@@ -163,7 +178,9 @@ impl Inner {
             }
         };
         if graphql {
-            return self.graphql(&parts, &body, urls, version).await;
+            return self
+                .graphql(&parts, &body, urls, (graphql_actor, who))
+                .await;
         }
         self.rest(&parts, api_path, &body, urls, version).await
     }
@@ -352,7 +369,7 @@ impl Inner {
         parts: &RequestParts,
         body: &Bytes,
         urls: &Urls,
-        version: &'static str,
+        (actor, who): (Actor, Who),
     ) -> HttpResponse {
         let mut request = GraphqlBody::parse(body);
         let operation = request
@@ -361,26 +378,15 @@ impl Inner {
             .and_then(|r| r.operation_name.as_deref())
             .unwrap_or("graphql");
         if let Some(fault) = self.fault(parts, operation).await {
-            return self.faulted(parts, "graphql", "graphql", version, fault);
+            return self.faulted(parts, "graphql", "graphql", "", fault);
         }
         let services = &self.services;
-        let mut who = Who::default();
         let variables = request
             .as_mut()
             .ok()
             .and_then(|r| r.variables.take())
             .unwrap_or_default();
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let actor = services.store.view(|tx| {
-                hubdouble_auth::authenticate(tx, services.clock.as_ref(), &parts.headers)
-            })?;
-            who.of(&actor);
-            if matches!(actor, Actor::Anonymous | Actor::App { .. }) {
-                return Err(
-                    ApiError::new(401, "This endpoint requires you to be authenticated.")
-                        .with_docs(GRAPHQL_AUTH_DOCS),
-                );
-            }
             if let Some(unsupported) = unsupported_accept(&parts.headers, &[]) {
                 return Err(unsupported);
             }
@@ -413,36 +419,21 @@ impl Inner {
         self.finish(Call {
             operation_id: "graphql",
             resource: "graphql",
-            version,
+            version: "",
             result,
             who,
             parts,
         })
     }
 
-    fn graphql_schema(&self, parts: &RequestParts) -> HttpResponse {
-        let services = &self.services;
-        let mut who = Who::default();
-        let result = services
-            .store
-            .view(|tx| hubdouble_auth::authenticate(tx, services.clock.as_ref(), &parts.headers))
-            .and_then(|actor| {
-                who.of(&actor);
-                if matches!(actor, Actor::Anonymous | Actor::App { .. }) {
-                    return Err(ApiError::new(
-                        401,
-                        "This endpoint requires you to be authenticated.",
-                    )
-                    .with_docs(GRAPHQL_AUTH_DOCS));
-                }
-                if let Some(unsupported) = unsupported_accept(&parts.headers, &[]) {
-                    return Err(unsupported);
-                }
-                Ok(Reply::raw(
-                    hubdouble_rest::JSON,
-                    self.gql.schema().introspection(),
-                ))
-            });
+    fn graphql_schema(&self, parts: &RequestParts, who: Who) -> HttpResponse {
+        let result = match unsupported_accept(&parts.headers, &[]) {
+            Some(unsupported) => Err(unsupported),
+            None => Ok(Reply::raw(
+                hubdouble_rest::JSON,
+                self.gql.schema().introspection(),
+            )),
+        };
         self.finish(Call {
             operation_id: "graphql",
             resource: "graphql",
@@ -453,12 +444,19 @@ impl Inner {
         })
     }
 
-    fn anonymous(&self, headers: &HeaderMap) -> bool {
+    fn graphql_sign_in(&self, headers: &HeaderMap, who: &mut Who) -> Result<Actor, ApiError> {
         let services = &self.services;
-        services
+        let actor = services
             .store
-            .view(|tx| hubdouble_auth::authenticate(tx, services.clock.as_ref(), headers))
-            .is_ok_and(|actor| matches!(actor, Actor::Anonymous))
+            .view(|tx| hubdouble_auth::authenticate(tx, services.clock.as_ref(), headers))?;
+        who.of(&actor);
+        if matches!(actor, Actor::App { .. }) {
+            return Err(
+                ApiError::new(401, "This endpoint requires you to be authenticated.")
+                    .with_docs(GRAPHQL_AUTH_DOCS),
+            );
+        }
+        Ok(actor)
     }
 
     fn graphql_rate_limited(&self, parts: &RequestParts, peer: IpAddr) -> HttpResponse {

@@ -294,6 +294,27 @@ async fn a_body_over_the_limit_answers_413() {
 }
 
 #[tokio::test]
+async fn a_graphql_token_is_checked_before_the_body_is_read() {
+    // Given a token that GitHub does not know and a GraphQL body over the limit
+    let s = start().await;
+    let stranger = [(
+        "authorization",
+        "token ghp_000000000000000000000000000000000000",
+    )];
+    // When the body is posted
+    let a = send(
+        &mut connect(s.addr).await,
+        Method::POST,
+        "/graphql",
+        &stranger,
+        &[b' '; 100],
+    )
+    .await;
+    // Then the token answers first, as live GitHub answers it before a body error
+    assert_eq!(a.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn graphql_paths_reach_the_graphql_endpoint() {
     let s = start().await;
     for path in ["/graphql", "/api/graphql", "/api/v3/graphql"] {
