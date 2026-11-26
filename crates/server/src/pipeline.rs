@@ -23,6 +23,7 @@ use hubdouble_rest::{Access, Ctx, Entry, Params, Parts, Query, Reply};
 use hubdouble_store::{Accounts, RepoRedirects, Repos, Tx};
 use hyper::body::Incoming;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 const VERSIONS: [&str; 2] = ["2022-11-28", "2026-03-10"];
 const ARCHIVED_WRITES: [&str; 7] = [
@@ -46,6 +47,8 @@ const RATE_LIMIT_DOCS: &str =
     "https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting";
 const GRAPHQL_AUTH_DOCS: &str =
     "https://docs.github.com/graphql/guides/forming-calls-with-graphql#authenticating-with-graphql";
+const GRAPHQL_NO_QUERY: &str = "A query attribute must be specified and must be a string.";
+const GRAPHQL_BAD_VARIABLES: &str = "Failed to parse variables";
 
 pub(crate) type HttpResponse = Response<Full<Bytes>>;
 
@@ -351,16 +354,10 @@ impl Inner {
         urls: &Urls,
         version: &'static str,
     ) -> HttpResponse {
-        let request = match GraphqlBody::parse(body) {
-            Ok(request) => Some(request),
-            Err(Unread::TooDeep) => None,
-            Err(Unread::NotJson) => {
-                let e = ApiError::bad_request("Problems parsing JSON");
-                return self.finish(error_call(parts, "graphql", "graphql", version, e));
-            }
-        };
+        let mut request = GraphqlBody::parse(body);
         let operation = request
             .as_ref()
+            .ok()
             .and_then(|r| r.operation_name.as_deref())
             .unwrap_or("graphql");
         if let Some(fault) = self.fault(parts, operation).await {
@@ -368,9 +365,9 @@ impl Inner {
         }
         let services = &self.services;
         let mut who = Who::default();
-        let mut request = request;
         let variables = request
             .as_mut()
+            .ok()
             .and_then(|r| r.variables.take())
             .unwrap_or_default();
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -387,9 +384,15 @@ impl Inner {
             if let Some(unsupported) = unsupported_accept(&parts.headers, &[]) {
                 return Err(unsupported);
             }
-            let Some(request) = &request else {
-                return Ok(Reply::raw(hubdouble_rest::JSON, Vec::new())
-                    .status(StatusCode::INTERNAL_SERVER_ERROR));
+            let request = match &request {
+                Ok(request) => request,
+                Err(Unread::NotJson) => return Err(ApiError::bad_request("Problems parsing JSON")),
+                Err(Unread::TooDeep) => {
+                    return Ok(Reply::raw(hubdouble_rest::JSON, Vec::new())
+                        .status(StatusCode::INTERNAL_SERVER_ERROR));
+                }
+                Err(Unread::NoQuery) => return graphql_error(GRAPHQL_NO_QUERY),
+                Err(Unread::BadVariables) => return graphql_error(GRAPHQL_BAD_VARIABLES),
             };
             let response = hubdouble_gql::execute(
                 &self.gql,
@@ -662,46 +665,67 @@ struct RestRequest<'r> {
     urls: &'r Urls,
 }
 
-struct GraphqlBody<V> {
+struct GraphqlBody {
     query: String,
     operation_name: Option<String>,
-    variables: Option<V>,
+    variables: Option<hubdouble_gql::Variables>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Unread {
     NotJson,
     TooDeep,
+    NoQuery,
+    BadVariables,
 }
 
-const MAX_VARIABLES_DEPTH: usize = 255;
-
-impl GraphqlBody<hubdouble_gql::Variables> {
+impl GraphqlBody {
     fn parse(body: &[u8]) -> Result<Self, Unread> {
-        if variables_depth(body) > MAX_VARIABLES_DEPTH {
-            return Err(Unread::TooDeep);
-        }
-        let read = unbounded::<GraphqlBody<serde_json::Map<_, _>>>(body);
-        if let Some(read) = read.filter(|r| {
-            !r.variables
-                .as_ref()
-                .is_some_and(hubdouble_gql::Variables::may_be_wide)
-        }) {
-            return Ok(read.with(hubdouble_gql::Variables::from));
-        }
-        let raw =
-            unbounded::<GraphqlBody<&serde_json::value::RawValue>>(body).ok_or(Unread::NotJson)?;
-        let variables = raw
-            .variables
-            .map(|v| hubdouble_gql::Variables::parse(v.get()))
+        let members = unbounded::<Members<'_>>(body).ok_or(Unread::NotJson)?;
+        let variables = match members.variables {
+            Some(raw) if raw.get().starts_with('"') => {
+                let text: String = serde_json::from_str(raw.get()).map_err(|_| Unread::NotJson)?;
+                let text = text.trim_matches([' ', '\t', '\n', '\r']);
+                if text.is_empty() {
+                    None
+                } else {
+                    let inner =
+                        unbounded::<&RawValue>(text.as_bytes()).ok_or(Unread::BadVariables)?;
+                    object_variables(inner)?
+                }
+            }
+            Some(raw) => object_variables(raw)?,
+            None => None,
+        };
+        let query = members
+            .query
+            .and_then(|raw| serde_json::from_str::<String>(raw.get()).ok())
+            .ok_or(Unread::NoQuery)?;
+        let operation_name = members
+            .operation_name
+            .map(|raw| serde_json::from_str::<Option<String>>(raw.get()))
             .transpose()
-            .map_err(|_| Unread::NotJson)?;
-        Ok(GraphqlBody {
-            query: raw.query,
-            operation_name: raw.operation_name,
+            .map_err(|_| Unread::NotJson)?
+            .flatten();
+        Ok(Self {
+            query,
+            operation_name,
             variables,
         })
     }
+}
+
+fn graphql_error(message: &str) -> Result<Reply, ApiError> {
+    Reply::json(&serde_json::json!({ "errors": [{ "message": message }] }))
+}
+
+fn object_variables(raw: &RawValue) -> Result<Option<hubdouble_gql::Variables>, Unread> {
+    if !raw.get().starts_with('{') {
+        return Ok(None);
+    }
+    hubdouble_gql::Variables::parse(raw.get())
+        .map(Some)
+        .map_err(|_| Unread::TooDeep)
 }
 
 fn unbounded<'de, T: Deserialize<'de>>(body: &'de [u8]) -> Option<T> {
@@ -712,66 +736,11 @@ fn unbounded<'de, T: Deserialize<'de>>(body: &'de [u8]) -> Option<T> {
     Some(read)
 }
 
-/// The nesting of the deepest top-level `variables` member of a body, its own object or array
-/// counted as level 1, found without a parse. [`GraphqlBody::parse`] reads a body without
-/// `serde_json`'s recursion limit only after this bounds the one member that it reads into
-/// nested values; it skips every other member without recursion.
-fn variables_depth(body: &[u8]) -> usize {
-    let (mut depth, mut deepest, mut i) = (0usize, 0usize, 0usize);
-    let (mut key_is_variables, mut inside) = (false, false);
-    while let Some(&byte) = body.get(i) {
-        match byte {
-            b'"' => {
-                let start = i;
-                i += 1;
-                while let Some(&c) = body.get(i) {
-                    match c {
-                        b'\\' => i += 2,
-                        b'"' => break,
-                        _ => i += 1,
-                    }
-                }
-                let is_key = body
-                    .get(i + 1..)
-                    .and_then(|rest| rest.iter().find(|c| !c.is_ascii_whitespace()))
-                    == Some(&b':');
-                if depth == 1 && is_key {
-                    key_is_variables = body.get(start..=i).is_some_and(names_variables);
-                }
-            }
-            b'{' | b'[' => {
-                depth += 1;
-                if depth == 2 {
-                    inside = key_is_variables;
-                }
-                if inside {
-                    deepest = deepest.max(depth - 1);
-                }
-            }
-            b'}' | b']' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        i += 1;
-    }
-    deepest
-}
-
-fn names_variables(quoted: &[u8]) -> bool {
-    if quoted.contains(&b'\\') {
-        serde_json::from_slice::<String>(quoted).is_ok_and(|key| key == "variables")
-    } else {
-        quoted == b"\"variables\""
-    }
-}
-
-impl<V> GraphqlBody<V> {
-    fn with<W>(self, f: impl FnOnce(V) -> W) -> GraphqlBody<W> {
-        GraphqlBody {
-            query: self.query,
-            operation_name: self.operation_name,
-            variables: self.variables.map(f),
-        }
-    }
+#[derive(Default)]
+struct Members<'b> {
+    query: Option<&'b RawValue>,
+    operation_name: Option<&'b RawValue>,
+    variables: Option<&'b RawValue>,
 }
 
 #[derive(Deserialize)]
@@ -784,11 +753,11 @@ enum GraphqlField {
     Other,
 }
 
-impl<'de, V: Deserialize<'de>> Deserialize<'de> for GraphqlBody<V> {
+impl<'de> Deserialize<'de> for Members<'de> {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Fields<V>(std::marker::PhantomData<V>);
-        impl<'de, V: Deserialize<'de>> serde::de::Visitor<'de> for Fields<V> {
-            type Value = GraphqlBody<V>;
+        struct Fields;
+        impl<'de> serde::de::Visitor<'de> for Fields {
+            type Value = Members<'de>;
 
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str("a GraphQL request body")
@@ -797,26 +766,24 @@ impl<'de, V: Deserialize<'de>> Deserialize<'de> for GraphqlBody<V> {
             fn visit_map<A: serde::de::MapAccess<'de>>(
                 self,
                 mut map: A,
-            ) -> Result<GraphqlBody<V>, A::Error> {
-                let (mut query, mut operation_name, mut variables) = (None, None, None);
+            ) -> Result<Members<'de>, A::Error> {
+                let mut members = Members::default();
                 while let Some(field) = map.next_key()? {
-                    match field {
-                        GraphqlField::Query => query = Some(map.next_value()?),
-                        GraphqlField::OperationName => operation_name = map.next_value()?,
-                        GraphqlField::Variables => variables = map.next_value()?,
+                    let last = match field {
+                        GraphqlField::Query => &mut members.query,
+                        GraphqlField::OperationName => &mut members.operation_name,
+                        GraphqlField::Variables => &mut members.variables,
                         GraphqlField::Other => {
                             map.next_value::<serde::de::IgnoredAny>()?;
+                            continue;
                         }
-                    }
+                    };
+                    *last = Some(map.next_value()?);
                 }
-                Ok(GraphqlBody {
-                    query: query.ok_or_else(|| serde::de::Error::missing_field("query"))?,
-                    operation_name,
-                    variables,
-                })
+                Ok(members)
             }
         }
-        d.deserialize_map(Fields(std::marker::PhantomData))
+        d.deserialize_map(Fields)
     }
 }
 
@@ -1400,6 +1367,79 @@ mod unit {
         let parsed = GraphqlBody::parse(body.as_bytes());
         // Then it is too deep
         assert_eq!(parsed.err(), Some(Unread::TooDeep));
+    }
+
+    #[test]
+    fn variables_forms_parse_as_github_reads_them() {
+        let objects = |n: usize| format!("{}1{}", r#"{"a":"#.repeat(n), "}".repeat(n));
+        let quoted = |text: &str| serde_json::to_string(text).unwrap_or_default();
+        let arrays = format!("{}{}", "[".repeat(1000), "]".repeat(1000));
+        let used = Ok(true);
+        let unused = Ok(false);
+        for (variables, want) in [
+            (objects(255), used),
+            (objects(256), Err(Unread::TooDeep)),
+            (arrays.clone(), unused),
+            (format!(r#"{},"variables":{{}}"#, objects(300)), used),
+            (
+                format!(r#"{{}},"variables":{}"#, objects(300)),
+                Err(Unread::TooDeep),
+            ),
+            ("null".to_owned(), unused),
+            ("1.5".to_owned(), unused),
+            ("true".to_owned(), unused),
+            ("[[1]]".to_owned(), unused),
+            (quoted(r#"{"n":1}"#), used),
+            (quoted(" {\"n\":1}\n"), used),
+            (quoted(&objects(255)), used),
+            (quoted(&objects(256)), Err(Unread::TooDeep)),
+            (quoted(&arrays), unused),
+            (quoted(""), unused),
+            (quoted("null"), unused),
+            (quoted("[1]"), unused),
+            (quoted("not json"), Err(Unread::BadVariables)),
+            (quoted(r#"{"n":1} x"#), Err(Unread::BadVariables)),
+            (quoted(r#"{"n":1,}"#), Err(Unread::BadVariables)),
+            (format!(r#""not json","variables":{}"#, r#"{"n":1}"#), used),
+            (
+                format!(r#"{},"variables":"not json""#, r#"{"n":1}"#),
+                Err(Unread::BadVariables),
+            ),
+        ] {
+            // Given a body with this variables member, as live GitHub answered it
+            let body = format!(r#"{{"query":"q","variables":{variables}}}"#);
+            // When the body is parsed
+            let parsed = GraphqlBody::parse(body.as_bytes()).map(|b| b.variables.is_some());
+            // Then the variables are used, ignored or refused
+            assert_eq!(parsed, want, "{}", &variables[..variables.len().min(40)]);
+        }
+    }
+
+    #[test]
+    fn a_body_is_checked_for_json_and_depth_before_its_query() {
+        let deep = format!("{}1{}", r#"{"a":"#.repeat(300), "}".repeat(300));
+        for (body, want) in [
+            (
+                format!(r#"{{"query":"q","variables":{deep},}}"#),
+                Unread::NotJson,
+            ),
+            (
+                format!(r#"{{"query":"q",,"variables":{deep}}}"#),
+                Unread::NotJson,
+            ),
+            (r#"{"query":1,}"#.to_owned(), Unread::NotJson),
+            (format!(r#"{{"variables":{deep}}}"#), Unread::TooDeep),
+            ("{}".to_owned(), Unread::NoQuery),
+            (r#"{"query":null}"#.to_owned(), Unread::NoQuery),
+            (r#"{"query":1}"#.to_owned(), Unread::NoQuery),
+            (r#"{"variables":{"a":1}}"#.to_owned(), Unread::NoQuery),
+        ] {
+            // Given a body that GitHub refuses
+            // When the body is parsed
+            let parsed = GraphqlBody::parse(body.as_bytes());
+            // Then the first failed check names the answer
+            assert_eq!(parsed.err(), Some(want), "{}", &body[..body.len().min(40)]);
+        }
     }
 
     #[test]

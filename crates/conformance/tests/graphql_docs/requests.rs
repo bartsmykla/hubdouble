@@ -462,6 +462,53 @@ async fn variables_nest_255_levels_and_a_deeper_body_answers_an_empty_500() {
 }
 
 #[tokio::test]
+async fn the_token_is_checked_before_the_body_and_a_body_error_keeps_its_answer() {
+    let server = server().await;
+    let deep = format!(
+        r#"{{"query":"{{ viewer {{ login }} }}","variables":{}1{}}}"#,
+        r#"{"a":"#.repeat(300),
+        "}".repeat(300)
+    );
+    let valid = r#"{"query":"{ viewer { login } }"}"#;
+    let stranger = client(&server, "ghp_000000000000000000000000000000000000");
+    for body in ["{bad", valid, &deep] {
+        // When a body is posted with a token that GitHub does not know
+        let answer = stranger
+            .call_bytes(Method::POST, "graphql", body.as_bytes().to_vec())
+            .await;
+        // Then it answers 401 whatever the body, as on live GitHub on 2026-11-26
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{}", &body[..4]);
+    }
+    let api = client(&server, fixture::ALICE_TOKEN);
+    let failed = |message: &str| json!({"errors":[{"message":message}]});
+    let no_query = failed("A query attribute must be specified and must be a string.");
+    let used = json!({"data":{"viewer":{"login":fixture::ALICE}}});
+    let quoted = r#"{"query":"query($s: Boolean!) { viewer { login @include(if: $s) } }","variables":"{\"s\":true}"}"#;
+    let not_json = r#"{"query":"{ viewer { login } }","variables":"not json"}"#;
+    for (body, status, want) in [
+        ("{}", StatusCode::OK, Some(no_query.clone())),
+        (r#"{"query":1}"#, StatusCode::OK, Some(no_query)),
+        (
+            not_json,
+            StatusCode::OK,
+            Some(failed("Failed to parse variables")),
+        ),
+        (quoted, StatusCode::OK, Some(used)),
+        (r#"{"query":1,}"#, StatusCode::BAD_REQUEST, None),
+    ] {
+        // When a body is posted with a known token
+        let answer = api
+            .call_bytes(Method::POST, "graphql", body.as_bytes().to_vec())
+            .await;
+        // Then it answers as live GitHub did on 2026-11-26
+        assert_eq!(answer.status, status, "{body}");
+        if let Some(want) = want {
+            assert_eq!(answer.json(), want, "{body}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn an_int_past_64_bits_keeps_its_digits() {
     // Given an issue next to the pulls, and integers past 64 bits, past 128 bits and past the
     // range of a double
