@@ -652,6 +652,34 @@ async fn a_base_change_that_adds_changes_dismisses_stale_approvals() {
     assert_eq!(hooks[0]["sender"]["login"], "bob");
 }
 
+#[tokio::test]
+async fn a_dismissal_through_the_api_records_its_message_and_no_commit() {
+    // Given bob's approval of the pull request
+    let server = server_with_pull(&[]).await;
+    let alice = client(&server, ALICE_TOKEN);
+    approve(&server, 1).await;
+    let approved = alice.get(&format!("{PULL}/reviews")).await.json()[0].clone();
+    // When alice dismisses it with a message
+    let dismissed = alice
+        .call_json(
+            Method::PUT,
+            &format!("{PULL}/reviews/{}/dismissals", approved["id"]),
+            &json!({"message": "Replaced"}),
+        )
+        .await;
+    assert_eq!(dismissed.status, StatusCode::OK, "{}", dismissed.json());
+    // Then the issue events record it by alice, with the message and without a commit key,
+    // as live GitHub did for pytorch/pytorch event 37307536359 on 2026-11-25
+    let events = dismissals(&alice, 1).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["actor"]["login"], "alice");
+    assert_eq!(
+        events[0]["dismissed_review"],
+        json!({"state": "approved", "review_id": approved["id"], "dismissal_message": "Replaced"})
+    );
+    assert_eq!(events[0]["commit_id"], Value::Null);
+}
+
 fn delete_branch_on_merge(server: &TestServer) {
     server
         .server

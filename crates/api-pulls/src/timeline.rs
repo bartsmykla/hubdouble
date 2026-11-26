@@ -173,7 +173,8 @@ impl Entity for StateEvent {
 
 pub type StateEvents = Rows<StateEvent>;
 
-pub(crate) fn via_app(actor: &Actor) -> Option<i64> {
+#[must_use]
+pub fn via_app(actor: &Actor) -> Option<i64> {
     match actor {
         Actor::Installation { app, .. } => Some(app.id),
         _ => None,

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use hubdouble_api_pulls::{StateKind, review_dismissed, via_app};
 use hubdouble_model::{ApiError, FieldError, Issue, Review, ReviewState, Timestamp, node_id};
 use hubdouble_rest::{Ctx, Registry, Reply};
 use hubdouble_store::{Issues, ReviewComments, Reviews, TxMut};
@@ -364,10 +365,22 @@ fn dismiss(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     }
     let mut dismissed = (*review).clone();
     dismissed.state = ReviewState::Dismissed;
+    let kind = StateKind::ReviewDismissed {
+        review_id: review.id,
+        state: if review.state == ReviewState::Approved {
+            "approved"
+        } else {
+            "changes_requested"
+        },
+        message: Some(message),
+        commit: None,
+    };
+    let (app, now) = (via_app(ctx.actor()), ctx.now());
     let tx = ctx.tx_mut()?;
     tx.table_mut::<Reviews>()
         .replace(dismissed.clone())
         .map_err(|e| ApiError::internal(e.to_string()))?;
+    review_dismissed(tx, &issue, (sender, app), kind, now)?;
     events::review(tx, &issue, sender, &dismissed, "dismissed", None)?;
     Reply::json(&view::rest_view(ctx)?.review(&dismissed, issue.number))
 }

@@ -26,7 +26,7 @@ pub use reopen::{reopen, reopened};
 pub use review_requests::{Reviewer, change_reviewers};
 pub use reviewing::{review_decision, review_submitted};
 pub use state::sync_refs;
-pub use timeline::{StateEvent, StateEvents, StateKind, referenced, review_dismissed};
+pub use timeline::{StateEvent, StateEvents, StateKind, referenced, review_dismissed, via_app};
 
 const fn repo_requirement(grants: &'static [Grant]) -> Requirement {
     Requirement {

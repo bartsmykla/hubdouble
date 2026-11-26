@@ -344,15 +344,17 @@ fn fields_of(tx: &Tx, urls: &Urls, e: &IssueEvent) -> Vec<(&'static str, Value)>
             state,
             message,
             commit,
-        } => vec![(
-            "dismissed_review",
-            json!({
+        } => {
+            let mut review = json!({
                 "state": state,
                 "review_id": review_id,
                 "dismissal_message": message,
-                "dismissal_commit_id": commit,
-            }),
-        )],
+            });
+            if let Some(commit) = commit {
+                review["dismissal_commit_id"] = json!(commit);
+            }
+            vec![("dismissed_review", review)]
+        }
     }
 }
 
