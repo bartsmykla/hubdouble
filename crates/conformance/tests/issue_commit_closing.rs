@@ -634,12 +634,49 @@ async fn a_commit_shows_only_to_a_viewer_who_may_read_the_commit_and_only_while_
         .admin(Method::DELETE, PRIVATE, Some(&json!({})))
         .await;
     assert!(deleted.status.is_success(), "{}", deleted.status);
-    // Then each viewer sees the commit at the repository's last name, as the
-    // head_ref_force_pushed event of cli/cli pull request 14054 named the commit of its
-    // deleted fork MumuTW/cli on 2026-11-26
+    // Then a deleted private repository exposes neither commit field
     let without_contents = commit(GoGithub::new(&server).with_token("ghs_issues_reader")).await;
-    assert_eq!(without_contents, shown);
-    assert_eq!(commit(alice.clone()).await, shown);
+    assert_eq!(without_contents, hidden);
+    assert_eq!(commit(alice).await, hidden);
+}
+
+#[tokio::test]
+async fn a_reference_keeps_its_commit_fields_after_a_public_fork_is_deleted() {
+    const FORK_ID: i64 = 4900;
+    const FORK: &str = "repos/alice/fork";
+    let server = TestServer::builder()
+        .fixture()
+        .entry(
+            json!({"kind": "repository", "id": FORK_ID, "owner": "alice", "name": "fork",
+                       "fork_of": "acme/public"}),
+        )
+        .frame(hubdouble_api::register_all)
+        .start()
+        .await;
+    let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);
+    let (number, path) = open_issue(&alice, PUBLIC).await;
+    let base = head_in(&server, FORK_ID, MAIN);
+    let sha = commit_in(
+        &server,
+        FORK_ID,
+        base,
+        &format!("Touch acme/public#{number}"),
+    );
+    push_in(&server, (FORK_ID, ALICE_ID), MAIN, (base, sha));
+    let deleted = server.admin(Method::DELETE, FORK, Some(&json!({}))).await;
+    assert!(deleted.status.is_success(), "{}", deleted.status);
+    let events = checked(&alice.get(&format!("{path}/events")).await, StatusCode::OK);
+    let event = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event"] == "referenced")
+        .unwrap();
+    assert_eq!(event["commit_id"], json!(sha));
+    assert_eq!(
+        event["commit_url"],
+        json!(format!("{}/{FORK}/commits/{sha}", server.base))
+    );
 }
 
 #[tokio::test]

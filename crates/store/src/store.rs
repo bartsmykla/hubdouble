@@ -58,10 +58,15 @@ impl Tx {
     /// Panics when `T` was never registered on the [`StoreBuilder`].
     #[must_use]
     pub fn table<T: Table>(&self) -> &T {
+        self.try_table::<T>()
+            .unwrap_or_else(|| panic!("table {} is not registered", std::any::type_name::<T>()))
+    }
+
+    #[must_use]
+    pub fn try_table<T: Table>(&self) -> Option<&T> {
         self.tables
             .get(&TypeId::of::<T>())
             .and_then(|t| (&**t as &dyn Any).downcast_ref::<T>())
-            .unwrap_or_else(|| panic!("table {} is not registered", std::any::type_name::<T>()))
     }
 
     pub(crate) fn table_raw_mut<T: Table>(&mut self) -> &mut T {

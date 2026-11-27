@@ -17,7 +17,7 @@ pub use entity::*;
 pub use error::{ApiError, DOCS, FieldError};
 pub use event::Event;
 pub use glob::{codeowners_glob, glob};
-pub use ruleset::ref_matches;
+pub use ruleset::{RepositoryPropertyValues, RulesetRepository, ref_matches};
 pub use time::{
     Clock, ManualClock, QueryTime, SystemClock, Timestamp, TimestampError, civil_from_days,
 };

@@ -1651,8 +1651,8 @@ async fn push_rulesets_refuse_restricted_files_on_every_write() {
     for (rule, path, content) in [
         (
             json!({"type": "file_path_restriction",
-                   "parameters": {"restricted_file_paths": ["secrets/**"]}}),
-            "secrets/key.txt",
+                   "parameters": {"restricted_file_paths": ["src/**", "src/.key"]}}),
+            "src/.key",
             "key\n",
         ),
         (
@@ -1680,7 +1680,7 @@ async fn push_rulesets_refuse_restricted_files_on_every_write() {
         let alice = client(&server, ALICE_TOKEN);
         let main = tip(&alice, "main").await;
         let sha = file_commit(&alice, &main, path, content).await;
-        let fine = file_commit(&alice, &main, "ok.md", "ok\n").await;
+        let fine = file_commit(&alice, &main, "src/.ok", "ok\n").await;
         deliveries(&server).await;
         // When the repository admin moves develop to it through REST
         let answer = alice

@@ -5,9 +5,9 @@ use std::sync::Arc;
 use hubdouble_model::node_id;
 use hubdouble_model::{
     ACTIONS_APP_ID, ACTIONS_APP_SLUG, Access, Account, AccountKind, ApiError, App, Collaborator,
-    Event, Installation, Membership, MembershipState, OrgRole, Repo, RepoRole, RepositorySelection,
-    SquashMergeCommitMessage, SquashMergeCommitTitle, Timestamp, Token, TokenKind, Visibility,
-    Webhook,
+    Event, Installation, Membership, MembershipState, OrgRole, Repo, RepoRole,
+    RepositoryPropertyValues, RepositorySelection, SquashMergeCommitMessage,
+    SquashMergeCommitTitle, Timestamp, Token, TokenKind, Visibility, Webhook,
 };
 use hubdouble_store::{
     Accounts, Apps, Counters, Installations, Memberships, RepoRedirects, Repos, Tokens, Tx, TxMut,
@@ -17,6 +17,7 @@ use serde::de::DeserializeOwned;
 
 use crate::SeedCtx;
 use crate::history::{self, CommitSeed, History, TagSeed, Vcs};
+use crate::properties::RepositoryProperties;
 
 /// The classic scopes a seeded personal token gets when the seed names none.
 pub const DEFAULT_SCOPES: [&str; 4] = ["repo", "workflow", "read:org", "user"];
@@ -338,6 +339,8 @@ struct RepoSeed {
     #[serde(default)]
     topics: Vec<String>,
     #[serde(default)]
+    custom_properties: RepositoryPropertyValues,
+    #[serde(default)]
     visibility: Option<String>,
     #[serde(default)]
     private: Option<bool>,
@@ -505,6 +508,13 @@ fn write_repository(
         pushed_at: None,
     };
     ctx.tx.table_mut::<Repos>().insert(repo.clone())?;
+    if !s.custom_properties.is_empty() {
+        ctx.tx
+            .table_mut::<RepositoryProperties>()
+            .get_mut()
+            .0
+            .insert(id, s.custom_properties);
+    }
     if let Some(parent) = &fork_of {
         history::copy_refs(vcs, &mut ctx.tx, parent.id, id)?;
     }

@@ -52,7 +52,12 @@ pub fn spans(
             let raw = chunk
                 .strip_suffix('\n')
                 .map_or(chunk, |r| r.strip_suffix('\r').unwrap_or(r));
-            let (column, pattern) = tokens(rule_of(raw)?).next()?;
+            let (column, pattern) = tokens(raw).next()?;
+            if pattern.starts_with('#')
+                || (pattern.starts_with(char::is_whitespace) && rule_of(raw).is_none())
+            {
+                return None;
+            }
             let from = at + column - 1;
             Some((i + 1, at..at + raw.len(), from..from + pattern.len()))
         })
@@ -95,19 +100,16 @@ pub fn covers(pattern: &str, path: &str) -> bool {
     }
     let last = p.rsplit('/').next().unwrap_or(p);
     let into_dirs = last == "**" || !last.contains('*');
-    let segments: Vec<&str> = path.split('/').collect();
-    let mut prefix = String::with_capacity(path.len());
-    for (i, segment) in segments.iter().enumerate() {
-        if i > 0 {
-            prefix.push('/');
-        }
-        prefix.push_str(segment);
-        let is_file = i + 1 == segments.len();
+    let mut start = 0;
+    for segment in path.split('/') {
+        let end = start + segment.len();
+        let is_file = end == path.len();
+        start = end + 1;
         if (is_file && dir_only) || (!is_file && !into_dirs && !dir_only) {
             continue;
         }
         let hit = if anchored {
-            codeowners_glob(p, &prefix)
+            codeowners_glob(p, &path[..end])
         } else {
             codeowners_glob(p, segment)
         };
@@ -132,24 +134,22 @@ pub enum Reach<'p> {
 #[must_use]
 pub fn reach(pattern: &str) -> Reach<'_> {
     let trimmed = pattern.trim_end_matches('/');
-    let anchored = trimmed.starts_with('/') || trimmed.contains('/');
     let p = trimmed.trim_start_matches('/');
-    let literal = |s: &str| !s.is_empty() && !s.contains(['*', '?']);
-    if !anchored {
-        return if literal(p) {
-            Reach::Name(p)
-        } else {
-            Reach::Any
-        };
+    let mut start = 0usize;
+    for at in memchr::memchr3_iter(b'/', b'*', b'?', p.as_bytes()) {
+        if p.as_bytes()[at] != b'/' || at == start {
+            return start
+                .checked_sub(1)
+                .map_or(Reach::Any, |end| Reach::Root(&p[..end]));
+        }
+        start = at + 1;
     }
-    let end = p
-        .split('/')
-        .take_while(|s| literal(s))
-        .map(|s| s.len() + 1)
-        .sum::<usize>();
-    match p.get(..end.saturating_sub(1)) {
-        Some(prefix) if !prefix.is_empty() => Reach::Root(prefix),
-        _ => Reach::Any,
+    if p.is_empty() {
+        Reach::Any
+    } else if start != 0 || p.len() != trimmed.len() {
+        Reach::Root(p)
+    } else {
+        Reach::Name(p)
     }
 }
 
@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn spans_name_the_lines_and_patterns_of_the_rules() {
         // Given rules with comments, a blank line, CRLF ends and no final newline
-        let text = "# owners\r\n*.js @a # web\r\n\r\n  /docs/  @b\n#x\nlogs @c";
+        let text = "# owners\r\n*.js @a # web\r\n\r\n  /docs/  @b\n\t#x\nlogs @c";
         // When its spans are read
         let read: Vec<(usize, &str, &str)> = spans(text)
             .map(|(n, raw, pattern)| (n, &text[raw], &text[pattern]))
@@ -470,6 +470,7 @@ mod tests {
         assert_eq!(reach("/build/logs/"), Reach::Root("build/logs"));
         assert_eq!(reach("docs/*"), Reach::Root("docs"));
         assert_eq!(reach("/src/a*/b"), Reach::Root("src"));
+        assert_eq!(reach("/src//docs/*"), Reach::Root("src"));
         assert_eq!(reach("apps/"), Reach::Name("apps"));
         assert_eq!(reach("*.js"), Reach::Any);
         assert_eq!(reach("/a?c/"), Reach::Any);

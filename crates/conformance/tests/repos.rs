@@ -540,6 +540,9 @@ async fn branch_rules_list_the_active_matching_rules_in_pages() {
     );
 }
 
+#[path = "repos/fork_rules.rs"]
+mod fork_rules;
+
 #[tokio::test]
 async fn branch_rules_list_the_rules_of_an_organizations_repository_rulesets() {
     // Given an organization ruleset that targets repositories, as live nodejs/node listed
@@ -584,6 +587,49 @@ async fn branch_rules_list_the_rules_of_an_organizations_repository_rulesets() {
         listed[2]["parameters"],
         json!({"internal": false, "private": false})
     );
+}
+
+#[tokio::test]
+async fn repository_rules_match_all_included_properties_and_no_excluded_property() {
+    let server = start(vec![
+        json!({"kind": "repository", "owner": "acme", "name": "service", "private": true,
+               "custom_properties": {"team": ["edge", "core"]}}),
+        json!({"kind": "repository", "owner": "acme", "name": "public-service",
+               "custom_properties": {"team": ["core"]}}),
+        json!({"kind": "repository", "owner": "acme", "name": "legacy-service", "private": true,
+               "custom_properties": {"team": ["core"], "tier": ["legacy"]}}),
+        json!({"kind": "ruleset", "id": 8260, "org": "acme", "name": "service rules",
+               "target": "repository", "enforcement": "active",
+               "conditions": {"repository_property": {
+                   "include": [{"name": "team", "property_values": ["infra", "core"]},
+                               {"name": "visibility", "source": "system",
+                                "property_values": ["private"]}],
+                   "exclude": [{"name": "tier", "property_values": ["legacy"]}]
+               }},
+               "rules": [{"type": "repository_transfer"}]}),
+    ])
+    .await;
+    for (repo, matches) in [
+        ("service", true),
+        ("public-service", false),
+        ("legacy-service", false),
+    ] {
+        let response = alice(&server)
+            .get(&format!("repos/acme/{repo}/rules/branches/main"))
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let rules = valid("repos/get-branch-rules", &response);
+        let expected = json!({"type": "repository_transfer", "ruleset_source_type": "Organization",
+                   "ruleset_source": "acme", "ruleset_id": 8260});
+        assert_eq!(
+            rules,
+            if matches {
+                json!([expected])
+            } else {
+                json!([])
+            }
+        );
+    }
 }
 
 #[tokio::test]

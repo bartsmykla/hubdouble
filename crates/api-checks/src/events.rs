@@ -1,3 +1,4 @@
+use hubdouble_admin::ruleset_repository;
 use hubdouble_git::{Git, ObjectData, ObjectId, Signature};
 use hubdouble_hooks::emit;
 use hubdouble_model::{ApiError, CheckRun, CheckSuite, Event, Status, node_id};
@@ -243,6 +244,7 @@ fn branches(view: &View<'_>, sha: &str) -> Vec<Value> {
     let Ok(commit) = sha.parse::<ObjectId>() else {
         return Vec::new();
     };
+    let target = ruleset_repository(view.tx, view.repo);
     view.git
         .refs(view.tx, view.repo.id, "refs/heads/")
         .into_iter()
@@ -259,7 +261,7 @@ fn branches(view: &View<'_>, sha: &str) -> Vec<Value> {
                 .tx
                 .table::<Rulesets>()
                 .iter()
-                .any(|rs| rs.applies_to_branch(view.repo, name));
+                .any(|rs| rs.applies_to_branch(target, name));
             json!({
                 "name": name,
                 "commit": { "sha": head, "url": format!("{api}/repos/{full}/commits/{head}") },

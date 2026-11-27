@@ -1,18 +1,20 @@
 /// GitHub's ruleset patterns, Ruby's `File.fnmatch` with `FNM_PATHNAME` and without escapes:
 /// `*` matches within one path segment, `?` one character other than `/`, `[...]` one
 /// character other than `/` in the set (with `a-z` ranges, and `!` or `^` first to negate it),
-/// `**/` zero or more whole segments, and `**` anything. A `[` without its `]` matches nothing.
+/// `**/` at a segment boundary matches zero or more whole segments. A leading dot in a segment
+/// must match a literal dot.
+/// A `[` without its `]` matches nothing.
 /// The cost is at most a small multiple of the pattern length times the text length, and the
 /// stack depth is bounded whatever the pattern.
 #[must_use]
 pub fn glob(pattern: &str, text: &str) -> bool {
-    matches(pattern, text, true)
+    matches::<true>(pattern, text)
 }
 
 /// The CODEOWNERS form of [`glob`], whose docs do not support `[ ]` ranges: a `[` is itself.
 #[must_use]
 pub fn codeowners_glob(pattern: &str, text: &str) -> bool {
-    matches(pattern, text, false)
+    matches::<false>(pattern, text)
 }
 
 const MAX_DEPTH: usize = 64;
@@ -27,34 +29,65 @@ fn is<U: Unit>(unit: U, byte: u8) -> bool {
     unit == U::from(byte)
 }
 
-fn matches(pattern: &str, text: &str, sets: bool) -> bool {
-    let literal = pattern
-        .bytes()
-        .take_while(|&b| !(b == b'*' || b == b'?' || (sets && b == b'[')))
-        .count();
-    let (head, pattern) = pattern.split_at(literal);
-    let Some(text) = text.strip_prefix(head) else {
+fn matches<const SETS: bool>(pattern: &str, text: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let literal = if SETS {
+        memchr::memchr3(b'*', b'?', b'[', bytes)
+    } else {
+        memchr::memchr2(b'*', b'?', bytes)
+    }
+    .unwrap_or(bytes.len());
+    let (head, tail) = bytes.split_at(literal);
+    let Some(path) = text.as_bytes().strip_prefix(head) else {
         return false;
     };
-    match pattern {
-        "" => return text.is_empty(),
-        "*" => return !text.as_bytes().contains(&b'/'),
-        "**" | "**/*" => return true,
+    let segment_start = head.is_empty() || head.ends_with(b"/");
+    let leading_dot = SETS && segment_start && path.starts_with(b".");
+    match tail {
+        b"" => return path.is_empty(),
+        b"*" => return !leading_dot && !path.contains(&b'/'),
+        b"**" => return !SETS || (!leading_dot && !path.contains(&b'/')),
+        b"**/*" if !SETS => return true,
+        b"**/*" if segment_start => return !leading_dot && !has_hidden_child(path),
         _ => {}
     }
-    if pattern.is_ascii() && text.is_ascii() {
-        run(pattern.as_bytes(), text.as_bytes(), sets)
+    let hidden = leading_dot || (SETS && has_hidden_child(path));
+    if tail.is_ascii() && path.is_ascii() {
+        run(tail, path, SETS, segment_start, hidden)
     } else {
-        let pattern: Vec<char> = pattern.chars().collect();
-        let text: Vec<char> = text.chars().collect();
-        run(&pattern, &text, sets)
+        let pattern: Vec<char> = pattern[literal..].chars().collect();
+        let text: Vec<char> = text[literal..].chars().collect();
+        run(&pattern, &text, SETS, segment_start, hidden)
     }
 }
 
-fn run<U: Unit>(pattern: &[U], text: &[U], sets: bool) -> bool {
+fn has_hidden_child(path: &[u8]) -> bool {
+    let Some(last) = path.last_chunk::<9>() else {
+        return path.windows(2).any(|pair| pair == b"/.");
+    };
+    let contains_pair = |block: &[u8; 9]| {
+        block
+            .windows(2)
+            .fold(0u8, |found, pair| found | u8::from(pair == b"/."))
+            != 0
+    };
+    let mut rest = path;
+    while let Some(block) = rest.first_chunk::<9>() {
+        if contains_pair(block) {
+            return true;
+        }
+        rest = &rest[8..];
+    }
+    rest.len() > 1 && contains_pair(last)
+}
+
+fn run<U: Unit>(pattern: &[U], text: &[U], sets: bool, segment_start: bool, hidden: bool) -> bool {
+    if hidden {
+        return tokens_match::<_, true>(pattern, text, sets, segment_start);
+    }
     let mut budget = (pattern.len() + 1) * (text.len() + 1);
-    backtrack(pattern, text, sets, &mut budget, 0)
-        .unwrap_or_else(|| tokens_match(pattern, text, sets))
+    backtrack(pattern, text, sets, &mut budget, 0, segment_start)
+        .unwrap_or_else(|| tokens_match::<_, false>(pattern, text, sets, segment_start))
 }
 
 #[derive(Clone, Copy)]
@@ -68,15 +101,22 @@ enum Token<'p, U> {
     Segments,
 }
 
-fn next_token<U: Unit>(pattern: &[U], sets: bool) -> Option<(Token<'_, U>, usize)> {
+fn next_token<U: Unit>(
+    pattern: &[U],
+    sets: bool,
+    segment_start: bool,
+) -> Option<(Token<'_, U>, usize)> {
     let &first = pattern.first()?;
     let at = |i: usize| pattern.get(i).copied();
     let star = |i: usize| at(i).is_some_and(|u| is(u, b'*'));
     Some(if is(first, b'*') {
         if !star(1) {
             (Token::InSegment, 1)
-        } else if at(2).is_some_and(|u| is(u, b'/')) {
+        } else if (!sets || segment_start) && at(2).is_some_and(|u| is(u, b'/')) {
             (Token::Segments, 3)
+        } else if sets {
+            let stars = pattern.iter().take_while(|&&u| is(u, b'*')).count();
+            (Token::InSegment, stars)
         } else {
             (Token::Anything, 2)
         }
@@ -145,12 +185,13 @@ fn backtrack<U: Unit>(
     sets: bool,
     budget: &mut usize,
     depth: usize,
+    mut segment_start: bool,
 ) -> Option<bool> {
     if depth > MAX_DEPTH {
         return None;
     }
     loop {
-        let Some((token, len)) = next_token(pattern, sets) else {
+        let Some((token, len)) = next_token(pattern, sets, segment_start) else {
             return Some(text.is_empty());
         };
         *budget = budget.checked_sub(len)?;
@@ -164,12 +205,12 @@ fn backtrack<U: Unit>(
             }
             Token::Segments => {
                 *budget = budget.checked_sub(text.len())?;
-                if backtrack(rest, text, sets, budget, depth + 1)? {
+                if backtrack(rest, text, sets, budget, depth + 1, true)? {
                     return Some(true);
                 }
                 for (at, u) in text.iter().enumerate() {
                     let after = text.get(at + 1..).unwrap_or_default();
-                    if slash(u) && backtrack(rest, after, sets, budget, depth + 1)? {
+                    if slash(u) && backtrack(rest, after, sets, budget, depth + 1, true)? {
                         return Some(true);
                     }
                 }
@@ -182,24 +223,42 @@ fn backtrack<U: Unit>(
                 };
                 for at in 0..=end {
                     let after = text.get(at..).unwrap_or_default();
-                    if backtrack(rest, after, sets, budget, depth + 1)? {
+                    if backtrack(rest, after, sets, budget, depth + 1, false)? {
                         return Some(true);
                     }
                 }
                 return Some(false);
             }
             fixed => match text.split_first() {
-                Some((&u, after)) if fits(fixed, u) => (pattern, text) = (rest, after),
+                Some((&u, after)) if fits(fixed, u) => {
+                    (pattern, text) = (rest, after);
+                    segment_start = matches!(fixed, Token::Unit(v) if is(v, b'/'));
+                }
                 _ => return Some(false),
             },
         }
     }
 }
 
-fn tokens_match<U: Unit>(pattern: &[U], text: &[U], sets: bool) -> bool {
+fn leading_dot_at<U: Unit>(text: &[U], at: usize, segment_start: bool) -> bool {
+    text.get(at).is_some_and(|&u| is(u, b'.'))
+        && at
+            .checked_sub(1)
+            .map_or(segment_start, |i| is(text[i], b'/'))
+}
+
+fn tokens_match<U: Unit, const HIDDEN: bool>(
+    pattern: &[U],
+    text: &[U],
+    sets: bool,
+    segment_start: bool,
+) -> bool {
     let mut tokens = Vec::new();
     let mut rest = pattern;
-    while let Some((token, len)) = next_token(rest, sets) {
+    let mut boundary = segment_start;
+    while let Some((token, len)) = next_token(rest, sets, boundary) {
+        boundary =
+            matches!(token, Token::Segments) || matches!(token, Token::Unit(v) if is(v, b'/'));
         tokens.push(token);
         rest = rest.get(len..).unwrap_or_default();
     }
@@ -207,7 +266,7 @@ fn tokens_match<U: Unit>(pattern: &[U], text: &[U], sets: bool) -> bool {
     let mut text = text;
     while let Some((&last, before)) = tokens.split_last() {
         if matches!(last, Token::InSegment | Token::Anything | Token::Segments) {
-            return table(tokens, text);
+            return table::<_, HIDDEN>(tokens, text, segment_start);
         }
         let Some((&u, rest)) = text.split_last() else {
             return false;
@@ -215,12 +274,19 @@ fn tokens_match<U: Unit>(pattern: &[U], text: &[U], sets: bool) -> bool {
         if !fits(last, u) {
             return false;
         }
+        if HIDDEN && leading_dot_at(text, rest.len(), segment_start) {
+            return table::<_, true>(tokens, text, segment_start);
+        }
         (tokens, text) = (before, rest);
     }
     text.is_empty()
 }
 
-fn table<U: Unit>(tokens: &[Token<'_, U>], text: &[U]) -> bool {
+fn table<U: Unit, const HIDDEN: bool>(
+    tokens: &[Token<'_, U>],
+    text: &[U],
+    segment_start: bool,
+) -> bool {
     let n = text.len();
     let mut later = vec![false; n + 1];
     let mut row = vec![false; n + 1];
@@ -231,13 +297,16 @@ fn table<U: Unit>(tokens: &[Token<'_, U>], text: &[U]) -> bool {
             let u = text.get(j).copied();
             let in_segment = u.is_some_and(|u| !is(u, b'/'));
             let next = |r: &[bool]| r.get(j + 1).copied().unwrap_or(false);
+            let hidden = HIDDEN && leading_dot_at(text, j, segment_start);
             row[j] = match token {
-                Token::InSegment => later[j] || (in_segment && next(&row)),
+                Token::InSegment => !hidden && (later[j] || (in_segment && next(&row))),
                 Token::Anything => later[j] || (u.is_some() && next(&row)),
                 Token::Segments => {
-                    slash_ahead |= u.is_some_and(|u| is(u, b'/')) && next(&later);
+                    slash_ahead = !hidden
+                        && (slash_ahead || (u.is_some_and(|u| is(u, b'/')) && next(&later)));
                     later[j] || slash_ahead
                 }
+                Token::One | Token::Set(_, _) if hidden => false,
                 fixed => u.is_some_and(|u| fits(fixed, u)) && next(&later),
             };
         }
@@ -283,6 +352,38 @@ mod tests {
         }
         assert!(codeowners_glob("docs/[1]", "docs/[1]"));
         assert!(!codeowners_glob("docs/[1]", "docs/1"));
+    }
+
+    #[test]
+    fn only_a_literal_dot_matches_the_start_of_a_hidden_component() {
+        for (pattern, text, expected) in [
+            ("src/**", "src/.env", false),
+            ("src/*", "src/.env", false),
+            ("src/**/*", "src/pkg/.cache/data", false),
+            ("src/**/.env", "src/pkg/.env", true),
+            ("src/**/.env", "src/.cache/.env", false),
+            ("**/.config/*", ".config/é", true),
+            ("**/main", ".config/main", false),
+            ("src/*.env", "src/.env", false),
+            ("src/**/*.env", "src/pkg/.env", false),
+            ("**/?env", "pkg/.env", false),
+            ("**/[.]env", "pkg/.env", false),
+            ("src*/**/?.txt", "src/.cache/a.txt", false),
+            ("src/v*", "src/v.1", true),
+        ] {
+            assert_eq!(glob(pattern, text), expected, "{pattern} against {text}");
+        }
+        assert!(codeowners_glob("src/**/*", "src/.cache/data"));
+    }
+
+    #[test]
+    fn recursive_globs_detect_a_hidden_name_at_any_byte_offset() {
+        for length in 1..=24 {
+            let directory = "a".repeat(length);
+            assert!(!glob("**/*", &format!("{directory}/.x")));
+            assert!(!glob("**/*", &format!("{directory}/.x/leaf")));
+            assert!(glob("**/*", &format!("{directory}/x.y")));
+        }
     }
 
     #[test]

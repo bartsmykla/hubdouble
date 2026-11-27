@@ -174,6 +174,8 @@ impl Admin {
 /// Registers P0-F's own kinds (users, orgs, repositories, Apps, installations, tokens) and admin
 /// routes; `hubdouble-api::register_all` calls it before every track.
 pub fn register(r: &mut Registrar<'_>) {
+    r.store
+        .register_table::<crate::properties::RepositoryProperties>();
     r.admin.kind("user", kinds::user_kind);
     r.admin.kind("org", kinds::org_kind);
     r.admin.kind("repository", kinds::repository_kind);
