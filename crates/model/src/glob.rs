@@ -66,9 +66,10 @@ fn has_hidden_child(path: &[u8]) -> bool {
         return path.windows(2).any(|pair| pair == b"/.");
     };
     let contains_pair = |block: &[u8; 9]| {
-        (0..8).fold(false, |found, i| {
-            found | ((block[i] == b'/') & (block[i + 1] == b'.'))
-        })
+        block
+            .windows(2)
+            .fold(0u8, |found, pair| found | u8::from(pair == b"/."))
+            != 0
     };
     let mut rest = path;
     while let Some(block) = rest.first_chunk::<9>() {
