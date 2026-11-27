@@ -2,7 +2,7 @@ use hubdouble_admin::{Registrar, SeedCtx};
 use hubdouble_model::{ApiError, Grant, Requirement, Scope};
 use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::{Entity, Rows};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::configuration::find_org;
@@ -39,8 +39,20 @@ struct Runner {
     group_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ephemeral: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "runner_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    version: Option<RunnerVersion>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(transparent)]
+struct RunnerVersion(Option<String>);
+
+fn runner_version<'de, D: Deserializer<'de>>(input: D) -> Result<Option<RunnerVersion>, D::Error> {
+    RunnerVersion::deserialize(input).map(Some)
 }
 
 #[derive(Deserialize, Serialize)]

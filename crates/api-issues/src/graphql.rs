@@ -8,7 +8,7 @@ use hubdouble_model::{
     AccountKind, ApiError, Grant, Issue, IssueComment, IssueState, Repo, Requirement, node_id,
 };
 use hubdouble_store::{Accounts, IssueComments, Issues, Repos};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::links::{IssueLinks, closing_keyword_issues, closing_references, linked_issues};
 use crate::shared::{ISSUES_READ, READ, full_name};
@@ -17,6 +17,7 @@ const PULLS_READ: Requirement = Requirement {
     any_of: &[Grant::read("pull_requests")],
     ..ISSUES_READ
 };
+const MAX_CLOSING_ISSUES: usize = 10;
 
 fn closes(text: &str, (web, full_name, number): (&str, &str, i64), local: bool) -> bool {
     closing_references(text, web).any(|(qualifier, target)| {
@@ -187,7 +188,11 @@ fn closing_issues(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, Gql
     }
     references.sort_unstable_by_key(|issue| issue.id);
     references.dedup_by_key(|issue| issue.id);
+    references.truncate(MAX_CLOSING_ISSUES);
     references.retain(|issue| read_repo(ctx, issue.repo_id, &ISSUES_READ).is_ok());
+    if let Some(order) = args.get::<IssueOrder>("orderBy")? {
+        order_issues(ctx, &mut references, &order);
+    }
     connection(
         "IssueConnection",
         &references,
@@ -195,6 +200,45 @@ fn closing_issues(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, Gql
         |issue| issue.id.to_string(),
         |issue| issue_object(issue),
     )
+}
+
+#[derive(Deserialize)]
+struct IssueOrder {
+    field: IssueOrderField,
+    direction: Direction,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum IssueOrderField {
+    CreatedAt,
+    UpdatedAt,
+    Comments,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum Direction {
+    Asc,
+    Desc,
+}
+
+fn order_issues(ctx: &Ctx<'_>, issues: &mut [&Arc<Issue>], order: &IssueOrder) {
+    match order.field {
+        IssueOrderField::CreatedAt => {
+            issues.sort_unstable_by_key(|issue| (issue.created_at, issue.id));
+        }
+        IssueOrderField::UpdatedAt => {
+            issues.sort_unstable_by_key(|issue| (issue.updated_at, issue.id));
+        }
+        IssueOrderField::Comments => {
+            let comments = ctx.tx.table::<IssueComments>();
+            issues.sort_by_cached_key(|issue| (comments.children(issue.id).count(), issue.id));
+        }
+    }
+    if matches!(order.direction, Direction::Desc) {
+        issues.reverse();
+    }
 }
 
 fn comment_author(ctx: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {

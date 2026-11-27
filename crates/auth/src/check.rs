@@ -175,7 +175,9 @@ fn repo_access(
             if repo.is_private() {
                 sso(tx, token, user, repo.owner_id, base_url)?;
             }
-            user_to_server(token, req, |app| app_installation(tx, app, repo))?;
+            user_to_server(token, req, is_read(req), |app| {
+                app_installation(tx, app, repo)
+            })?;
             classic_scopes(token, req)?;
             if token.kind == TokenKind::Personal && !is_read(req) {
                 let wanted = if repo.is_private() {
@@ -232,7 +234,7 @@ fn org_access(
         }
         Actor::User { token, user } => {
             sso(tx, token, user, org.id, base_url)?;
-            user_to_server(token, req, |app| {
+            user_to_server(token, req, public_read, |app| {
                 tx.table::<Installations>()
                     .of(app, org.id)
                     .filter(|i| i.suspended_at.is_none())
@@ -269,6 +271,7 @@ fn org_access(
 fn user_to_server<'t>(
     token: &Token,
     req: &Requirement,
+    allow_uninstalled: bool,
     installation: impl FnOnce(i64) -> Option<&'t Installation>,
 ) -> Result<(), ApiError> {
     let Some(app) = token.app_id.filter(|_| token.kind == TokenKind::User) else {
@@ -278,7 +281,7 @@ fn user_to_server<'t>(
         Some(i) => satisfies(req.any_of, |p| {
             implicit_metadata(p, i.permissions.get(p).copied())
         }),
-        None => is_read(req),
+        None => allow_uninstalled,
     };
     if allowed {
         Ok(())

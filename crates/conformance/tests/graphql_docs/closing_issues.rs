@@ -22,6 +22,7 @@ pub(super) async fn run(
         StatusCode::CREATED,
     )
     .await;
+    server.clock.advance(1);
     let manual = post(
         alice,
         &issue_path,
@@ -90,4 +91,86 @@ pub(super) async fn run(
     let next = success(bob, &paged, vars).await;
     assert_eq!(references(&next)["nodes"], json!([second]));
     assert_eq!(references(&next)["pageInfo"]["hasNextPage"], false);
+
+    server.clock.advance(1);
+    assert_orders(
+        alice,
+        bob,
+        &cases.sources["closingIssues"],
+        &visible["number"],
+        &second,
+        &first,
+    )
+    .await;
+}
+
+async fn assert_orders(
+    alice: &GoGithub,
+    bob: &Graphql,
+    document: &str,
+    issue_number: &Value,
+    newer: &Value,
+    recently_updated: &Value,
+) {
+    let issue = format!("{REPO}/issues/{issue_number}");
+    let updated = alice
+        .call_json(Method::PATCH, &issue, &json!({"title": "Updated"}))
+        .await;
+    assert_eq!(updated.status, StatusCode::OK);
+    post(
+        alice,
+        &format!("{issue}/comments"),
+        json!({"body":"A comment"}),
+        StatusCode::CREATED,
+    )
+    .await;
+
+    for (field, first, second) in [
+        ("CREATED_AT", newer, recently_updated),
+        ("UPDATED_AT", recently_updated, newer),
+        ("COMMENTS", recently_updated, newer),
+    ] {
+        let ordered = document.replace(
+            "first: 100",
+            &format!("first: 100, orderBy: {{field: {field}, direction: DESC}}"),
+        );
+        let data = success(bob, &ordered, args(json!({"number":3}))).await;
+        assert_eq!(
+            references(&data)["nodes"],
+            json!([first, second]),
+            "{field}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_pull_request_exposes_at_most_ten_closing_issues() {
+    let server = super::server().await;
+    let client = super::client(&server, hubdouble_testkit::fixture::ALICE_TOKEN);
+    let mut references_in_body = Vec::new();
+    for i in 1..=11 {
+        let issue = post(
+            &client,
+            &format!("{REPO}/issues"),
+            json!({"title":format!("Issue {i}")}),
+            StatusCode::CREATED,
+        )
+        .await;
+        references_in_body.push(format!("Fixes #{}", issue["number"]));
+    }
+    let updated = client
+        .call_json(
+            Method::PATCH,
+            &format!("{REPO}/pulls/3"),
+            &json!({"body":references_in_body.join("\n")}),
+        )
+        .await;
+    assert_eq!(updated.status, StatusCode::OK);
+    let document = include_str!("../../../../docs/inventory/graphql/closingIssues.graphql");
+    let data = success(&Graphql::new(client), document, args(json!({"number":3}))).await;
+    let issues = references(&data)["nodes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("invalid closing issues: {data}"));
+    assert_eq!(issues.len(), 10);
+    assert_eq!(references(&data)["pageInfo"]["hasNextPage"], false);
 }

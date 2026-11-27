@@ -475,7 +475,7 @@ Add a self-hosted runner to an organization. Use an installation token with `org
 | `labels` | List of label objects | Yes |
 | `runner_group_id` | Integer | No |
 | `ephemeral` | Boolean | No |
-| `version` | String | No |
+| `version` | String or null | No |
 
 A label has a string `name`, an optional integer `id`, and an optional `type` of `read-only` or `custom`.
 
