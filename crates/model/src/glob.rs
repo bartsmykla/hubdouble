@@ -30,10 +30,13 @@ fn is<U: Unit>(unit: U, byte: u8) -> bool {
 }
 
 fn matches(pattern: &str, text: &str, sets: bool) -> bool {
-    let literal = pattern
-        .bytes()
-        .take_while(|&b| !(b == b'*' || b == b'?' || (sets && b == b'[')))
-        .count();
+    let bytes = pattern.as_bytes();
+    let literal = if sets {
+        memchr::memchr3(b'*', b'?', b'[', bytes)
+    } else {
+        memchr::memchr2(b'*', b'?', bytes)
+    }
+    .unwrap_or(bytes.len());
     let (head, pattern) = pattern.split_at(literal);
     let Some(text) = text.strip_prefix(head) else {
         return false;
@@ -45,12 +48,10 @@ fn matches(pattern: &str, text: &str, sets: bool) -> bool {
         "*" => return !leading_dot && !text.as_bytes().contains(&b'/'),
         "**" => return !sets || (!leading_dot && !text.as_bytes().contains(&b'/')),
         "**/*" if !sets => return true,
+        "**/*" if segment_start => return !leading_dot && !has_hidden_child(text),
         _ => {}
     }
-    let hidden = leading_dot || (sets && text.contains("/."));
-    if segment_start && pattern == "**/*" {
-        return !hidden;
-    }
+    let hidden = leading_dot || (sets && has_hidden_child(text));
     if pattern.is_ascii() && text.is_ascii() {
         run(
             pattern.as_bytes(),
@@ -64,6 +65,10 @@ fn matches(pattern: &str, text: &str, sets: bool) -> bool {
         let text: Vec<char> = text.chars().collect();
         run(&pattern, &text, sets, segment_start, hidden)
     }
+}
+
+fn has_hidden_child(text: &str) -> bool {
+    text.as_bytes().windows(2).any(|pair| pair == b"/.")
 }
 
 fn run<U: Unit>(pattern: &[U], text: &[U], sets: bool, segment_start: bool, hidden: bool) -> bool {
