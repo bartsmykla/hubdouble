@@ -164,7 +164,9 @@ async fn a_pull_request_exposes_the_same_ten_issues_it_closes_on_merge() {
             StatusCode::CREATED,
         )
         .await;
-        let _ = writeln!(body, "Fixes #{}", issue["number"]);
+        if i < 11 {
+            let _ = writeln!(body, "Fixes #{}", issue["number"]);
+        }
         issue_numbers.push(issue["number"].clone());
     }
     let pull = post(
@@ -174,20 +176,25 @@ async fn a_pull_request_exposes_the_same_ten_issues_it_closes_on_merge() {
         StatusCode::CREATED,
     )
     .await;
+    let manual = server
+        .admin(
+            Method::POST,
+            "issue_link",
+            Some(&json!({"repository": "acme/public", "issue_number": issue_numbers[10], "pull_number": pull["number"]})),
+        )
+        .await;
+    assert_eq!(manual.status, StatusCode::CREATED);
+
     let document = include_str!("../../../../docs/inventory/graphql/closingIssues.graphql");
     let api = Graphql::new(client.clone());
-    let data = success(
-        &api,
-        document,
-        json!({"owner": "acme", "name": "public", "number": pull["number"]}),
-    )
-    .await;
-    let listed = references(&data)["nodes"]
-        .as_array()
-        .unwrap_or_else(|| panic!("invalid closing issues: {data}"));
-    let listed_numbers: Vec<_> = listed.iter().map(|issue| issue["number"].clone()).collect();
-    assert_eq!(listed_numbers, issue_numbers[..10]);
-    assert_eq!(references(&data)["pageInfo"]["hasNextPage"], false);
+    let vars = json!({"owner": "acme", "name": "public", "number": pull["number"]});
+    let mut expected = issue_numbers[..9].to_vec();
+    expected.push(issue_numbers[10].clone());
+    assert_linked_numbers(&api, document, &vars, &expected).await;
+    let manual_only = document.replace("first: 100", "first: 100, userLinkedOnly: true");
+    assert_linked_numbers(&api, &manual_only, &vars, &issue_numbers[10..]).await;
+    let keyword_only = document.replace("first: 100", "first: 100, excludeUserLinked: true");
+    assert_linked_numbers(&api, &keyword_only, &vars, &issue_numbers[..9]).await;
 
     let merged = client
         .call_json(
@@ -197,10 +204,24 @@ async fn a_pull_request_exposes_the_same_ten_issues_it_closes_on_merge() {
         )
         .await;
     assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
-    for (index, number) in issue_numbers.iter().enumerate() {
+    for number in &issue_numbers {
         let issue = client.get(&format!("{PUBLIC}/issues/{number}")).await;
         assert_eq!(issue.status, StatusCode::OK);
-        let state = if index < 10 { "closed" } else { "open" };
+        let state = if expected.contains(number) {
+            "closed"
+        } else {
+            "open"
+        };
         assert_eq!(issue.json()["state"], state, "issue {number}");
     }
+}
+
+async fn assert_linked_numbers(api: &Graphql, document: &str, vars: &Value, expected: &[Value]) {
+    let data = success(api, document, vars.clone()).await;
+    let listed = references(&data)["nodes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("invalid closing issues: {data}"));
+    let numbers: Vec<_> = listed.iter().map(|issue| issue["number"].clone()).collect();
+    assert_eq!(numbers, expected);
+    assert_eq!(references(&data)["pageInfo"]["hasNextPage"], false);
 }

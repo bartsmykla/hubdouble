@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap, btree_map::IntoValues};
-use std::iter::Take;
 use std::sync::Arc;
 
 use hubdouble_model::{Issue, Repo};
@@ -21,7 +20,7 @@ impl ClosingIssue<'_> {
     }
 }
 
-type ClosingIssues<'a> = Take<IntoValues<i64, ClosingIssue<'a>>>;
+type ClosingIssues<'a> = IntoValues<i64, ClosingIssue<'a>>;
 
 pub(crate) fn pull_closing_issues<'a>(tx: &'a Tx, pull: &Issue, repo: &Repo) -> ClosingIssues<'a> {
     let issues = tx.table::<Issues>();
@@ -68,7 +67,25 @@ fn select<'a>(
             })
             .manual = true;
     }
-    targets.into_values().take(MAX_CLOSING_ISSUES)
+    if targets.len() > MAX_CLOSING_ISSUES {
+        let mut manual_slots = targets
+            .values()
+            .filter(|target| target.manual)
+            .count()
+            .min(MAX_CLOSING_ISSUES);
+        let mut keyword_slots = MAX_CLOSING_ISSUES - manual_slots;
+        targets.retain(|_, target| {
+            let remaining = if target.manual {
+                &mut manual_slots
+            } else {
+                &mut keyword_slots
+            };
+            let keep = *remaining > 0;
+            *remaining = remaining.saturating_sub(1);
+            keep
+        });
+    }
+    targets.into_values()
 }
 
 /// The `(pull issue ID, issue ID)` pairs for the closing links of each pull request.
