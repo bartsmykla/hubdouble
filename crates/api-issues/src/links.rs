@@ -1,3 +1,5 @@
+mod targets;
+
 use std::sync::Arc;
 
 use hubdouble_admin::SeedCtx;
@@ -13,6 +15,9 @@ use serde_json::Value;
 use crate::events::{self, What};
 use crate::issues::apply_state;
 use crate::shared::emit_issue;
+
+pub use targets::closing_links;
+pub(crate) use targets::pull_closing_issues;
 
 const CLOSING_KEYWORDS: [&str; 9] = [
     "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
@@ -325,42 +330,12 @@ fn closed_by_merge(tx: &Tx, pull: &Issue, sender: i64) -> Vec<Arc<Issue>> {
     {
         return Vec::new();
     }
-    let mut closed: Vec<Arc<Issue>> = closing_keyword_issues(tx, pull, repo)
-        .chain(linked_issues(tx, pull.id))
+    pull_closing_issues(tx, pull, repo)
+        .map(|link| link.issue)
         .filter(|i| i.state == IssueState::Open)
         .filter(|i| i.repo_id == repo.id || can_push(tx, sender, i.repo_id))
         .cloned()
-        .collect();
-    closed.sort_by_key(|i| i.id);
-    closed.dedup_by_key(|i| i.id);
-    closed
-}
-
-pub(crate) fn linked_issues(tx: &Tx, pull_id: i64) -> impl Iterator<Item = &Arc<Issue>> {
-    let issues = tx.table::<Issues>();
-    tx.table::<IssueLinks>()
-        .iter()
-        .filter(move |link| link.pull_issue_id == pull_id)
-        .filter_map(move |link| issues.get(link.issue_id))
-}
-
-pub(crate) fn closing_keyword_issues<'a>(
-    tx: &'a Tx,
-    pull: &'a Issue,
-    repo: &Repo,
-) -> impl Iterator<Item = &'a Arc<Issue>> {
-    pull.body
-        .as_deref()
-        .filter(|_| {
-            pull.pull
-                .as_ref()
-                .is_some_and(|p| p.base.ref_name == repo.default_branch)
-        })
-        .into_iter()
-        .flat_map(move |body| closing_references(body, &tx.config().web_url))
-        .filter_map(move |(qualifier, number)| {
-            referenced_issue(tx, pull.repo_id, qualifier, number)
-        })
+        .collect()
 }
 
 fn referenced_issue<'a>(
@@ -425,25 +400,6 @@ fn lookup_repo<'a>(tx: &'a Tx, full_name: &str) -> Option<&'a Repo> {
     tx.table::<Repos>()
         .by_name(owner.id, name)
         .map(AsRef::as_ref)
-}
-
-/// Each pull request and an issue that it closes, as `(pull issue ID, issue ID)`: a closing
-/// keyword in the body of a pull request on its repository's default branch, or a manual link.
-#[must_use]
-pub fn closing_links(tx: &Tx) -> Vec<(i64, i64)> {
-    let issues = tx.table::<Issues>();
-    let repos = tx.table::<Repos>();
-    let mut links: Vec<(i64, i64)> = tx
-        .table::<IssueLinks>()
-        .iter()
-        .map(|l| (l.pull_issue_id, l.issue_id))
-        .collect();
-    for pull in issues.iter() {
-        if let Some(source) = repos.get(pull.repo_id) {
-            links.extend(closing_keyword_issues(tx, pull, source).map(|issue| (pull.id, issue.id)));
-        }
-    }
-    links
 }
 
 fn repo_named(tx: &Tx, full_name: &str) -> Result<i64, ApiError> {

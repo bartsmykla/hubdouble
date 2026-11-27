@@ -208,10 +208,11 @@ fn org_access(
     base_url: &str,
 ) -> Result<(), ApiError> {
     let public_read = is_read(req)
-        && req
-            .any_of
-            .iter()
-            .any(|grant| grant.permission != "organization_self_hosted_runners");
+        && (req.any_of.is_empty()
+            || req
+                .any_of
+                .iter()
+                .any(|grant| grant.permission != "organization_self_hosted_runners"));
     match actor {
         Actor::Anonymous if public_read => Ok(()),
         Actor::Anonymous => Err(requires_authentication()),

@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use super::{
     Graphql, Inventory, Method, REPO, StatusCode, TestServer, Value, args, json, post, success,
 };
@@ -144,33 +146,61 @@ async fn assert_orders(
 }
 
 #[tokio::test]
-async fn a_pull_request_exposes_at_most_ten_closing_issues() {
-    let server = super::server().await;
+async fn a_pull_request_exposes_the_same_ten_issues_it_closes_on_merge() {
+    const PUBLIC: &str = "repos/acme/public";
+    let server = TestServer::builder()
+        .fixture()
+        .frame(hubdouble_api::register_all)
+        .start()
+        .await;
     let client = super::client(&server, hubdouble_testkit::fixture::ALICE_TOKEN);
-    let mut references_in_body = Vec::new();
+    let mut issue_numbers = Vec::new();
+    let mut body = String::new();
     for i in 1..=11 {
         let issue = post(
             &client,
-            &format!("{REPO}/issues"),
+            &format!("{PUBLIC}/issues"),
             json!({"title":format!("Issue {i}")}),
             StatusCode::CREATED,
         )
         .await;
-        references_in_body.push(format!("Fixes #{}", issue["number"]));
+        let _ = writeln!(body, "Fixes #{}", issue["number"]);
+        issue_numbers.push(issue["number"].clone());
     }
-    let updated = client
-        .call_json(
-            Method::PATCH,
-            &format!("{REPO}/pulls/3"),
-            &json!({"body":references_in_body.join("\n")}),
-        )
-        .await;
-    assert_eq!(updated.status, StatusCode::OK);
+    let pull = post(
+        &client,
+        &format!("{PUBLIC}/pulls"),
+        json!({"title": "Fix issues", "head": "feature", "base": "main", "body": body}),
+        StatusCode::CREATED,
+    )
+    .await;
     let document = include_str!("../../../../docs/inventory/graphql/closingIssues.graphql");
-    let data = success(&Graphql::new(client), document, args(json!({"number":3}))).await;
-    let issues = references(&data)["nodes"]
+    let api = Graphql::new(client.clone());
+    let data = success(
+        &api,
+        document,
+        json!({"owner": "acme", "name": "public", "number": pull["number"]}),
+    )
+    .await;
+    let listed = references(&data)["nodes"]
         .as_array()
         .unwrap_or_else(|| panic!("invalid closing issues: {data}"));
-    assert_eq!(issues.len(), 10);
+    let listed_numbers: Vec<_> = listed.iter().map(|issue| issue["number"].clone()).collect();
+    assert_eq!(listed_numbers, issue_numbers[..10]);
     assert_eq!(references(&data)["pageInfo"]["hasNextPage"], false);
+
+    let merged = client
+        .call_json(
+            Method::PUT,
+            &format!("{PUBLIC}/pulls/{}/merge", pull["number"]),
+            &json!({}),
+        )
+        .await;
+    assert_eq!(merged.status, StatusCode::OK, "{}", merged.json());
+    for (index, number) in issue_numbers.iter().enumerate() {
+        let issue = client.get(&format!("{PUBLIC}/issues/{number}")).await;
+        assert_eq!(issue.status, StatusCode::OK);
+        let state = if index < 10 { "closed" } else { "open" };
+        assert_eq!(issue.json()["state"], state, "issue {number}");
+    }
 }

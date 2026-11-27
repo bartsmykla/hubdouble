@@ -10,14 +10,13 @@ use hubdouble_model::{
 use hubdouble_store::{Accounts, IssueComments, Issues, Repos};
 use serde::{Deserialize, Serialize};
 
-use crate::links::{IssueLinks, closing_keyword_issues, closing_references, linked_issues};
+use crate::links::{IssueLinks, closing_references, pull_closing_issues};
 use crate::shared::{ISSUES_READ, READ, full_name};
 
 const PULLS_READ: Requirement = Requirement {
     any_of: &[Grant::read("pull_requests")],
     ..ISSUES_READ
 };
-const MAX_CLOSING_ISSUES: usize = 10;
 
 fn closes(text: &str, (web, full_name, number): (&str, &str, i64), local: bool) -> bool {
     closing_references(text, web).any(|(qualifier, target)| {
@@ -162,6 +161,14 @@ fn closed_by(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError
     pulls.retain(|p| include_closed || p.state == IssueState::Open);
     pulls.sort_by_key(|p| p.id);
     pulls.dedup_by_key(|p| p.id);
+    let repos = ctx.tx.table::<Repos>();
+    pulls.retain(|pull| {
+        repos.get(pull.repo_id).is_some_and(|source| {
+            pull_closing_issues(ctx.tx, pull, source).any(|link| {
+                link.issue.id == issue.id && link.matches(user_linked_only, exclude_user_linked)
+            })
+        })
+    });
     connection(
         "PullRequestConnection",
         &pulls,
@@ -179,17 +186,11 @@ fn closing_issues(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, Gql
     let repo = read_repo(ctx, pull.repo_id, &PULLS_READ)?;
     let user_linked_only = args.get::<bool>("userLinkedOnly")?.unwrap_or(false);
     let exclude_user_linked = args.get::<bool>("excludeUserLinked")?.unwrap_or(false);
-    let mut references = Vec::new();
-    if !user_linked_only {
-        references.extend(closing_keyword_issues(ctx.tx, pull, repo));
-    }
-    if !exclude_user_linked {
-        references.extend(linked_issues(ctx.tx, pull.id));
-    }
-    references.sort_unstable_by_key(|issue| issue.id);
-    references.dedup_by_key(|issue| issue.id);
-    references.truncate(MAX_CLOSING_ISSUES);
-    references.retain(|issue| read_repo(ctx, issue.repo_id, &ISSUES_READ).is_ok());
+    let mut references: Vec<_> = pull_closing_issues(ctx.tx, pull, repo)
+        .filter(|link| link.matches(user_linked_only, exclude_user_linked))
+        .map(|link| link.issue)
+        .filter(|issue| read_repo(ctx, issue.repo_id, &ISSUES_READ).is_ok())
+        .collect();
     if let Some(order) = args.get::<IssueOrder>("orderBy")? {
         order_issues(ctx, &mut references, &order);
     }
