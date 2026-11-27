@@ -17,8 +17,8 @@ GitObject.oid	T4	defaultHead,head,implementIssue,peelTags,releasesProbe,tags,ver
 GitSignature.state	T4	createCommit
 Issue.body	T7	implementIssue
 Issue.closedByPullRequestsReferences	T7	implementIssue
-Issue.number	T7	originalCommentEdit
-Issue.repository	T7	originalCommentEdit
+Issue.number	T7	closingIssues,originalCommentEdit
+Issue.repository	T7	closingIssues,originalCommentEdit
 Issue.state	T7	implementIssue
 Issue.title	T7	implementIssue
 IssueComment.author	T7	originalCommentEdit
@@ -29,6 +29,8 @@ IssueComment.id	T7	originalCommentEdit
 IssueComment.issue	T7	originalCommentEdit
 IssueComment.lastEditedAt	T7	originalCommentEdit
 IssueComment.pullRequest	T7	originalCommentEdit
+IssueConnection.nodes	P0-B	closingIssues
+IssueConnection.pageInfo	P0-B	closingIssues
 MarkPullRequestReadyForReviewPayload.pullRequest	T5	ready
 Mutation.addPullRequestReviewThread	T6	fileThread
 Mutation.createCommitOnBranch	T4	createCommit
@@ -36,13 +38,14 @@ Mutation.markPullRequestReadyForReview	T5	ready
 Mutation.resolveReviewThread	T6	resolveThread
 Mutation.updateRefs	T4	updateRefs
 Organization.teams	T3	teams
-PageInfo.endCursor	P0-B	contextThreads,implementPull,implementThreadComments,planThreads,reviewBodies,tags,teams,threadOpenings,threads
-PageInfo.hasNextPage	P0-B	contextThreads,implementPull,implementThreadComments,planThreads,reviewBodies,tags,teams,threadOpenings,threads
+PageInfo.endCursor	P0-B	closingIssues,contextThreads,implementPull,implementThreadComments,planThreads,reviewBodies,tags,teams,threadOpenings,threads
+PageInfo.hasNextPage	P0-B	closingIssues,contextThreads,implementPull,implementThreadComments,planThreads,reviewBodies,tags,teams,threadOpenings,threads
 PageInfo.hasPreviousPage	P0-B	contextThreads
 PullRequest.baseRefName	T5	implementPull
 PullRequest.baseRefOid	T5	implementPull
 PullRequest.baseRepository	T5	implementPull
 PullRequest.body	T5	proposals
+PullRequest.closingIssuesReferences	T7	closingIssues
 PullRequest.commits	T5	proposals
 PullRequest.headRefName	T5	implementIssue,proposals
 PullRequest.headRefOid	T5	implementPull
@@ -102,7 +105,7 @@ PullRequestReviewThreadEdge.node	P0-B	contextThreads
 Query.node	P0-B	implementThreadComments,originalCommentEdit,pullOfNode
 Query.nodes	P0-B	lastEdits
 Query.organization	T3	teams
-Query.repository	T10	access,contextThreads,defaultHead,filesAt,head,holdsFiles,implementIssue,implementPull,peelTags,planThreads,proposalOpen,proposals,releasesProbe,reviewBodies,tags,threadOpenings,threads,versionFiles,versionRef,workflows
+Query.repository	T10	access,closingIssues,contextThreads,defaultHead,filesAt,head,holdsFiles,implementIssue,implementPull,peelTags,planThreads,proposalOpen,proposals,releasesProbe,reviewBodies,tags,threadOpenings,threads,versionFiles,versionRef,workflows
 Query.search	T11	proposals
 Ref.associatedPullRequests	T5	proposalOpen,proposals
 Ref.name	T4	defaultHead,implementIssue,proposalOpen,releasesProbe,tags
@@ -114,9 +117,9 @@ Repository.collaborators	T3	access
 Repository.defaultBranchRef	T4	defaultHead,implementIssue
 Repository.id	T10	head
 Repository.issue	T7	implementIssue
-Repository.nameWithOwner	T10	implementIssue,implementPull,originalCommentEdit,proposals,pullOfNode
+Repository.nameWithOwner	T10	closingIssues,implementIssue,implementPull,originalCommentEdit,proposals,pullOfNode
 Repository.object	T4	filesAt,holdsFiles,implementIssue,peelTags,versionFiles,workflows
-Repository.pullRequest	T5	contextThreads,implementPull,planThreads,reviewBodies,threadOpenings,threads
+Repository.pullRequest	T5	closingIssues,contextThreads,implementPull,planThreads,reviewBodies,threadOpenings,threads
 Repository.ref	T4	head,releasesProbe,versionRef
 Repository.refs	T4	proposalOpen,proposals,releasesProbe,tags
 RepositoryCollaboratorConnection.edges	T3	access

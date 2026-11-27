@@ -236,7 +236,8 @@ async fn the_example_installation_can_read_the_source_and_target() {
         json!({
             "actions": "write", "actions_variables": "read", "checks": "write",
             "contents": "write", "issues": "write", "members": "read",
-            "metadata": "read", "pull_requests": "write", "statuses": "write", "workflows": "write"
+            "metadata": "read", "organization_self_hosted_runners": "read",
+            "pull_requests": "write", "statuses": "write", "workflows": "write"
         })
     );
     let denied = app

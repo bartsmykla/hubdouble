@@ -175,7 +175,9 @@ fn repo_access(
             if repo.is_private() {
                 sso(tx, token, user, repo.owner_id, base_url)?;
             }
-            user_to_server(token, req, |app| app_installation(tx, app, repo))?;
+            user_to_server(token, req, is_read(req), |app| {
+                app_installation(tx, app, repo)
+            })?;
             classic_scopes(token, req)?;
             if token.kind == TokenKind::Personal && !is_read(req) {
                 let wanted = if repo.is_private() {
@@ -205,8 +207,14 @@ fn org_access(
     org: &Account,
     base_url: &str,
 ) -> Result<(), ApiError> {
+    let public_read = is_read(req)
+        && (req.any_of.is_empty()
+            || req
+                .any_of
+                .iter()
+                .any(|grant| grant.permission != "organization_self_hosted_runners"));
     match actor {
-        Actor::Anonymous if is_read(req) => Ok(()),
+        Actor::Anonymous if public_read => Ok(()),
         Actor::Anonymous => Err(requires_authentication()),
         Actor::App { .. } => Err(integration_denied(req)),
         Actor::Installation {
@@ -217,7 +225,7 @@ fn org_access(
             let allowed = if installation.account_id == org.id {
                 satisfies(req.any_of, |p| installation_level(token, installation, p))
             } else {
-                is_read(req)
+                public_read
             };
             if allowed {
                 Ok(())
@@ -227,14 +235,14 @@ fn org_access(
         }
         Actor::User { token, user } => {
             sso(tx, token, user, org.id, base_url)?;
-            user_to_server(token, req, |app| {
+            user_to_server(token, req, public_read, |app| {
                 tx.table::<Installations>()
                     .of(app, org.id)
                     .filter(|i| i.suspended_at.is_none())
                     .map(AsRef::as_ref)
             })?;
             classic_scopes(token, req)?;
-            if is_read(req) {
+            if public_read {
                 return Ok(());
             }
             let role = tx
@@ -264,6 +272,7 @@ fn org_access(
 fn user_to_server<'t>(
     token: &Token,
     req: &Requirement,
+    allow_uninstalled: bool,
     installation: impl FnOnce(i64) -> Option<&'t Installation>,
 ) -> Result<(), ApiError> {
     let Some(app) = token.app_id.filter(|_| token.kind == TokenKind::User) else {
@@ -273,7 +282,7 @@ fn user_to_server<'t>(
         Some(i) => satisfies(req.any_of, |p| {
             implicit_metadata(p, i.permissions.get(p).copied())
         }),
-        None => is_read(req),
+        None => allow_uninstalled,
     };
     if allowed {
         Ok(())

@@ -8,9 +8,9 @@ use hubdouble_model::{
     AccountKind, ApiError, Grant, Issue, IssueComment, IssueState, Repo, Requirement, node_id,
 };
 use hubdouble_store::{Accounts, IssueComments, Issues, Repos};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::links::{IssueLinks, closing_references};
+use crate::links::{IssueLinks, closing_references, pull_closing_issues};
 use crate::shared::{ISSUES_READ, READ, full_name};
 
 const PULLS_READ: Requirement = Requirement {
@@ -161,6 +161,14 @@ fn closed_by(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError
     pulls.retain(|p| include_closed || p.state == IssueState::Open);
     pulls.sort_by_key(|p| p.id);
     pulls.dedup_by_key(|p| p.id);
+    let repos = ctx.tx.table::<Repos>();
+    pulls.retain(|pull| {
+        repos.get(pull.repo_id).is_some_and(|source| {
+            pull_closing_issues(ctx.tx, pull, source).any(|link| {
+                link.issue.id == issue.id && link.matches(user_linked_only, exclude_user_linked)
+            })
+        })
+    });
     connection(
         "PullRequestConnection",
         &pulls,
@@ -171,6 +179,67 @@ fn closed_by(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError
             value: Arc::<Issue>::clone(p),
         },
     )
+}
+
+fn closing_issues(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
+    let pull = obj.get::<Issue>()?;
+    let repo = read_repo(ctx, pull.repo_id, &PULLS_READ)?;
+    let user_linked_only = args.get::<bool>("userLinkedOnly")?.unwrap_or(false);
+    let exclude_user_linked = args.get::<bool>("excludeUserLinked")?.unwrap_or(false);
+    let mut references: Vec<_> = pull_closing_issues(ctx.tx, pull, repo)
+        .filter(|link| link.matches(user_linked_only, exclude_user_linked))
+        .map(|link| link.issue)
+        .filter(|issue| read_repo(ctx, issue.repo_id, &ISSUES_READ).is_ok())
+        .collect();
+    if let Some(order) = args.get::<IssueOrder>("orderBy")? {
+        order_issues(ctx, &mut references, &order);
+    }
+    connection(
+        "IssueConnection",
+        &references,
+        args,
+        |issue| issue.id.to_string(),
+        |issue| issue_object(issue),
+    )
+}
+
+#[derive(Deserialize)]
+struct IssueOrder {
+    field: IssueOrderField,
+    direction: Direction,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum IssueOrderField {
+    CreatedAt,
+    UpdatedAt,
+    Comments,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum Direction {
+    Asc,
+    Desc,
+}
+
+fn order_issues(ctx: &Ctx<'_>, issues: &mut [&Arc<Issue>], order: &IssueOrder) {
+    match order.field {
+        IssueOrderField::CreatedAt => {
+            issues.sort_unstable_by_key(|issue| (issue.created_at, issue.id));
+        }
+        IssueOrderField::UpdatedAt => {
+            issues.sort_unstable_by_key(|issue| (issue.updated_at, issue.id));
+        }
+        IssueOrderField::Comments => {
+            let comments = ctx.tx.table::<IssueComments>();
+            issues.sort_by_cached_key(|issue| (comments.children(issue.id).count(), issue.id));
+        }
+    }
+    if matches!(order.direction, Direction::Desc) {
+        issues.reverse();
+    }
 }
 
 fn comment_author(ctx: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {
@@ -229,6 +298,7 @@ pub(crate) fn register(gql: &mut Registry) {
         cx.load(Target::RepoId(o.get::<Issue>()?.repo_id))
     });
     gql.field("Issue", "closedByPullRequestsReferences", closed_by);
+    gql.field("PullRequest", "closingIssuesReferences", closing_issues);
     gql.field("Issue", "activeLockReason", lock_reason);
     gql.field("PullRequest", "activeLockReason", lock_reason);
     gql.field("Issue", "authorAssociation", |cx, o, _| {

@@ -10,6 +10,7 @@ DELETE /installation/token	-
 POST /login/device/code	-
 POST /login/oauth/access_token	-
 GET /login/oauth/authorize	-
+GET /orgs/{org}/actions/runners/{runner_id}	organization_self_hosted_runners=read
 GET /orgs/{org}/installation	-
 GET /orgs/{org}/members/{username}	members=read
 GET /orgs/{org}/repos	metadata=read

@@ -696,6 +696,7 @@
       issues: write
       members: read
       metadata: read
+      organization_self_hosted_runners: read
       pull_requests: write
       statuses: write
       workflows: write
@@ -714,6 +715,7 @@
       issues: write
       members: read
       metadata: read
+      organization_self_hosted_runners: read
       pull_requests: write
       statuses: write
       workflows: write

@@ -662,6 +662,8 @@ pub struct WorkflowJob {
     pub labels: Vec<String>,
     pub runner_id: Option<i64>,
     pub runner_name: Option<String>,
+    pub runner_group_id: Option<i64>,
+    pub runner_group_name: Option<String>,
     pub check_run_id: Option<i64>,
     /// The `/_blobs/{id}` entry that holds the job log.
     pub log_blob_id: Option<String>,

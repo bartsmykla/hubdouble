@@ -462,6 +462,38 @@ Set `visibility` only for organization entries. Set `repositories` only with `vi
   value: /review
 ```
 
+## `actions_runner`
+
+Add a self-hosted runner to an organization. Use an installation token with `organization_self_hosted_runners: read` to read the runner by ID.
+
+| Field | Type | Required |
+| --- | --- | --- |
+| `organization` | Organization login string | Yes |
+| `id` | Integer | Yes |
+| `name`, `os`, `status` | String | Yes |
+| `busy` | Boolean | Yes |
+| `labels` | List of label objects | Yes |
+| `runner_group_id` | Integer | No |
+| `ephemeral` | Boolean | No |
+| `version` | String or null | No |
+
+A label has a string `name`, an optional integer `id`, and an optional `type` of `read-only` or `custom`.
+
+```yaml
+- kind: actions_runner
+  organization: workshop
+  id: 7011
+  name: local-runner
+  os: Linux
+  status: online
+  busy: true
+  runner_group_id: 1
+  ephemeral: true
+  labels:
+    - name: self-hosted
+      type: read-only
+```
+
 ## `release`
 
 | Field | Type | Required | Default |

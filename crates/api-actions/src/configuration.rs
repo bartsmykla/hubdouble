@@ -173,7 +173,7 @@ fn seed_policy(ctx: &mut SeedCtx<'_>, body: serde_json::Value) -> Result<(), Api
     Ok(())
 }
 
-fn find_org(tx: &Tx, name: &str) -> Result<i64, ApiError> {
+pub(crate) fn find_org(tx: &Tx, name: &str) -> Result<i64, ApiError> {
     tx.table::<Accounts>()
         .by_login(name)
         .filter(|a| a.kind == AccountKind::Organization)

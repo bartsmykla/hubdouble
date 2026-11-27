@@ -1,3 +1,5 @@
+#[path = "graphql_docs/closing_issues.rs"]
+mod closing_issues;
 #[path = "graphql_docs/git.rs"]
 mod git;
 #[path = "graphql_docs/requests.rs"]
@@ -213,6 +215,7 @@ async fn every_inventory_document_runs_on_the_complete_server() {
     cases.access(&bob).await;
     proposals(&mut cases).await;
     reviews::run(&server, &alice, &mut cases).await;
+    closing_issues::run(&server, &alice, &bob, &mut cases).await;
     git::run(&alice, &mut cases).await;
     assert_eq!(cases.ran, cases.sources.keys().cloned().collect());
 }

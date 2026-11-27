@@ -438,7 +438,7 @@ fn every_inventory_document_executes_or_reports_unimplemented_fields() {
         }
         count += 1;
     }
-    assert_eq!(count, 30);
+    assert_eq!(count, 31);
 }
 
 #[test]

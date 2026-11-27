@@ -2,6 +2,7 @@ mod admin;
 mod configuration;
 mod lifecycle;
 mod oidc;
+mod runners;
 mod runs;
 mod views;
 mod workflows;
@@ -42,6 +43,7 @@ pub fn register(r: &mut Registrar<'_>) {
     r.git.on_ref_update(workflows::ref_updated);
     workflows::register(r.rest);
     runs::register(r.rest);
+    runners::register(r);
     configuration::register(r);
     oidc::register(r);
     admin::register(r.admin);

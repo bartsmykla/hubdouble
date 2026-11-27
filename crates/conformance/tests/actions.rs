@@ -706,6 +706,25 @@ async fn workflow_run_lists_read_check_suite_id_as_github_does() {
     }
 }
 
+async fn start_job_on_runner(server: &TestServer, run_route: &str, job_id: i64) {
+    server.clock.advance(1);
+    assert_eq!(
+        server
+            .admin(
+                Method::POST,
+                run_route,
+                Some(&json!({"status": "in_progress", "jobs": [{
+                    "id": job_id, "status": "in_progress", "runner_id": 81,
+                    "runner_name": "local-runner", "runner_group_id": 2,
+                    "runner_group_name": "Default"
+                }]}))
+            )
+            .await
+            .status,
+        StatusCode::OK
+    );
+}
+
 #[tokio::test]
 async fn lifecycle_preserves_attempts_and_serves_ranged_job_logs() {
     let server = server("none").await;
@@ -721,18 +740,7 @@ async fn lifecycle_preserves_attempts_and_serves_ranged_job_logs() {
     let job = jobs["jobs"][0]["id"].as_i64().unwrap();
     let passed = jobs["jobs"][1]["id"].as_i64().unwrap();
     let admin = format!("actions/runs/{run_id}");
-    server.clock.advance(1);
-    assert_eq!(
-        server
-            .admin(
-                Method::POST,
-                &admin,
-                Some(&json!({"status":"in_progress","jobs":[{"id":job,"status":"in_progress"}]}))
-            )
-            .await
-            .status,
-        StatusCode::OK
-    );
+    start_job_on_runner(&server, &admin, job).await;
     server.clock.advance(3);
     let complete = server.admin(Method::POST, &admin, Some(&json!({
         "conclusion": "failure", "jobs": [
@@ -745,6 +753,10 @@ async fn lifecycle_preserves_attempts_and_serves_ranged_job_logs() {
     let current = valid("get-job-for-workflow-run", &client.get(&job_path).await);
     assert_eq!(current["conclusion"], "failure");
     assert_eq!(current["steps"][0]["number"], 1);
+    assert_eq!(current["runner_id"], 81);
+    assert_eq!(current["runner_name"], "local-runner");
+    assert_eq!(current["runner_group_id"], 2);
+    assert_eq!(current["runner_group_name"], "Default");
     log_range(&server, &format!("{job_path}/logs")).await;
 
     let retried = client

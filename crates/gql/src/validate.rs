@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn every_inventory_document_validates() {
         let docs = crate::inventory::documents();
-        assert_eq!(docs.len(), 30);
+        assert_eq!(docs.len(), 31);
         for (name, text) in &docs {
             if let Err(e) = validate(&SCHEMA, text) {
                 panic!("{name}: {e:?}");

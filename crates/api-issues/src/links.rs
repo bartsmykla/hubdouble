@@ -1,3 +1,5 @@
+mod targets;
+
 use std::sync::Arc;
 
 use hubdouble_admin::SeedCtx;
@@ -13,6 +15,9 @@ use serde_json::Value;
 use crate::events::{self, What};
 use crate::issues::apply_state;
 use crate::shared::emit_issue;
+
+pub use targets::closing_links;
+pub(crate) use targets::pull_closing_issues;
 
 const CLOSING_KEYWORDS: [&str; 9] = [
     "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
@@ -315,7 +320,6 @@ fn reaches(
 }
 
 fn closed_by_merge(tx: &Tx, pull: &Issue, sender: i64) -> Vec<Arc<Issue>> {
-    let issues = tx.table::<Issues>();
     let Some(repo) = tx.table::<Repos>().get(pull.repo_id) else {
         return Vec::new();
     };
@@ -326,22 +330,12 @@ fn closed_by_merge(tx: &Tx, pull: &Issue, sender: i64) -> Vec<Arc<Issue>> {
     {
         return Vec::new();
     }
-    let body = pull.body.as_deref().unwrap_or_default();
-    let mut closed: Vec<Arc<Issue>> = closing_references(body, &tx.config().web_url)
-        .filter_map(|(qualifier, number)| referenced_issue(tx, repo.id, qualifier, number))
-        .chain(
-            tx.table::<IssueLinks>()
-                .iter()
-                .filter(|l| l.pull_issue_id == pull.id)
-                .filter_map(|l| issues.get(l.issue_id)),
-        )
+    pull_closing_issues(tx, pull, repo)
+        .map(|link| link.issue)
         .filter(|i| i.state == IssueState::Open)
         .filter(|i| i.repo_id == repo.id || can_push(tx, sender, i.repo_id))
         .cloned()
-        .collect();
-    closed.sort_by_key(|i| i.id);
-    closed.dedup_by_key(|i| i.id);
-    closed
+        .collect()
 }
 
 fn referenced_issue<'a>(
@@ -406,43 +400,6 @@ fn lookup_repo<'a>(tx: &'a Tx, full_name: &str) -> Option<&'a Repo> {
     tx.table::<Repos>()
         .by_name(owner.id, name)
         .map(AsRef::as_ref)
-}
-
-/// Each pull request and an issue that it closes, as `(pull issue ID, issue ID)`: a closing
-/// keyword in the body of a pull request on its repository's default branch, or a manual link.
-#[must_use]
-pub fn closing_links(tx: &Tx) -> Vec<(i64, i64)> {
-    let issues = tx.table::<Issues>();
-    let repos = tx.table::<Repos>();
-    let mut links: Vec<(i64, i64)> = tx
-        .table::<IssueLinks>()
-        .iter()
-        .map(|l| (l.pull_issue_id, l.issue_id))
-        .collect();
-    for pull in issues.iter() {
-        let (Some(p), Some(body), Some(source)) =
-            (&pull.pull, pull.body.as_deref(), repos.get(pull.repo_id))
-        else {
-            continue;
-        };
-        if p.base.ref_name != source.default_branch {
-            continue;
-        }
-        for (qualifier, number) in closing_references(body, &tx.config().web_url) {
-            let target = if qualifier.is_empty() {
-                Some(source.id)
-            } else {
-                lookup_repo(tx, qualifier).map(|r| r.id)
-            };
-            if let Some(issue) = target
-                .and_then(|repo| issues.by_number(repo, number))
-                .filter(|i| i.pull.is_none())
-            {
-                links.push((pull.id, issue.id));
-            }
-        }
-    }
-    links
 }
 
 fn repo_named(tx: &Tx, full_name: &str) -> Result<i64, ApiError> {

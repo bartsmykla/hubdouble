@@ -516,6 +516,13 @@ async fn prepare(client: &mut Client) -> World {
     )
     .await;
     let mixed_issue = create_issue(client, json!({"title": "Mixed load"})).await;
+    client
+        .ok(
+            Method::PATCH,
+            "/repos/acme/public/pulls/1",
+            Some(json!({"body": format!("Adds the feature.\n\nCloses #{mixed_issue}")})),
+        )
+        .await;
     let (mut edit_ids, issue_comment) = comment(client, issue).await;
     edit_ids.push(reply(client).await);
     let pending_review = text(
@@ -668,7 +675,7 @@ fn documents(w: &World) -> Vec<Doc> {
                 "head" => Some(public(json!({"ref": "refs/heads/feature"}))),
                 "holdsFiles" => Some(public(json!({"e0": "HEAD:.github", "e1": "feature:src"}))),
                 "implementIssue" => Some(public(json!({"number": w.issue}))),
-                "implementPull" | "threadOpenings" | "threads" => {
+                "closingIssues" | "implementPull" | "threadOpenings" | "threads" => {
                     Some(public(json!({"number": 1, "after": null})))
                 }
                 "implementThreadComments" => {
@@ -786,6 +793,15 @@ async fn measure_doc(
             let value = answer.json();
             if answer.status != StatusCode::OK || value.get("errors").is_some() {
                 return Err(format!("{}: {value}", answer.status));
+            }
+            if doc.name == "closingIssues" {
+                let refs = &value["data"]["repository"]["pullRequest"]["closingIssuesReferences"];
+                if refs["nodes"]
+                    .as_array()
+                    .is_none_or(|nodes| nodes.len() != 1)
+                {
+                    return Err(format!("missing the closing issue: {value}"));
+                }
             }
             if let Vars::CreateCommit { head } = vars {
                 value["data"]["createCommitOnBranch"]["commit"]["oid"]
