@@ -256,12 +256,11 @@ fn tokens_match<U: Unit, const HIDDEN: bool>(
         let Some((&u, rest)) = text.split_last() else {
             return false;
         };
-        if !fits(last, u)
-            || (HIDDEN
-                && !matches!(last, Token::Unit(_))
-                && leading_dot_at(text, rest.len(), segment_start))
-        {
+        if !fits(last, u) {
             return false;
+        }
+        if HIDDEN && leading_dot_at(text, rest.len(), segment_start) {
+            return table::<_, true>(tokens, text, segment_start);
         }
         (tokens, text) = (before, rest);
     }
@@ -351,6 +350,7 @@ mod tests {
             ("**/.config/*", ".config/é", true),
             ("**/main", ".config/main", false),
             ("src/*.env", "src/.env", false),
+            ("src/**/*.env", "src/pkg/.env", false),
             ("**/?env", "pkg/.env", false),
             ("**/[.]env", "pkg/.env", false),
             ("src*/**/?.txt", "src/.cache/a.txt", false),
