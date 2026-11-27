@@ -512,7 +512,7 @@ fn commit_of(tx: &Tx, git: &Git, repo: &Repo, id: ObjectId) -> Result<Option<Obj
 pub fn fork_root<'t>(tx: &'t Tx, repo: &'t Repo) -> &'t Repo {
     let repos = tx.table::<Repos>();
     let mut root = repo;
-    for _ in 0..64 {
+    for _ in 0..repos.len() {
         match root.fork_of.and_then(|id| repos.get(id)) {
             Some(parent) => root = parent,
             None => break,
