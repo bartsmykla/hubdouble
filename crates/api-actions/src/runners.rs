@@ -35,8 +35,8 @@ struct Runner {
     status: String,
     busy: bool,
     labels: Vec<Label>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    runner_group_id: Option<i64>,
+    #[serde(rename = "runner_group_id", skip_serializing_if = "Option::is_none")]
+    group_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ephemeral: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
