@@ -8,13 +8,13 @@
 /// stack depth is bounded whatever the pattern.
 #[must_use]
 pub fn glob(pattern: &str, text: &str) -> bool {
-    matches(pattern, text, true)
+    matches::<true>(pattern, text)
 }
 
 /// The CODEOWNERS form of [`glob`], whose docs do not support `[ ]` ranges: a `[` is itself.
 #[must_use]
 pub fn codeowners_glob(pattern: &str, text: &str) -> bool {
-    matches(pattern, text, false)
+    matches::<false>(pattern, text)
 }
 
 const MAX_DEPTH: usize = 64;
@@ -29,46 +29,55 @@ fn is<U: Unit>(unit: U, byte: u8) -> bool {
     unit == U::from(byte)
 }
 
-fn matches(pattern: &str, text: &str, sets: bool) -> bool {
+fn matches<const SETS: bool>(pattern: &str, text: &str) -> bool {
     let bytes = pattern.as_bytes();
-    let literal = if sets {
+    let literal = if SETS {
         memchr::memchr3(b'*', b'?', b'[', bytes)
     } else {
         memchr::memchr2(b'*', b'?', bytes)
     }
     .unwrap_or(bytes.len());
-    let (head, pattern) = pattern.split_at(literal);
-    let Some(text) = text.strip_prefix(head) else {
+    let (head, tail) = bytes.split_at(literal);
+    let Some(path) = text.as_bytes().strip_prefix(head) else {
         return false;
     };
-    let segment_start = head.is_empty() || head.ends_with('/');
-    let leading_dot = sets && segment_start && text.starts_with('.');
-    match pattern {
-        "" => return text.is_empty(),
-        "*" => return !leading_dot && !text.as_bytes().contains(&b'/'),
-        "**" => return !sets || (!leading_dot && !text.as_bytes().contains(&b'/')),
-        "**/*" if !sets => return true,
-        "**/*" if segment_start => return !leading_dot && !has_hidden_child(text),
+    let segment_start = head.is_empty() || head.ends_with(b"/");
+    let leading_dot = SETS && segment_start && path.starts_with(b".");
+    match tail {
+        b"" => return path.is_empty(),
+        b"*" => return !leading_dot && !path.contains(&b'/'),
+        b"**" => return !SETS || (!leading_dot && !path.contains(&b'/')),
+        b"**/*" if !SETS => return true,
+        b"**/*" if segment_start => return !leading_dot && !has_hidden_child(path),
         _ => {}
     }
-    let hidden = leading_dot || (sets && has_hidden_child(text));
-    if pattern.is_ascii() && text.is_ascii() {
-        run(
-            pattern.as_bytes(),
-            text.as_bytes(),
-            sets,
-            segment_start,
-            hidden,
-        )
+    let hidden = leading_dot || (SETS && has_hidden_child(path));
+    if tail.is_ascii() && path.is_ascii() {
+        run(tail, path, SETS, segment_start, hidden)
     } else {
-        let pattern: Vec<char> = pattern.chars().collect();
-        let text: Vec<char> = text.chars().collect();
-        run(&pattern, &text, sets, segment_start, hidden)
+        let pattern: Vec<char> = pattern[literal..].chars().collect();
+        let text: Vec<char> = text[literal..].chars().collect();
+        run(&pattern, &text, SETS, segment_start, hidden)
     }
 }
 
-fn has_hidden_child(text: &str) -> bool {
-    text.as_bytes().windows(2).any(|pair| pair == b"/.")
+fn has_hidden_child(path: &[u8]) -> bool {
+    let Some(last) = path.last_chunk::<9>() else {
+        return path.windows(2).any(|pair| pair == b"/.");
+    };
+    let contains_pair = |block: &[u8; 9]| {
+        (0..8).fold(false, |found, i| {
+            found | ((block[i] == b'/') & (block[i + 1] == b'.'))
+        })
+    };
+    let mut rest = path;
+    while let Some(block) = rest.first_chunk::<9>() {
+        if contains_pair(block) {
+            return true;
+        }
+        rest = &rest[8..];
+    }
+    rest.len() > 1 && contains_pair(last)
 }
 
 fn run<U: Unit>(pattern: &[U], text: &[U], sets: bool, segment_start: bool, hidden: bool) -> bool {
@@ -364,6 +373,16 @@ mod tests {
             assert_eq!(glob(pattern, text), expected, "{pattern} against {text}");
         }
         assert!(codeowners_glob("src/**/*", "src/.cache/data"));
+    }
+
+    #[test]
+    fn recursive_globs_detect_a_hidden_name_at_any_byte_offset() {
+        for length in 1..=24 {
+            let directory = "a".repeat(length);
+            assert!(!glob("**/*", &format!("{directory}/.x")));
+            assert!(!glob("**/*", &format!("{directory}/.x/leaf")));
+            assert!(glob("**/*", &format!("{directory}/x.y")));
+        }
     }
 
     #[test]
