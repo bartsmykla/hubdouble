@@ -205,8 +205,13 @@ fn org_access(
     org: &Account,
     base_url: &str,
 ) -> Result<(), ApiError> {
+    let public_read = is_read(req)
+        && req
+            .any_of
+            .iter()
+            .any(|grant| grant.permission != "organization_self_hosted_runners");
     match actor {
-        Actor::Anonymous if is_read(req) => Ok(()),
+        Actor::Anonymous if public_read => Ok(()),
         Actor::Anonymous => Err(requires_authentication()),
         Actor::App { .. } => Err(integration_denied(req)),
         Actor::Installation {
@@ -217,7 +222,7 @@ fn org_access(
             let allowed = if installation.account_id == org.id {
                 satisfies(req.any_of, |p| installation_level(token, installation, p))
             } else {
-                is_read(req)
+                public_read
             };
             if allowed {
                 Ok(())
@@ -234,7 +239,7 @@ fn org_access(
                     .map(AsRef::as_ref)
             })?;
             classic_scopes(token, req)?;
-            if is_read(req) {
+            if public_read {
                 return Ok(());
             }
             let role = tx

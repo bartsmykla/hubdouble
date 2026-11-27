@@ -10,7 +10,7 @@ use hubdouble_model::{
 use hubdouble_store::{Accounts, IssueComments, Issues, Repos};
 use serde::Serialize;
 
-use crate::links::{IssueLinks, closing_references};
+use crate::links::{IssueLinks, closing_keyword_issues, closing_references, linked_issues};
 use crate::shared::{ISSUES_READ, READ, full_name};
 
 const PULLS_READ: Requirement = Requirement {
@@ -173,6 +173,30 @@ fn closed_by(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError
     )
 }
 
+fn closing_issues(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
+    let pull = obj.get::<Issue>()?;
+    let repo = read_repo(ctx, pull.repo_id, &PULLS_READ)?;
+    let user_linked_only = args.get::<bool>("userLinkedOnly")?.unwrap_or(false);
+    let exclude_user_linked = args.get::<bool>("excludeUserLinked")?.unwrap_or(false);
+    let mut references = Vec::new();
+    if !user_linked_only {
+        references.extend(closing_keyword_issues(ctx.tx, pull, repo));
+    }
+    if !exclude_user_linked {
+        references.extend(linked_issues(ctx.tx, pull.id));
+    }
+    references.sort_unstable_by_key(|issue| issue.id);
+    references.dedup_by_key(|issue| issue.id);
+    references.retain(|issue| read_repo(ctx, issue.repo_id, &ISSUES_READ).is_ok());
+    connection(
+        "IssueConnection",
+        &references,
+        args,
+        |issue| issue.id.to_string(),
+        |issue| issue_object(issue),
+    )
+}
+
 fn comment_author(ctx: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {
     let c = obj.get::<IssueComment>()?;
     Ok(ctx
@@ -229,6 +253,7 @@ pub(crate) fn register(gql: &mut Registry) {
         cx.load(Target::RepoId(o.get::<Issue>()?.repo_id))
     });
     gql.field("Issue", "closedByPullRequestsReferences", closed_by);
+    gql.field("PullRequest", "closingIssuesReferences", closing_issues);
     gql.field("Issue", "activeLockReason", lock_reason);
     gql.field("PullRequest", "activeLockReason", lock_reason);
     gql.field("Issue", "authorAssociation", |cx, o, _| {

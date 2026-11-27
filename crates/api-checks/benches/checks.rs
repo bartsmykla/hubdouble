@@ -275,6 +275,8 @@ fn job(id: i64, repo_id: i64, sha: &str) -> WorkflowJob {
         labels: Vec::new(),
         runner_id: None,
         runner_name: None,
+        runner_group_id: None,
+        runner_group_name: None,
         check_run_id: Some(id),
         log_blob_id: None,
         created_at: Timestamp::SEED,

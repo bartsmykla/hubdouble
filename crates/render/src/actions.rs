@@ -180,8 +180,8 @@ impl Job {
             labels: j.labels.clone(),
             runner_id: j.runner_id,
             runner_name: j.runner_name.clone(),
-            runner_group_id: None,
-            runner_group_name: None,
+            runner_group_id: j.runner_group_id,
+            runner_group_name: j.runner_group_name.clone(),
             workflow_name: j.workflow_name.clone(),
             head_branch: j.head_branch.clone(),
         }

@@ -189,6 +189,8 @@ fn new_job(tx: &mut TxMut<'_>, run: &WorkflowRun, name: String, now: Timestamp) 
         labels: Vec::new(),
         runner_id: None,
         runner_name: None,
+        runner_group_id: None,
+        runner_group_name: None,
         check_run_id: Some(id),
         log_blob_id: None,
         created_at: now,
@@ -242,6 +244,8 @@ fn carry_job(
         labels: old.labels.clone(),
         runner_id: old.runner_id,
         runner_name: old.runner_name.clone(),
+        runner_group_id: old.runner_group_id,
+        runner_group_name: old.runner_group_name.clone(),
         log_blob_id,
         started_at: old.started_at,
         completed_at: old.completed_at,
@@ -295,6 +299,8 @@ struct JobPatch {
     labels: Option<Vec<String>>,
     runner_id: Option<i64>,
     runner_name: Option<String>,
+    runner_group_id: Option<i64>,
+    runner_group_name: Option<String>,
     #[serde(default)]
     annotations: Vec<AnnotationInput>,
 }
@@ -420,6 +426,8 @@ fn apply_job(
     }
     job.runner_id = patch.runner_id.or(job.runner_id);
     job.runner_name = patch.runner_name.or(job.runner_name);
+    job.runner_group_id = patch.runner_group_id.or(job.runner_group_id);
+    job.runner_group_name = patch.runner_group_name.or(job.runner_group_name);
     if let Some(logs) = patch.logs {
         let id = Uuid::new_v4().to_string();
         let mut blobs = tx.table_mut::<Blobs>();

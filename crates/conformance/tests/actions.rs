@@ -727,7 +727,11 @@ async fn lifecycle_preserves_attempts_and_serves_ranged_job_logs() {
             .admin(
                 Method::POST,
                 &admin,
-                Some(&json!({"status":"in_progress","jobs":[{"id":job,"status":"in_progress"}]}))
+                Some(&json!({"status": "in_progress", "jobs": [{
+                    "id": job, "status": "in_progress", "runner_id": 81,
+                    "runner_name": "local-runner", "runner_group_id": 2,
+                    "runner_group_name": "Default"
+                }]}))
             )
             .await
             .status,
@@ -745,6 +749,10 @@ async fn lifecycle_preserves_attempts_and_serves_ranged_job_logs() {
     let current = valid("get-job-for-workflow-run", &client.get(&job_path).await);
     assert_eq!(current["conclusion"], "failure");
     assert_eq!(current["steps"][0]["number"], 1);
+    assert_eq!(current["runner_id"], 81);
+    assert_eq!(current["runner_name"], "local-runner");
+    assert_eq!(current["runner_group_id"], 2);
+    assert_eq!(current["runner_group_name"], "Default");
     log_range(&server, &format!("{job_path}/logs")).await;
 
     let retried = client

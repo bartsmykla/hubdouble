@@ -315,7 +315,6 @@ fn reaches(
 }
 
 fn closed_by_merge(tx: &Tx, pull: &Issue, sender: i64) -> Vec<Arc<Issue>> {
-    let issues = tx.table::<Issues>();
     let Some(repo) = tx.table::<Repos>().get(pull.repo_id) else {
         return Vec::new();
     };
@@ -326,15 +325,8 @@ fn closed_by_merge(tx: &Tx, pull: &Issue, sender: i64) -> Vec<Arc<Issue>> {
     {
         return Vec::new();
     }
-    let body = pull.body.as_deref().unwrap_or_default();
-    let mut closed: Vec<Arc<Issue>> = closing_references(body, &tx.config().web_url)
-        .filter_map(|(qualifier, number)| referenced_issue(tx, repo.id, qualifier, number))
-        .chain(
-            tx.table::<IssueLinks>()
-                .iter()
-                .filter(|l| l.pull_issue_id == pull.id)
-                .filter_map(|l| issues.get(l.issue_id)),
-        )
+    let mut closed: Vec<Arc<Issue>> = closing_keyword_issues(tx, pull, repo)
+        .chain(linked_issues(tx, pull.id))
         .filter(|i| i.state == IssueState::Open)
         .filter(|i| i.repo_id == repo.id || can_push(tx, sender, i.repo_id))
         .cloned()
@@ -342,6 +334,33 @@ fn closed_by_merge(tx: &Tx, pull: &Issue, sender: i64) -> Vec<Arc<Issue>> {
     closed.sort_by_key(|i| i.id);
     closed.dedup_by_key(|i| i.id);
     closed
+}
+
+pub(crate) fn linked_issues(tx: &Tx, pull_id: i64) -> impl Iterator<Item = &Arc<Issue>> {
+    let issues = tx.table::<Issues>();
+    tx.table::<IssueLinks>()
+        .iter()
+        .filter(move |link| link.pull_issue_id == pull_id)
+        .filter_map(move |link| issues.get(link.issue_id))
+}
+
+pub(crate) fn closing_keyword_issues<'a>(
+    tx: &'a Tx,
+    pull: &'a Issue,
+    repo: &Repo,
+) -> impl Iterator<Item = &'a Arc<Issue>> {
+    pull.body
+        .as_deref()
+        .filter(|_| {
+            pull.pull
+                .as_ref()
+                .is_some_and(|p| p.base.ref_name == repo.default_branch)
+        })
+        .into_iter()
+        .flat_map(move |body| closing_references(body, &tx.config().web_url))
+        .filter_map(move |(qualifier, number)| {
+            referenced_issue(tx, pull.repo_id, qualifier, number)
+        })
 }
 
 fn referenced_issue<'a>(
@@ -420,26 +439,8 @@ pub fn closing_links(tx: &Tx) -> Vec<(i64, i64)> {
         .map(|l| (l.pull_issue_id, l.issue_id))
         .collect();
     for pull in issues.iter() {
-        let (Some(p), Some(body), Some(source)) =
-            (&pull.pull, pull.body.as_deref(), repos.get(pull.repo_id))
-        else {
-            continue;
-        };
-        if p.base.ref_name != source.default_branch {
-            continue;
-        }
-        for (qualifier, number) in closing_references(body, &tx.config().web_url) {
-            let target = if qualifier.is_empty() {
-                Some(source.id)
-            } else {
-                lookup_repo(tx, qualifier).map(|r| r.id)
-            };
-            if let Some(issue) = target
-                .and_then(|repo| issues.by_number(repo, number))
-                .filter(|i| i.pull.is_none())
-            {
-                links.push((pull.id, issue.id));
-            }
+        if let Some(source) = repos.get(pull.repo_id) {
+            links.extend(closing_keyword_issues(tx, pull, source).map(|issue| (pull.id, issue.id)));
         }
     }
     links
