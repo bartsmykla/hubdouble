@@ -42,17 +42,25 @@ fn get_ruleset(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let tx = ctx.tx();
     let id = ctx.param_i64("ruleset_id")?;
     let parents = ctx.query().get("includes_parents") != Some("false");
-    let target = ruleset_repository(tx, repo);
     let r = tx
         .table::<Rulesets>()
         .get(id)
-        .filter(|r| match r.source_type {
-            RulesetSource::Repository => r.repo_id == Some(repo.id),
-            RulesetSource::Organization => parents && r.governs(target),
-        })
         .ok_or_else(ApiError::not_found)?;
+    let bypass_repo = if r.target == RulesetTarget::Push {
+        fork_root(tx, repo)
+    } else {
+        repo
+    };
+    let local = r.source_type == RulesetSource::Repository && r.repo_id == Some(repo.id);
+    let inherited = || {
+        r.governs(ruleset_repository(tx, repo))
+            || (bypass_repo.id != repo.id && r.governs(ruleset_repository(tx, bypass_repo)))
+    };
+    if !(local || (parents && inherited())) {
+        return Err(ApiError::not_found());
+    }
     let mut out = render::Ruleset::new(ctx.urls(), r, &source_name(tx, r)?);
-    out.current_user_can_bypass = Some(ruleset_bypass(tx, ctx.actor(), repo, r).as_str());
+    out.current_user_can_bypass = Some(ruleset_bypass(tx, ctx.actor(), bypass_repo, r).as_str());
     Reply::json(&out)
 }
 

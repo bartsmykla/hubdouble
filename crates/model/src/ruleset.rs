@@ -99,6 +99,11 @@ fn properties_match(condition: &Value, target: RulesetRepository<'_>) -> bool {
                 let actual = match name {
                     "visibility" => Some(target.repo.visibility.as_str()),
                     "language" => target.repo.language.as_deref(),
+                    "fork" => Some(if target.repo.fork_of.is_some() {
+                        "true"
+                    } else {
+                        "false"
+                    }),
                     _ => None,
                 };
                 actual.is_some_and(|actual| {

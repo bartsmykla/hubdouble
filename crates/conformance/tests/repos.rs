@@ -540,33 +540,8 @@ async fn branch_rules_list_the_active_matching_rules_in_pages() {
     );
 }
 
-#[tokio::test]
-async fn branch_rules_include_active_push_rules_from_the_fork_root() {
-    let server = start(vec![
-        json!({"kind": "repository", "owner": "alice", "name": "fork", "private": true,
-               "fork_of": "acme/private"}),
-        json!({"kind": "ruleset", "id": 8251, "repository": "acme/private", "name": "push",
-               "target": "push", "enforcement": "active",
-               "rules": [{"type": "file_path_restriction",
-                          "parameters": {"restricted_file_paths": ["test/**"]}}]}),
-        json!({"kind": "ruleset", "id": 8252, "repository": "acme/private", "name": "evaluate",
-               "target": "push", "enforcement": "evaluate",
-               "rules": [{"type": "file_extension_restriction",
-                          "parameters": {"restricted_file_extensions": ["zip"]}}]}),
-    ])
-    .await;
-    let answer = alice(&server)
-        .get("repos/alice/fork/rules/branches/new-branch")
-        .await;
-    assert_eq!(answer.status, StatusCode::OK);
-    assert_eq!(
-        valid("repos/get-branch-rules", &answer),
-        json!([{"type": "file_path_restriction",
-                "parameters": {"restricted_file_paths": ["test/**"]},
-                "ruleset_source_type": "Repository", "ruleset_source": "acme/private",
-                "ruleset_id": 8251}])
-    );
-}
+#[path = "repos/fork_rules.rs"]
+mod fork_rules;
 
 #[tokio::test]
 async fn branch_rules_list_the_rules_of_an_organizations_repository_rulesets() {

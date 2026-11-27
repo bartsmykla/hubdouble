@@ -1,7 +1,8 @@
 /// GitHub's ruleset patterns, Ruby's `File.fnmatch` with `FNM_PATHNAME` and without escapes:
 /// `*` matches within one path segment, `?` one character other than `/`, `[...]` one
 /// character other than `/` in the set (with `a-z` ranges, and `!` or `^` first to negate it),
-/// `**/` at a segment boundary matches zero or more whole segments.
+/// `**/` at a segment boundary matches zero or more whole segments. A leading dot in a segment
+/// must match a literal dot.
 /// A `[` without its `]` matches nothing.
 /// The cost is at most a small multiple of the pattern length times the text length, and the
 /// stack depth is bounded whatever the pattern.
@@ -38,26 +39,40 @@ fn matches(pattern: &str, text: &str, sets: bool) -> bool {
         return false;
     };
     let segment_start = head.is_empty() || head.ends_with('/');
+    let leading_dot = sets && segment_start && text.starts_with('.');
     match pattern {
         "" => return text.is_empty(),
-        "*" => return !text.as_bytes().contains(&b'/'),
-        "**" => return !sets || !text.as_bytes().contains(&b'/'),
-        "**/*" if !sets || segment_start => return true,
+        "*" => return !leading_dot && !text.as_bytes().contains(&b'/'),
+        "**" => return !sets || (!leading_dot && !text.as_bytes().contains(&b'/')),
+        "**/*" if !sets => return true,
         _ => {}
     }
+    let hidden = leading_dot || (sets && text.contains("/."));
+    if segment_start && pattern == "**/*" {
+        return !hidden;
+    }
     if pattern.is_ascii() && text.is_ascii() {
-        run(pattern.as_bytes(), text.as_bytes(), sets, segment_start)
+        run(
+            pattern.as_bytes(),
+            text.as_bytes(),
+            sets,
+            segment_start,
+            hidden,
+        )
     } else {
         let pattern: Vec<char> = pattern.chars().collect();
         let text: Vec<char> = text.chars().collect();
-        run(&pattern, &text, sets, segment_start)
+        run(&pattern, &text, sets, segment_start, hidden)
     }
 }
 
-fn run<U: Unit>(pattern: &[U], text: &[U], sets: bool, segment_start: bool) -> bool {
+fn run<U: Unit>(pattern: &[U], text: &[U], sets: bool, segment_start: bool, hidden: bool) -> bool {
+    if hidden {
+        return tokens_match::<_, true>(pattern, text, sets, segment_start);
+    }
     let mut budget = (pattern.len() + 1) * (text.len() + 1);
     backtrack(pattern, text, sets, &mut budget, 0, segment_start)
-        .unwrap_or_else(|| tokens_match(pattern, text, sets, segment_start))
+        .unwrap_or_else(|| tokens_match::<_, false>(pattern, text, sets, segment_start))
 }
 
 #[derive(Clone, Copy)]
@@ -210,11 +225,24 @@ fn backtrack<U: Unit>(
     }
 }
 
-fn tokens_match<U: Unit>(pattern: &[U], text: &[U], sets: bool, mut segment_start: bool) -> bool {
+fn leading_dot_at<U: Unit>(text: &[U], at: usize, segment_start: bool) -> bool {
+    text.get(at).is_some_and(|&u| is(u, b'.'))
+        && at
+            .checked_sub(1)
+            .map_or(segment_start, |i| is(text[i], b'/'))
+}
+
+fn tokens_match<U: Unit, const HIDDEN: bool>(
+    pattern: &[U],
+    text: &[U],
+    sets: bool,
+    segment_start: bool,
+) -> bool {
     let mut tokens = Vec::new();
     let mut rest = pattern;
-    while let Some((token, len)) = next_token(rest, sets, segment_start) {
-        segment_start =
+    let mut boundary = segment_start;
+    while let Some((token, len)) = next_token(rest, sets, boundary) {
+        boundary =
             matches!(token, Token::Segments) || matches!(token, Token::Unit(v) if is(v, b'/'));
         tokens.push(token);
         rest = rest.get(len..).unwrap_or_default();
@@ -223,12 +251,16 @@ fn tokens_match<U: Unit>(pattern: &[U], text: &[U], sets: bool, mut segment_star
     let mut text = text;
     while let Some((&last, before)) = tokens.split_last() {
         if matches!(last, Token::InSegment | Token::Anything | Token::Segments) {
-            return table(tokens, text);
+            return table::<_, HIDDEN>(tokens, text, segment_start);
         }
         let Some((&u, rest)) = text.split_last() else {
             return false;
         };
-        if !fits(last, u) {
+        if !fits(last, u)
+            || (HIDDEN
+                && !matches!(last, Token::Unit(_))
+                && leading_dot_at(text, rest.len(), segment_start))
+        {
             return false;
         }
         (tokens, text) = (before, rest);
@@ -236,7 +268,11 @@ fn tokens_match<U: Unit>(pattern: &[U], text: &[U], sets: bool, mut segment_star
     text.is_empty()
 }
 
-fn table<U: Unit>(tokens: &[Token<'_, U>], text: &[U]) -> bool {
+fn table<U: Unit, const HIDDEN: bool>(
+    tokens: &[Token<'_, U>],
+    text: &[U],
+    segment_start: bool,
+) -> bool {
     let n = text.len();
     let mut later = vec![false; n + 1];
     let mut row = vec![false; n + 1];
@@ -247,13 +283,16 @@ fn table<U: Unit>(tokens: &[Token<'_, U>], text: &[U]) -> bool {
             let u = text.get(j).copied();
             let in_segment = u.is_some_and(|u| !is(u, b'/'));
             let next = |r: &[bool]| r.get(j + 1).copied().unwrap_or(false);
+            let hidden = HIDDEN && leading_dot_at(text, j, segment_start);
             row[j] = match token {
-                Token::InSegment => later[j] || (in_segment && next(&row)),
+                Token::InSegment => !hidden && (later[j] || (in_segment && next(&row))),
                 Token::Anything => later[j] || (u.is_some() && next(&row)),
                 Token::Segments => {
-                    slash_ahead |= u.is_some_and(|u| is(u, b'/')) && next(&later);
+                    slash_ahead = !hidden
+                        && (slash_ahead || (u.is_some_and(|u| is(u, b'/')) && next(&later)));
                     later[j] || slash_ahead
                 }
+                Token::One | Token::Set(_, _) if hidden => false,
                 fixed => u.is_some_and(|u| fits(fixed, u)) && next(&later),
             };
         }
@@ -299,6 +338,27 @@ mod tests {
         }
         assert!(codeowners_glob("docs/[1]", "docs/[1]"));
         assert!(!codeowners_glob("docs/[1]", "docs/1"));
+    }
+
+    #[test]
+    fn only_a_literal_dot_matches_the_start_of_a_hidden_component() {
+        for (pattern, text, expected) in [
+            ("src/**", "src/.env", false),
+            ("src/*", "src/.env", false),
+            ("src/**/*", "src/pkg/.cache/data", false),
+            ("src/**/.env", "src/pkg/.env", true),
+            ("src/**/.env", "src/.cache/.env", false),
+            ("**/.config/*", ".config/é", true),
+            ("**/main", ".config/main", false),
+            ("src/*.env", "src/.env", false),
+            ("**/?env", "pkg/.env", false),
+            ("**/[.]env", "pkg/.env", false),
+            ("src*/**/?.txt", "src/.cache/a.txt", false),
+            ("src/v*", "src/v.1", true),
+        ] {
+            assert_eq!(glob(pattern, text), expected, "{pattern} against {text}");
+        }
+        assert!(codeowners_glob("src/**/*", "src/.cache/data"));
     }
 
     #[test]
