@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
 
 use http::Method;
-use hubdouble_model::{Timestamp, Token, TokenKind};
-use hubdouble_store::Tokens;
+use hubdouble_model::{ApiError, Timestamp, Token, TokenKind, Visibility};
+use hubdouble_store::{Repos, Tokens};
 use hubdouble_testkit::{Answer, GoGithub, TestServer, fixture};
 use serde_json::{Value, json};
 
 const ALICE_APP_TOKEN: &str = "ghu_alice_without_organization_events";
+const ALICE_PUBLIC_REPO_TOKEN: &str = "ghp_alice_with_only_public_repo";
+const DAY: i64 = 24 * 60 * 60;
 
 async fn start() -> TestServer {
     let server = TestServer::builder()
@@ -19,26 +21,45 @@ async fn start() -> TestServer {
         .services()
         .store
         .update(|tx| {
-            let id = tx.next_id();
-            tx.table_mut::<Tokens>().insert(Token {
-                id,
-                token: ALICE_APP_TOKEN.into(),
-                kind: TokenKind::User,
-                user_id: Some(fixture::ALICE_ID),
-                app_id: Some(fixture::APP_ID),
-                installation_id: None,
-                repo_ids: None,
-                permissions: BTreeMap::new(),
-                scopes: Vec::new(),
-                expires_at: None,
-                revoked: false,
-                owner_seeded: true,
-                created_at: Timestamp::SEED,
-            })?;
+            for (token, kind, app_id, scopes) in [
+                (
+                    ALICE_APP_TOKEN,
+                    TokenKind::User,
+                    Some(fixture::APP_ID),
+                    vec![],
+                ),
+                (
+                    ALICE_PUBLIC_REPO_TOKEN,
+                    TokenKind::Personal,
+                    None,
+                    vec!["public_repo".to_owned()],
+                ),
+            ] {
+                let id = tx.next_id();
+                tx.table_mut::<Tokens>().insert(Token {
+                    id,
+                    token: token.into(),
+                    kind,
+                    user_id: Some(fixture::ALICE_ID),
+                    app_id,
+                    installation_id: None,
+                    repo_ids: None,
+                    permissions: BTreeMap::new(),
+                    scopes,
+                    expires_at: None,
+                    revoked: false,
+                    owner_seeded: true,
+                    created_at: Timestamp::SEED,
+                })?;
+            }
             Ok(())
         })
         .unwrap_or_else(|error| panic!("{error}"));
     server
+}
+
+fn in_repo(events: &[Value], name: &str) -> usize {
+    events.iter().filter(|e| e["repo"]["name"] == name).count()
 }
 
 fn ok(answer: &Answer, what: &str) -> Value {
@@ -291,4 +312,111 @@ async fn the_org_dashboard_needs_the_organization_events_permission() {
             .header("x-accepted-github-permissions")
             .contains("organization_events=read")
     );
+}
+
+#[tokio::test]
+async fn the_org_dashboard_needs_authentication_but_not_membership() {
+    // Given carol, who is not a member of acme
+    let server = start().await;
+    act(&server).await;
+    let carol = GoGithub::new(&server).with_token(fixture::CAROL_TOKEN);
+
+    // When an anonymous caller and carol read their acme dashboards
+    let anonymous = GoGithub::new(&server)
+        .get("users/alice/events/orgs/acme")
+        .await;
+    let outsider = carol.get("users/carol/events/orgs/acme").await;
+
+    // Then the anonymous caller is 401, and carol gets the org's public events, as GitHub serves
+    assert_eq!(anonymous.status.as_u16(), 401, "{:?}", anonymous.body);
+    let events = ok(&outsider, "carol's dashboard");
+    assert!(in_repo(events.as_array().map_or(&[], Vec::as_slice), "acme/public") > 0);
+}
+
+#[tokio::test]
+async fn a_private_event_shows_only_to_a_token_that_still_reaches_its_repository() {
+    // Given alice opened an issue in the private repository
+    let server = start().await;
+    act(&server).await;
+
+    // When she reads her feeds with a token without the repo scope, and with a user token of an
+    // App whose installation does not cover the repository
+    let mut feeds = Vec::new();
+    for token in [ALICE_PUBLIC_REPO_TOKEN, ALICE_APP_TOKEN] {
+        let alice = GoGithub::new(&server).with_token(token);
+        feeds.push((token, feed(&alice, "users/alice/events").await));
+    }
+    let alice = GoGithub::new(&server).with_token(ALICE_PUBLIC_REPO_TOKEN);
+    feeds.push((
+        "dashboard",
+        feed(&alice, "users/alice/events/orgs/acme").await,
+    ));
+
+    // Then no feed shows the private event, and the public events stay
+    for (what, events) in feeds {
+        assert_eq!(in_repo(&events, "acme/private"), 0, "{what}");
+        assert!(in_repo(&events, "acme/public") > 0, "{what}");
+    }
+}
+
+#[tokio::test]
+async fn the_events_of_a_repository_made_private_leave_the_public_feeds() {
+    // Given alice acted in the public repository, which then becomes private
+    let server = start().await;
+    act(&server).await;
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            let mut repo = (**tx
+                .table::<Repos>()
+                .get(fixture::PUBLIC_REPO_ID)
+                .ok_or_else(ApiError::not_found)?)
+            .clone();
+            repo.visibility = Visibility::Private;
+            tx.table_mut::<Repos>().replace(repo)?;
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    let anonymous = GoGithub::new(&server);
+
+    // When the public feeds and alice's own feed are read
+    let mut public = Vec::new();
+    for path in [
+        "events",
+        "orgs/acme/events",
+        "users/alice/events/public",
+        "users/alice/events",
+    ] {
+        public.push((path, feed(&anonymous, path).await));
+    }
+    let own = feed(&alice, "users/alice/events").await;
+
+    // Then only alice's own feed still shows the repository's events
+    for (path, events) in public {
+        assert_eq!(in_repo(&events, "acme/public"), 0, "{path}");
+    }
+    assert!(in_repo(&own, "acme/public") > 0);
+}
+
+#[tokio::test]
+async fn event_feeds_hold_only_the_past_30_days() {
+    // Given events in the public repository
+    let server = start().await;
+    act(&server).await;
+    let anonymous = GoGithub::new(&server);
+    let fresh = feed(&anonymous, "repos/acme/public/events").await;
+
+    // When 29 days pass, and then 2 more
+    server.clock.advance(29 * DAY);
+    let within = feed(&anonymous, "repos/acme/public/events").await;
+    server.clock.advance(2 * DAY);
+    let past = feed(&anonymous, "repos/acme/public/events").await;
+
+    // Then the events show within 30 days and are gone after
+    assert!(fresh.len() >= 4);
+    assert_eq!(within, fresh);
+    assert_eq!(past, Vec::<Value>::new());
 }

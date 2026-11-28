@@ -17,7 +17,7 @@ const EVENTS: PageLimit = PageLimit {
     before_overflow: true,
 };
 
-const RETENTION_SECONDS: i64 = 90 * 24 * 60 * 60;
+const RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
 const PUBLIC_PER_PAGE: usize = 15;
 const PER_PAGE: usize = 30;
 const MOST_PER_PAGE: usize = 100;
@@ -134,12 +134,21 @@ fn is_user(actor: &Actor, user: &Account) -> bool {
     matches!(actor, Actor::User { user: u, .. } if u.id == user.id)
 }
 
+fn shown(ctx: &Ctx<'_>, e: &ActivityEvent, own: bool) -> bool {
+    let tx = ctx.tx();
+    match tx.table::<Repos>().get(e.repo_id) {
+        Some(repo) if repo.is_private() => own && can_see(tx, ctx.actor(), repo),
+        Some(_) => e.public || own,
+        None => e.public,
+    }
+}
+
 pub(crate) fn public(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let events = ctx
         .tx()
         .table::<ActivityEvents>()
         .iter()
-        .filter(|e| e.public);
+        .filter(|e| shown(ctx, e, false));
     reply(ctx, PUBLIC_PER_PAGE, events)
 }
 
@@ -177,7 +186,7 @@ pub(crate) fn network(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let events = members
         .iter()
         .flat_map(|id| rows.in_repo(*id))
-        .filter(|e| e.public);
+        .filter(|e| shown(ctx, e, false));
     reply(ctx, PER_PAGE, events)
 }
 
@@ -187,7 +196,7 @@ pub(crate) fn org(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let events = tx
         .table::<ActivityEvents>()
         .iter()
-        .filter(|e| e.public && e.org_id == Some(org));
+        .filter(|e| e.org_id == Some(org) && shown(ctx, e, false));
     reply(ctx, PER_PAGE, events)
 }
 
@@ -204,7 +213,7 @@ fn by_user(ctx: &Ctx<'_>, only_public: bool) -> Result<Reply, ApiError> {
     let events = tx
         .table::<ActivityEvents>()
         .children(user.id)
-        .filter(|e| e.public || own);
+        .filter(|e| shown(ctx, e, own));
     reply(ctx, PER_PAGE, events)
 }
 
@@ -214,12 +223,6 @@ pub(crate) fn user(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 
 pub(crate) fn user_public(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     by_user(ctx, true)
-}
-
-fn role_on(tx: &Tx, user_id: i64, repo_id: i64) -> Option<RepoRole> {
-    tx.table::<Repos>()
-        .get(repo_id)
-        .and_then(|r| repo_role(tx, user_id, r))
 }
 
 pub(crate) fn user_org(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
@@ -232,8 +235,7 @@ pub(crate) fn user_org(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let events = tx
         .table::<ActivityEvents>()
         .iter()
-        .filter(|e| e.org_id == Some(org))
-        .filter(|e| e.public || role_on(tx, user.id, e.repo_id).is_some());
+        .filter(|e| e.org_id == Some(org) && shown(ctx, e, true));
     reply(ctx, PER_PAGE, events)
 }
 
@@ -251,7 +253,7 @@ fn received_by(ctx: &Ctx<'_>, only_public: bool) -> Result<Reply, ApiError> {
     let events = watched
         .iter()
         .flat_map(|id| rows.in_repo(*id))
-        .filter(|e| e.actor_id != user.id && (e.public || own));
+        .filter(|e| e.actor_id != user.id && shown(ctx, e, own));
     reply(ctx, PER_PAGE, events)
 }
 
