@@ -74,6 +74,7 @@ pub const APP_PERMISSIONS: &[&str] = &[
 pub const PUBLIC_READ_PERMISSIONS: &[&str] = &[
     "actions",
     "attestations",
+    "checks",
     "contents",
     "deployments",
     "issues",

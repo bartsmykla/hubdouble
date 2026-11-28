@@ -851,24 +851,10 @@ fn the_public_read_permissions_are_those_github_serves_publicly_on_a_repository_
     let table = std::fs::read_to_string(path).expect("table");
 
     // When the permissions of the public repository and org reads are collected
-    let mut public = std::collections::BTreeSet::new();
-    for line in table.lines().skip(1) {
-        let cells: Vec<&str> = line.split('\t').collect();
-        let (route, grants, public_read) = (cells[1], cells[4], cells[5]);
-        let targeted = route.contains("{owner}") && route.contains("{repo}")
-            || route.contains("{org}")
-            || route.contains("{repository_id}");
-        if !targeted || public_read != "yes" || matches!(grants, "-" | "?" | "x") {
-            continue;
-        }
-        let grants: Vec<(&str, &str)> = grants
-            .split(['|', ','])
-            .filter_map(|g| g.split_once('='))
-            .collect();
-        if grants.iter().all(|(_, access)| *access == "read") {
-            public.extend(grants.iter().map(|(permission, _)| *permission));
-        }
-    }
+    let public: std::collections::BTreeSet<&str> = public_reads(&table)
+        .into_iter()
+        .flat_map(|(_, grants)| grants.into_iter().map(|(permission, _)| permission))
+        .collect();
 
     // Then they are exactly the public read permissions
     let ours: std::collections::BTreeSet<&str> = hubdouble_auth::PUBLIC_READ_PERMISSIONS
@@ -876,6 +862,73 @@ fn the_public_read_permissions_are_those_github_serves_publicly_on_a_repository_
         .copied()
         .collect();
     assert_eq!(ours, public);
+}
+
+#[test]
+fn every_read_github_serves_publicly_passes_anonymously_on_a_public_repository() {
+    // Given GitHub's permission table and an anonymous caller
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/inventory/rest-permissions.tsv"
+    );
+    let table = std::fs::read_to_string(path).expect("table");
+    let store = store();
+
+    for (route, grants) in public_reads(&table) {
+        if !(route.contains("{owner}") && route.contains("{repo}")) {
+            continue;
+        }
+        // When the read's grants guard a public repository
+        let all_of: Vec<Grant> = grants
+            .iter()
+            .map(|(permission, _)| Grant::read(Box::leak(permission.to_string().into_boxed_str())))
+            .collect();
+        let req = Requirement {
+            any_of: &[],
+            all_of: Box::leak(all_of.into_boxed_slice()),
+            scope: Scope::Repo,
+            scopes: &[],
+        };
+
+        // Then the anonymous caller passes
+        assert_eq!(
+            status(on_repo(&store, &Actor::Anonymous, &req, PUBLIC)),
+            200,
+            "{route} {grants:?}"
+        );
+    }
+}
+
+/// The repository and org routes GitHub marks `public_read=yes`, with the grants of each
+/// all-read alternative (`|` between alternatives, `+` inside one) that installations and
+/// user-to-server tokens take.
+fn public_reads(table: &str) -> Vec<(&str, Vec<(&str, &str)>)> {
+    let mut reads = Vec::new();
+    for line in table.lines().skip(1) {
+        let cells: Vec<&str> = line.split('\t').collect();
+        let (route, public_read) = (cells[1], cells[5]);
+        let targeted = route.contains("{owner}") && route.contains("{repo}")
+            || route.contains("{org}")
+            || route.contains("{repository_id}");
+        if !targeted || public_read != "yes" {
+            continue;
+        }
+        for column in [cells[2], cells[3]] {
+            if matches!(column, "-" | "?" | "x") {
+                continue;
+            }
+            for alternative in column.split('|') {
+                let grants: Vec<(&str, &str)> = alternative
+                    .split('+')
+                    .filter_map(|g| g.split_once('='))
+                    .collect();
+                if !grants.is_empty() && grants.iter().all(|(_, access)| *access == "read") {
+                    reads.push((route, grants));
+                }
+            }
+        }
+    }
+    reads
 }
 
 #[test]
