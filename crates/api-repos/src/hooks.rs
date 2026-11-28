@@ -65,6 +65,13 @@ pub(crate) fn register(r: &mut Registrar<'_>) {
     rest.handle("repos/redeliver-webhook-delivery", REPO_WRITE, redeliver);
     rest.handle("repos/ping-webhook", REPO_READ, ping);
     rest.handle("repos/test-push-webhook", REPO_READ, test_push);
+    rest.extra(
+        http::Method::POST,
+        "/repos/{owner}/{repo}/hooks/{hook_id}/test",
+        "repos/test-push-webhook-at-test-url",
+        REPO_READ,
+        test_push,
+    );
     rest.handle("orgs/list-webhooks", ORG_READ, list);
     rest.handle("orgs/create-webhook", ORG_WRITE, create);
     rest.handle("orgs/get-webhook", ORG_READ, get);

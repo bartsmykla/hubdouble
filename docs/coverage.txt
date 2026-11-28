@@ -50,7 +50,7 @@ operations: 159 of 1281 registered (12.4%)
   security-advisories: 0/14
   teams: 4/32
   users: 3/55
-extra routes: 12
+extra routes: 13
 missing:
   actions:
     actions/add-custom-labels-to-self-hosted-runner-for-org

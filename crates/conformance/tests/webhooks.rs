@@ -9,6 +9,8 @@ use hubdouble_testkit::fixture::{
 };
 use hubdouble_testkit::{Answer, Delivery, GoGithub, TestServer};
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 const REPO_HOOKS: &str = "repos/acme/public/hooks";
 const ORG_HOOKS: &str = "orgs/acme/hooks";
@@ -526,6 +528,54 @@ async fn the_push_test_sends_a_push_only_to_a_hook_that_subscribes_to_push() {
     assert!(delivery.signed_with("push-secret"));
     assert_eq!(delivery.json()["repository"]["id"], PUBLIC_REPO_ID);
     assert!(to_hook(&deliveries, issues, "push").is_empty());
+}
+
+#[tokio::test]
+async fn the_test_url_of_a_hook_sends_the_push_test() {
+    // Given
+    let server = server().await;
+    let alice = alice(&server);
+    let created = alice
+        .post(REPO_HOOKS, &hook(&server, "s", &["push"], true))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let id = created.json()["id"].as_i64().unwrap();
+    let test_url = created.json()["test_url"].as_str().unwrap().to_owned();
+    drained(&server).await;
+
+    // When
+    let path = test_url.strip_prefix(&server.base).unwrap();
+    let status = post_outside_the_spec(&server, path).await;
+
+    // Then
+    assert!(test_url.ends_with(&format!("/hooks/{id}/test")), "{test_url}");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(to_hook(&drained(&server).await, id, "push").len(), 1);
+}
+
+async fn post_outside_the_spec(server: &TestServer, path: &str) -> StatusCode {
+    let mut stream = TcpStream::connect(server.addr)
+        .await
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {HOOK_ADMIN_TOKEN}\r\n\
+         Connection: close\r\nContent-Length: 0\r\n\r\n",
+        server.addr
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .unwrap_or_else(|e| panic!("write: {e}"));
+    let mut answer = String::new();
+    stream
+        .read_to_string(&mut answer)
+        .await
+        .unwrap_or_else(|e| panic!("read: {e}"));
+    answer
+        .split(' ')
+        .nth(1)
+        .and_then(|code| StatusCode::from_bytes(code.as_bytes()).ok())
+        .unwrap_or_else(|| panic!("no status: {answer}"))
 }
 
 fn assert_denied(answer: &Answer, permission: &str) {

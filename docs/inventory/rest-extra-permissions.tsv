@@ -11,3 +11,4 @@ oauth/sso	-	no	the SAML sign-in page of an organization, which a browser submits
 oauth/sso-page	-	no	the SAML sign-in page of an organization, which a browser opens without a token
 orgs/check-public-membership-for-user-by-id	members=read	yes	orgs/check-public-membership-for-user, which GitHub redirects to by organization ID
 repos/get-by-id	metadata=read	yes	repos/get, which GitHub serves by repository ID
+repos/test-push-webhook-at-test-url	repository_hooks=read	no	repos/test-push-webhook, which GitHub also serves at the test_url of a hook
