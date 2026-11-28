@@ -214,9 +214,7 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             ref_name: &a.ref_name,
             timestamp: a.at,
             activity_type: a.kind,
-            actor: accounts
-                .get(a.actor_id)
-                .map(|u| SimpleUser::new(ctx.urls(), u)),
+            actor: Some(SimpleUser::new(ctx.urls(), accounts.author(a.actor_id))),
         })
         .collect();
     let mut links = Vec::with_capacity(2);

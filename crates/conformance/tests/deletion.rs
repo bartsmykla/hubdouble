@@ -455,6 +455,117 @@ async fn the_content_of_a_deleted_user_reads_back_as_the_ghost_user() {
     }
 }
 
+fn assert_ghost(path: &str, user: &Value) {
+    assert_eq!(user["login"], "ghost", "{path}: {user}");
+    assert_eq!(user["id"], 10137, "{path}: {user}");
+}
+
+#[tokio::test]
+async fn releases_runs_statuses_activity_and_pushes_of_a_deleted_user_name_the_ghost_user() {
+    // Given carol's push of a workflow, a release with an asset and a status in acme/public,
+    // and a repository hook that takes pushes
+    let server = start(vec![
+        json!({"kind": "actions", "auto_complete": "none"}),
+        json!({"kind": "repository", "owner": "acme", "name": "ci", "visibility": "public",
+               "files": {".github/workflows/ci.yml": "on: workflow_dispatch\njobs: {test: {}}\n"},
+               "collaborators": [{"login": "carol", "permission": "write"}],
+               "commits": [{"branch": "feature", "message": "add the feature",
+                            "files": {"src/feature.txt": "feature\n"}}]}),
+        json!({"kind": "release", "repository": "acme/ci", "tag_name": "v9.0.0",
+               "author": "carol", "assets": [{"name": "app.zip", "content": "zip"}]}),
+    ])
+    .await;
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    let carol = GoGithub::new(&server).with_token(fixture::CAROL_TOKEN);
+    let feature = alice
+        .get("repos/acme/ci/git/ref/heads/feature")
+        .await
+        .json();
+    let sha = feature["object"]["sha"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{feature}"))
+        .to_owned();
+    let pushed = carol
+        .call_json(
+            Method::PATCH,
+            "repos/acme/ci/git/refs/heads/main",
+            &json!({"sha": sha}),
+        )
+        .await;
+    assert_eq!(pushed.status.as_u16(), 200, "{:?}", pushed.body);
+    let dispatched = carol
+        .post(
+            "repos/acme/ci/actions/workflows/ci.yml/dispatches",
+            &json!({"ref": "main"}),
+        )
+        .await;
+    assert!(dispatched.status.is_success(), "{:?}", dispatched.body);
+    let status = carol
+        .post(
+            &format!("repos/acme/ci/statuses/{sha}"),
+            &json!({"state": "success", "context": "ci"}),
+        )
+        .await;
+    assert_eq!(status.status.as_u16(), 201, "{:?}", status.body);
+    let hook = alice
+        .post(
+            "repos/acme/ci/hooks",
+            &json!({"events": ["push"], "config": {"url": server.receiver.url(),
+                    "content_type": "json"}}),
+        )
+        .await;
+    assert_eq!(hook.status.as_u16(), 201, "{:?}", hook.body);
+    let hook_id = hook.json()["id"].clone();
+
+    // When carol is deleted
+    admin(&server, Method::DELETE, "user/carol", None).await;
+
+    // Then every read names the ghost user in carol's place
+    let releases = alice.get("repos/acme/ci/releases").await;
+    assert_eq!(releases.status.as_u16(), 200, "{:?}", releases.body);
+    let release = alice.get("repos/acme/ci/releases/tags/v9.0.0").await;
+    assert_eq!(release.status.as_u16(), 200, "{:?}", release.body);
+    let release = release.json();
+    assert_ghost("release author", &release["author"]);
+    assert_ghost("asset uploader", &release["assets"][0]["uploader"]);
+    let asset_id = &release["assets"][0]["id"];
+    let asset = alice
+        .get(&format!("repos/acme/ci/releases/assets/{asset_id}"))
+        .await;
+    assert_ghost("asset", &asset.json()["uploader"]);
+    let statuses = alice
+        .get(&format!("repos/acme/ci/commits/{sha}/statuses"))
+        .await;
+    assert_ghost("status creator", &statuses.json()[0]["creator"]);
+    let runs = alice.get("repos/acme/ci/actions/runs").await.json();
+    let run = &runs["workflow_runs"][0];
+    assert_eq!(run["event"], "workflow_dispatch", "{runs}");
+    assert_ghost("run actor", &run["actor"]);
+    assert_ghost("run triggering actor", &run["triggering_actor"]);
+    let activity = alice.get("repos/acme/ci/activity").await.json();
+    assert_ghost("activity actor", &activity[0]["actor"]);
+
+    // And the push test replays carol's push with the ghost user as its sender
+    let drained = server.admin(Method::POST, "hooks/drain", None).await;
+    assert_eq!(drained.status.as_u16(), 204);
+    server.receiver.received().await;
+    let tested = alice
+        .call(
+            Method::POST,
+            &format!("repos/acme/ci/hooks/{hook_id}/tests"),
+        )
+        .await;
+    assert_eq!(tested.status.as_u16(), 204, "{:?}", tested.body);
+    let drained = server.admin(Method::POST, "hooks/drain", None).await;
+    assert_eq!(drained.status.as_u16(), 204);
+    let deliveries = server.receiver.received().await;
+    let push = deliveries
+        .iter()
+        .find(|d| d.header("x-github-event") == "push")
+        .unwrap_or_else(|| panic!("no push delivery"));
+    assert_ghost("push sender", &push.json()["sender"]);
+}
+
 #[tokio::test]
 async fn deleting_a_user_drops_the_apps_they_own_with_installations_and_tokens() {
     // Given carol's App installed on acme, with an installation token

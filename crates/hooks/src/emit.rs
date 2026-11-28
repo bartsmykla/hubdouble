@@ -251,9 +251,12 @@ fn rendered(tx: &Tx, e: &Subjects, p: &Map<String, Value>) -> Vec<(&'static str,
         ));
     }
     if absent("sender")
-        && let Some(sender) = e.sender.and_then(|id| accounts.get(id))
+        && let Some(sender) = e.sender
     {
-        out.push(("sender", Rendered::Sender(SimpleUser::new(&urls, sender))));
+        out.push((
+            "sender",
+            Rendered::Sender(SimpleUser::new(&urls, accounts.author(sender))),
+        ));
     }
     out
 }

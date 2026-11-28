@@ -41,16 +41,12 @@ pub(crate) fn render(tx: &Tx, urls: &Urls, r: &Release) -> Result<render::Releas
         .ok_or_else(ApiError::not_found)?;
     let full_name = crate::full_name(tx, repo)?;
     let accounts = tx.table::<Accounts>();
-    let author = accounts
-        .get(r.author_id)
-        .ok_or_else(|| ApiError::internal("the release has no author"))?;
+    let author = accounts.author(r.author_id);
     let assets = tx
         .table::<ReleaseAssets>()
         .children(r.id)
         .map(|a| {
-            let uploader = accounts
-                .get(a.uploader_id)
-                .map(|u| SimpleUser::new(urls, u));
+            let uploader = Some(SimpleUser::new(urls, accounts.author(a.uploader_id)));
             render::ReleaseAsset::new(urls, a, &full_name, &r.tag_name, uploader)
         })
         .collect();
@@ -154,10 +150,10 @@ fn asset(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         };
         return Reply::redirect(&link);
     }
-    let accounts = tx.table::<Accounts>();
-    let uploader = accounts
-        .get(a.uploader_id)
-        .map(|u| SimpleUser::new(ctx.urls(), u));
+    let uploader = Some(SimpleUser::new(
+        ctx.urls(),
+        tx.table::<Accounts>().author(a.uploader_id),
+    ));
     Reply::json(&render::ReleaseAsset::new(
         ctx.urls(),
         a,
