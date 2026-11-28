@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use hubdouble_model::{Access, AccountKind, App, Event, Installation, RepositorySelection};
+use hubdouble_model::{Access, AccountKind, App, Event, Installation, Repo, RepositorySelection};
 use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
 use hubdouble_store::{Accounts, Apps, Deliveries, Installations, OutboxEntry, Repos, Tx, TxMut};
 use serde::ser::SerializeMap as _;
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
+use crate::hook::ORGANIZATION_EVENTS;
 use crate::push::PushRepository;
 use crate::{HookOwner, Hooks, HooksError, Injection, LatestPush, LatestPushes};
 
@@ -85,6 +86,16 @@ fn covers(i: &Installation, repo_id: i64) -> bool {
     i.repository_selection == RepositorySelection::All || i.repo_ids.contains(&repo_id)
 }
 
+fn scope<'t>(tx: &'t Tx, e: &Event) -> Option<(Option<&'t Arc<Repo>>, i64)> {
+    let repo = match e.repo_id {
+        Some(id) => Some(tx.table::<Repos>().get(id)?),
+        None => None,
+    };
+    let repo = repo.filter(|_| !ORGANIZATION_EVENTS.contains(&e.name));
+    let account = repo.map(|r| r.owner_id).or(e.org_id)?;
+    Some((repo, account))
+}
+
 pub(crate) fn recipients(tx: &Tx, e: &Event) -> Vec<(i64, Option<Arc<Installation>>)> {
     let apps = tx.table::<Apps>();
     let wants = |app_id: i64| {
@@ -113,11 +124,7 @@ pub(crate) fn recipients(tx: &Tx, e: &Event) -> Vec<(i64, Option<Arc<Installatio
             Vec::new()
         };
     }
-    let repo = e.repo_id.and_then(|id| tx.table::<Repos>().get(id));
-    if e.repo_id.is_some() && repo.is_none() {
-        return Vec::new();
-    }
-    let Some(account) = repo.map(|r| r.owner_id).or(e.org_id) else {
+    let Some((repo, account)) = scope(tx, e) else {
         return Vec::new();
     };
     tx.table::<Installations>()
@@ -148,14 +155,12 @@ pub(crate) fn hook_recipients(tx: &Tx, e: &Event) -> Vec<i64> {
     let Some(hooks) = tx.try_table::<Hooks>().filter(|_| hooks_get(e)) else {
         return Vec::new();
     };
-    let repo = e.repo_id.and_then(|id| tx.table::<Repos>().get(id));
-    if e.repo_id.is_some() && repo.is_none() {
+    let Some((repo, account)) = scope(tx, e) else {
         return Vec::new();
-    }
-    let org = repo.map(|r| r.owner_id).or(e.org_id);
+    };
     repo.map(|r| r.id)
         .into_iter()
-        .chain(org)
+        .chain([account])
         .flat_map(|parent| hooks.children(parent))
         .filter(|h| h.active && h.subscribes(e.name))
         .map(|h| h.id)

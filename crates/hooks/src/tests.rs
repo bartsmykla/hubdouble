@@ -325,6 +325,85 @@ fn recipients_follow_installation_coverage_and_subscription() {
 }
 
 #[test]
+fn a_team_event_on_a_fork_reaches_the_teams_organization_and_not_the_forks_owner() {
+    // Given App A installed on the team's organization for another repository, App B installed
+    // on a second organization, each with members read, and a team hook on each organization
+    const GLOBEX: i64 = 12;
+    const USER_FORK: i64 = 22;
+    const GLOBEX_FORK: i64 = 23;
+    const ACME_HOOK: i64 = 300;
+    const GLOBEX_HOOK: i64 = 301;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Accounts>().insert(account(
+                GLOBEX,
+                "globex",
+                AccountKind::Organization,
+            ))?;
+            for (id, owner_id) in [(USER_FORK, USER), (GLOBEX_FORK, GLOBEX)] {
+                tx.table_mut::<Repos>().insert(Repo {
+                    owner_id,
+                    fork_of: Some(WIDGET),
+                    ..repo(id, "widget")
+                })?;
+            }
+            tx.table_mut::<Apps>()
+                .replace(app(APP_A, "alpha", &["team"]))?;
+            tx.table_mut::<Apps>()
+                .replace(app(APP_B, "beta", &["team"]))?;
+            let mut a = installation(INSTALL_A, APP_A, Some(vec![OTHER]));
+            a.permissions.insert("members".to_owned(), Access::Read);
+            let mut b = installation(INSTALL_B, APP_B, None);
+            b.account_id = GLOBEX;
+            b.permissions.insert("members".to_owned(), Access::Read);
+            tx.table_mut::<Installations>().replace(a)?;
+            tx.table_mut::<Installations>().replace(b)?;
+            for (id, org) in [(ACME_HOOK, ORG), (GLOBEX_HOOK, GLOBEX)] {
+                tx.table_mut::<Hooks>().insert(Hook {
+                    id,
+                    owner: HookOwner::Org(org),
+                    url: format!("http://hook.test/{id}"),
+                    content_type: ContentType::Json,
+                    secret: None,
+                    insecure_ssl: false,
+                    events: vec!["team".to_owned()],
+                    active: true,
+                    created_at: Timestamp::SEED,
+                    updated_at: Timestamp::SEED,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    for fork in [USER_FORK, GLOBEX_FORK] {
+        // When a team of acme is added to a fork that another account owns
+        emit_one(
+            &store,
+            Event {
+                action: Some("added_to_repository"),
+                org_id: Some(ORG),
+                ..event("team", fork)
+            },
+        );
+        // Then only acme's installation and acme's hook get the event
+        let mut got: Vec<(i64, Option<i64>, Option<i64>)> = store
+            .take_outbox()
+            .iter()
+            .map(|c| (c.entry.app_id, c.entry.hook_id, c.entry.installation_id))
+            .collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            [(0, Some(ACME_HOOK), None), (APP_A, None, Some(INSTALL_A))],
+            "fork {fork}"
+        );
+    }
+}
+
+#[test]
 fn an_event_reaches_only_installations_granted_its_permission() {
     // Given two Apps that subscribe to the same events on one repository, and installation B with contents and checks read but no issues permission
     let store = world();
