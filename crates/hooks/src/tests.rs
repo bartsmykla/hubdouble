@@ -13,14 +13,14 @@ use hubdouble_model::{
 use hubdouble_store::{
     Accounts, Apps, Counters, Deliveries, Installations, Repos, Sequence, Store, StoreBuilder,
 };
-use hyper::body::Incoming;
+use hyper::body::{Body as _, Incoming};
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::delivery::{signature_1, signature_256};
+use crate::delivery::{Wire, signature_1, signature_256};
 use crate::{
     ConnectFuture, Connector, ContentType, Handle, Hook, HookOwner, Hooks, HooksError, Io, Notice,
     Options, emit, ping, redeliver,
@@ -724,6 +724,28 @@ fn signatures_match_known_vectors() {
         signature_1(b"Jefe", [&b"what do ya want for nothing?"[..]]),
         "sha1=effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"
     );
+}
+
+#[tokio::test]
+async fn a_form_body_goes_out_in_pieces_far_smaller_than_the_whole_form() {
+    // Given a 1 MiB payload of slashes, which the form encodes to three times its size
+    let json = Bytes::from(vec![b'/'; 1 << 20]);
+    let mut wire = Wire::new(json, true);
+    let announced = wire.size_hint().exact();
+    // When the body is read frame by frame
+    let mut sent = Vec::new();
+    let mut largest = 0;
+    while let Some(frame) = wire.frame().await {
+        let data = frame.unwrap().into_data().unwrap();
+        largest = largest.max(data.len());
+        sent.extend_from_slice(&data);
+    }
+    // Then no frame holds more than 64 KiB and the frames make the announced form body
+    assert!(largest <= 64 * 1024, "largest frame {largest}");
+    let mut expected = b"payload=".to_vec();
+    expected.extend(b"%2F".repeat(1 << 20));
+    assert_eq!(sent, expected);
+    assert_eq!(announced, Some(expected.len() as u64));
 }
 
 #[tokio::test(start_paused = true)]

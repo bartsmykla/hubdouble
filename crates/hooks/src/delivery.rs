@@ -1,14 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
+use std::convert::Infallible;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use hmac::{Hmac, KeyInit, Mac};
 use http::header::{HOST, HeaderName, HeaderValue};
 use http::{Method, Request, Uri};
-use http_body_util::{BodyExt, Full};
-use hyper::body::Body as _;
+use http_body_util::BodyExt;
+use hyper::body::{Body as _, Frame, SizeHint};
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
@@ -76,6 +78,75 @@ pub(crate) fn signature_1<'a>(secret: &[u8], body: impl IntoIterator<Item = &'a 
     format!("sha1={}", hex(&mac.finalize().into_bytes()))
 }
 
+pub(crate) fn form_chunks(body: &[u8]) -> impl Iterator<Item = &[u8]> {
+    std::iter::once(&b"payload="[..])
+        .chain(url::form_urlencoded::byte_serialize(body).map(str::as_bytes))
+}
+
+const FORM_CHUNK: usize = 16 * 1024;
+
+/// A delivery's request body: the JSON payload as it is, or the bytes of [`form_chunks`]
+/// encoded a fixed number of payload bytes at a time, so the whole form body is never held.
+pub(crate) struct Wire {
+    rest: Bytes,
+    form: bool,
+    head: bool,
+    left: u64,
+}
+
+impl Wire {
+    pub(crate) fn new(body: Bytes, form: bool) -> Wire {
+        let len = if form {
+            form_chunks(&body).map(<[u8]>::len).sum()
+        } else {
+            body.len()
+        };
+        Wire {
+            rest: body,
+            form,
+            head: form,
+            left: len as u64,
+        }
+    }
+}
+
+impl hyper::body::Body for Wire {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+        let wire = &mut *self;
+        if wire.left == 0 {
+            return Poll::Ready(None);
+        }
+        let data = if wire.form {
+            let input = wire.rest.split_to(wire.rest.len().min(FORM_CHUNK));
+            let mut out = Vec::with_capacity(input.len() * 3 + 8);
+            if std::mem::take(&mut wire.head) {
+                out.extend_from_slice(b"payload=");
+            }
+            url::form_urlencoded::byte_serialize(&input)
+                .for_each(|s| out.extend_from_slice(s.as_bytes()));
+            Bytes::from(out)
+        } else {
+            std::mem::take(&mut wire.rest)
+        };
+        wire.left = wire.left.saturating_sub(data.len() as u64);
+        Poll::Ready(Some(Ok(Frame::data(data))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.left == 0
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(self.left)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Outcome {
     pub status_code: i64,
@@ -95,16 +166,12 @@ impl Outcome {
     }
 }
 
-fn request(
-    uri: &Uri,
-    headers: &BTreeMap<String, String>,
-    body: Bytes,
-) -> Option<Request<Full<Bytes>>> {
+fn request(uri: &Uri, headers: &BTreeMap<String, String>, body: Wire) -> Option<Request<Wire>> {
     let target = uri.path_and_query().map_or("/", |p| p.as_str());
     let mut req = Request::builder()
         .method(Method::POST)
         .uri(target)
-        .body(Full::new(body))
+        .body(body)
         .ok()?;
     let h = req.headers_mut();
     h.insert(HOST, HeaderValue::from_str(uri.authority()?.as_str()).ok()?);
@@ -131,7 +198,7 @@ async fn read_capped(mut body: hyper::body::Incoming, cap: usize) -> Option<(Vec
     Some((out, ended))
 }
 
-type Sender = SendRequest<Full<Bytes>>;
+type Sender = SendRequest<Wire>;
 
 pub(crate) struct Pool {
     idle: Mutex<HashMap<String, Vec<(Sender, Instant)>>>,
@@ -189,7 +256,7 @@ pub(crate) async fn send(
     pool: &Pool,
     url: &str,
     headers: &BTreeMap<String, String>,
-    body: Bytes,
+    body: Wire,
     cap: usize,
 ) -> Outcome {
     let Ok(uri) = url.parse::<Uri>() else {

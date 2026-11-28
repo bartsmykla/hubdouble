@@ -13,7 +13,7 @@ use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::delivery::{Outcome, Pool, send, signature_1, signature_256};
+use crate::delivery::{Outcome, Pool, Wire, form_chunks, send, signature_1, signature_256};
 use crate::{ContentType, Hooks, HooksError, Notice, Options, QUEUE_BYTES, Stats};
 
 pub(crate) const OVER_BUDGET: &str = "Queue full";
@@ -36,21 +36,7 @@ pub(crate) struct Job {
     over_budget: bool,
 }
 
-fn form_chunks(body: &[u8]) -> impl Iterator<Item = &[u8]> {
-    std::iter::once(&b"payload="[..])
-        .chain(url::form_urlencoded::byte_serialize(body).map(str::as_bytes))
-}
-
 impl Job {
-    fn wire(&self) -> Bytes {
-        if !self.form {
-            return self.body.clone();
-        }
-        let mut out = Vec::with_capacity(self.body.len() + 8);
-        form_chunks(&self.body).for_each(|chunk| out.extend_from_slice(chunk));
-        Bytes::from(out)
-    }
-
     fn logged(self, delivered_at: Timestamp, duration: f64, outcome: Outcome) -> Delivery {
         Delivery {
             id: self.id,
@@ -654,7 +640,7 @@ impl Shared {
                 &self.pool,
                 &job.url,
                 &job.headers,
-                job.wire(),
+                Wire::new(job.body.clone(), job.form),
                 self.options.response_bytes,
             ),
         )
