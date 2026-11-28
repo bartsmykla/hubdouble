@@ -9,6 +9,18 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), Box<dyn Error>> {
     let [base] = args else {
         return Err("usage: xtask coverage-ratchet <base revision>".into());
     };
+    let exists = Command::new("git")
+        .current_dir(root)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{base}^{{commit}}"),
+        ])
+        .output()?;
+    if !exists.status.success() {
+        return Err(format!("{base} is not a revision of this repository").into());
+    }
     let shown = Command::new("git")
         .current_dir(root)
         .args(["show", &format!("{base}:{COVERAGE}")])
@@ -64,6 +76,49 @@ mod tests {
 
         // Then only the dropped operation fails the ratchet, though the count stayed the same
         assert_eq!(lost, ["emojis/get"]);
+    }
+
+    fn repository() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(dir.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&["init", "--quiet"]);
+        git(&["commit", "--quiet", "--allow-empty", "-m", "base"]);
+        std::fs::create_dir(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join(COVERAGE), BASE).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_base_revision_that_does_not_exist_fails_the_ratchet() {
+        // Given a repository without the named revision
+        let dir = repository();
+
+        // When the ratchet compares against it
+        let result = run(dir.path(), &["no-such-revision".to_owned()]);
+
+        // Then it fails
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_base_revision_without_a_coverage_file_passes_the_ratchet() {
+        // Given a repository whose base commit has no coverage file
+        let dir = repository();
+
+        // When the ratchet compares against that commit
+        let result = run(dir.path(), &["HEAD".to_owned()]);
+
+        // Then nothing can be lost
+        assert!(result.is_ok());
     }
 
     #[test]
