@@ -1,7 +1,7 @@
 use http::Method;
 use hubdouble_hooks::Hooks;
 use hubdouble_store::{CheckRuns, IssueComments, Issues, Releases, Rulesets, Statuses, Teams};
-use hubdouble_testkit::{Answer, GoGithub, TestServer, fixture};
+use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer, fixture};
 use serde_json::{Value, json};
 
 const KEPT_REPO_ID: i64 = 3101;
@@ -333,6 +333,70 @@ async fn deleting_a_user_drops_their_repositories_memberships_and_tokens_and_kee
         .await
         .json();
     assert_ne!(permission["permission"], "write");
+}
+
+#[tokio::test]
+async fn the_content_of_a_deleted_user_reads_back_as_the_ghost_user() {
+    // Given an issue and a comment by carol in a repository she does not own
+    let server = start(vec![carol_in_acme()]).await;
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    let carol = GoGithub::new(&server).with_token(fixture::CAROL_TOKEN);
+    let issue = carol
+        .post("repos/acme/public/issues", &json!({"title": "by carol"}))
+        .await;
+    assert_eq!(issue.status.as_u16(), 201, "{:?}", issue.body);
+    let number = issue.json()["number"].clone();
+    let comment = carol
+        .post(
+            &format!("repos/acme/public/issues/{number}/comments"),
+            &json!({"body": "from carol"}),
+        )
+        .await;
+    assert_eq!(comment.status.as_u16(), 201, "{:?}", comment.body);
+    let comment_id = comment.json()["id"].clone();
+    let comment_node = comment.json()["node_id"].clone();
+
+    // When carol is deleted
+    admin(&server, Method::DELETE, "user/carol", None).await;
+
+    // Then REST names the ghost user as the author of both
+    let ghost = |user: &Value| {
+        assert_eq!(user["login"], "ghost", "{user}");
+        assert_eq!(user["id"], 10137, "{user}");
+        assert_eq!(user["node_id"], "MDQ6VXNlcjEwMTM3", "{user}");
+        assert_eq!(user["type"], "User", "{user}");
+        assert!(
+            user["html_url"]
+                .as_str()
+                .is_some_and(|u| u.ends_with("/ghost")),
+            "{user}"
+        );
+    };
+    for path in [
+        format!("repos/acme/public/issues/{number}"),
+        format!("repos/acme/public/issues/comments/{comment_id}"),
+    ] {
+        let answer = alice.get(&path).await;
+        assert_eq!(answer.status.as_u16(), 200, "{path}: {:?}", answer.body);
+        ghost(&answer.json()["user"]);
+    }
+
+    // And GraphQL names the ghost user as the author of both
+    let answer = Graphql::new(alice)
+        .query(
+            "query($n: Int!, $c: ID!) { \
+             repository(owner: \"acme\", name: \"public\") { \
+             issue(number: $n) { author { login } } } \
+             node(id: $c) { ... on IssueComment { author { login } } } }",
+            &json!({"n": number, "c": comment_node}),
+        )
+        .await;
+    let body = answer.json();
+    assert_eq!(
+        body["data"]["repository"]["issue"]["author"]["login"], "ghost",
+        "{body}"
+    );
+    assert_eq!(body["data"]["node"]["author"]["login"], "ghost", "{body}");
 }
 
 #[tokio::test]

@@ -65,6 +65,10 @@ impl<'a> View<'a> {
             .map(|user| SimpleUser::new(self.urls, user))
     }
 
+    pub fn author(&self, id: i64) -> SimpleUser {
+        SimpleUser::new(self.urls, self.tx.table::<Accounts>().author(id))
+    }
+
     pub fn full_team(&self, id: i64) -> Option<Team> {
         let teams = self.tx.table::<Teams>();
         let team = teams.get(id)?;
@@ -79,7 +83,7 @@ impl<'a> View<'a> {
             review,
             &self.name,
             number,
-            self.user(review.user_id),
+            Some(self.author(review.user_id)),
         );
         view.author_association =
             hubdouble_api_pulls::association(self.tx, self.repo, review.user_id);
@@ -92,7 +96,7 @@ impl<'a> View<'a> {
             comment,
             &self.name,
             number,
-            self.user(comment.user_id),
+            Some(self.author(comment.user_id)),
         );
         view.author_association =
             hubdouble_api_pulls::association(self.tx, self.repo, comment.user_id);
@@ -125,7 +129,7 @@ impl<'a> View<'a> {
             self.urls,
             issue,
             &self.name,
-            self.user(issue.user_id),
+            Some(self.author(issue.user_id)),
             self.branch(&pull.head)?,
             self.branch(&pull.base)?,
         )
@@ -135,7 +139,7 @@ impl<'a> View<'a> {
             .iter()
             .filter_map(|&id| self.user(id))
             .collect();
-        response.merged_by = pull.merged_by.and_then(|id| self.user(id));
+        response.merged_by = pull.merged_by.map(|id| self.author(id));
         response.author_association =
             hubdouble_api_pulls::association(self.tx, self.repo, issue.user_id);
         response.mergeable_state = hubdouble_api_pulls::mergeable_state(self.tx, issue);

@@ -181,19 +181,15 @@ fn viewer(ctx: &Ctx<'_>) -> Option<i64> {
 }
 
 fn account(ctx: &Ctx<'_>, id: i64) -> Resolved {
-    ctx.tx
-        .table::<Accounts>()
-        .get(id)
-        .map_or(Resolved::Null, |account| {
-            object(
-                match account.kind {
-                    AccountKind::User => "User",
-                    AccountKind::Bot => "Bot",
-                    AccountKind::Organization => "Organization",
-                },
-                account,
-            )
-        })
+    let account = ctx.tx.table::<Accounts>().author(id);
+    object(
+        match account.kind {
+            AccountKind::User => "User",
+            AccountKind::Bot => "Bot",
+            AccountKind::Organization => "Organization",
+        },
+        account,
+    )
 }
 
 fn pull(ctx: &Ctx<'_>, id: i64) -> Result<Resolved, GqlError> {

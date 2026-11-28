@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use hubdouble_model::{
     Account, App, CheckRun, CheckSuite, Delivery, Installation, Issue, IssueComment, Label,
@@ -124,7 +124,15 @@ impl Rows<Account> {
     pub fn by_login(&self, login: &str) -> Option<&Arc<Account>> {
         self.by_key(&login.to_ascii_lowercase())
     }
+
+    /// The author with this ID, or GitHub's [`Account::ghost`] when the account was deleted.
+    #[must_use]
+    pub fn author(&self, id: i64) -> &Arc<Account> {
+        self.get(id).unwrap_or(&GHOST)
+    }
 }
+
+static GHOST: LazyLock<Arc<Account>> = LazyLock::new(|| Arc::new(Account::ghost()));
 
 impl Entity for Membership {
     fn id(&self) -> i64 {

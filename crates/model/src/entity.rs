@@ -134,6 +134,34 @@ pub struct Account {
     pub updated_at: Timestamp,
 }
 
+impl Account {
+    /// GitHub's `ghost` user, which stands in for the author of content whose account was
+    /// deleted. No row of the `Accounts` table holds it.
+    #[must_use]
+    pub fn ghost() -> Account {
+        Account {
+            id: 10137,
+            node_id: "MDQ6VXNlcjEwMTM3".into(),
+            login: "ghost".into(),
+            kind: AccountKind::User,
+            name: Some("Deleted user".into()),
+            email: None,
+            company: None,
+            blog: None,
+            location: None,
+            bio: None,
+            twitter_username: None,
+            description: None,
+            site_admin: false,
+            verified_email: false,
+            sso_enforced: false,
+            app_id: None,
+            created_at: Timestamp::SEED,
+            updated_at: Timestamp::SEED,
+        }
+    }
+}
+
 /// A user's membership of an organization.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

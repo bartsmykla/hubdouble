@@ -308,6 +308,7 @@ pub enum Deleted { Repo(Arc<Repo>), Team(Arc<Team>), Account(Arc<Account>) /* a 
 pub type DeletionSubscriber = fn(&mut TxMut<'_>, &Deleted) -> Result<(), ApiError>; // StoreBuilder::on_delete; a crate removes its side-table rows for the entity
 pub struct ActivityEvent { pub id: i64, pub kind: &'static str, pub actor_id: i64, pub repo_id: i64, pub repo_name: String, pub org_id: Option<i64>, pub payload: Value, pub public: bool, pub created_at: Timestamp } // table ActivityEvents; ids from their own sequence
 impl Tx { pub fn table<T: Table>(&self) -> &T; pub fn config(&self) -> &Config; }
+impl Rows<Account> { pub fn author(&self, id: i64) -> &Arc<Account>; } // the account, or Account::ghost() (login ghost, ID 10137) once it was deleted; every author, actor and merger of kept content renders through it
 pub struct StoreBuilder;                          // register_table::<T>() for every table, then build_with(config) (build() uses Config::default, for tests); no table is added after start
 pub struct OutboxEntry { pub app_id: i64, pub hook_id: Option<i64>, pub installation_id: Option<i64>, pub repo_id: Option<i64>, pub event: &'static str, pub action: Option<&'static str>, pub payload: serde_json::Value, pub redelivery_of: Option<String> }
 ```
