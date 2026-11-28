@@ -179,7 +179,7 @@ pub(crate) fn record(tx: &mut TxMut<'_>, e: &Event) {
     let expired: Vec<i64> = events
         .iter()
         .take(EXPIRED_EVENTS_PER_WRITE)
-        .take_while(|e| e.created_at < oldest)
+        .filter(|e| e.created_at < oldest)
         .map(|e| e.id)
         .collect();
     events.remove_all(expired);

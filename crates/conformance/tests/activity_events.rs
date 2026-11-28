@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use http::Method;
-use hubdouble_model::{ApiError, Timestamp, Token, TokenKind, Visibility};
+use hubdouble_model::{ApiError, Clock, Timestamp, Token, TokenKind, Visibility};
 use hubdouble_store::{Accounts, ActivityEvents, Repos, Tokens};
 use hubdouble_testkit::{Answer, GoGithub, TestServer, fixture};
 use serde_json::{Value, json};
@@ -504,4 +504,48 @@ async fn a_new_event_drops_the_events_past_30_days_from_the_store() {
         })
         .unwrap_or_else(|error: ApiError| panic!("{error}"));
     assert_eq!(kept, ["IssuesEvent"]);
+}
+
+#[tokio::test]
+async fn an_event_past_30_days_is_dropped_behind_a_newer_one_after_the_clock_moved_back() {
+    // Given an issue opened 40 days ahead, then the clock moved back and a second issue opened
+    let server = start().await;
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    let start = server.clock.now();
+    let open = async |title: &str| {
+        ok(
+            &alice
+                .post("repos/acme/public/issues", &json!({"title": title}))
+                .await,
+            "issue",
+        );
+    };
+    server.clock.set(start.plus_seconds(40 * DAY));
+    open("Ahead").await;
+    server.clock.set(start);
+    open("Behind").await;
+    server.clock.set(start.plus_seconds(35 * DAY));
+
+    // When alice opens a third issue, when only the second is past 30 days
+    open("Later").await;
+
+    // Then the store drops the second issue's event and keeps the other two
+    let kept: Vec<String> = server
+        .server
+        .services()
+        .store
+        .view(|tx| {
+            Ok(tx
+                .table::<ActivityEvents>()
+                .iter()
+                .map(|e| {
+                    e.payload["issue"]["title"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect())
+        })
+        .unwrap_or_else(|error: ApiError| panic!("{error}"));
+    assert_eq!(kept, ["Ahead", "Later"]);
 }
