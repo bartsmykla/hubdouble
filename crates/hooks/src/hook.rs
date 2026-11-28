@@ -1,9 +1,7 @@
 use hubdouble_model::Timestamp;
 use hubdouble_render::Urls;
-use hubdouble_store::{Accounts, Deliveries, Entity, Repos, Rows, Tx};
+use hubdouble_store::{Accounts, Entity, Repos, Rows, Tx};
 use serde_json::{Map, Value, json};
-
-use crate::runtime::OVER_BUDGET;
 
 /// The repository or organization a webhook belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,15 +171,10 @@ impl Hook {
     }
 
     /// GitHub's `hook-response` of the hook's latest logged delivery attempt, past any `Queue
-    /// full` record that was never sent: `unused` before any, `active` after a `2xx`, and
-    /// `misconfigured` with the attempt's status otherwise.
+    /// full` record that was never sent, even after the log dropped it: `unused` before any,
+    /// `active` after a `2xx`, and `misconfigured` with the attempt's status otherwise.
     fn last_response(&self, tx: &Tx) -> Value {
-        let latest = tx.try_table::<Deliveries>().and_then(|log| {
-            log.children(self.id)
-                .rev()
-                .find(|d| d.status != OVER_BUDGET)
-        });
-        let Some(d) = latest else {
+        let Some(d) = tx.try_table::<LastResponses>().and_then(|t| t.get(self.id)) else {
             return unused_response();
         };
         let code = (d.status_code != 0).then_some(d.status_code);
@@ -296,6 +289,28 @@ impl Entity for LatestPush {
     }
     fn repo_id(&self) -> Option<i64> {
         Some(self.repo_id)
+    }
+}
+
+/// The latest logged delivery attempt of a repository or organization webhook that was sent,
+/// kept apart from its delivery log so a hook that was used never shows `unused` again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastResponse {
+    pub hook_id: i64,
+    pub status_code: i64,
+    pub status: String,
+}
+
+/// One [`LastResponse`] per webhook, keyed by the hook ID. Like the delivery log it stays over a
+/// reset while its hook does; deleting a hook removes its row.
+pub type LastResponses = Rows<LastResponse>;
+
+impl Entity for LastResponse {
+    fn id(&self) -> i64 {
+        self.hook_id
+    }
+    fn keep_on_reset(&self) -> bool {
+        true
     }
 }
 

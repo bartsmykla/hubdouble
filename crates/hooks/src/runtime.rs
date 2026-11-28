@@ -14,7 +14,10 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::delivery::{Outcome, Pool, Wire, form_chunks, send, signature_1, signature_256};
-use crate::{ContentType, Hooks, HooksError, Notice, Options, QUEUE_BYTES, Stats};
+use crate::{
+    ContentType, Hooks, HooksError, LastResponse, LastResponses, Notice, Options, QUEUE_BYTES,
+    Stats,
+};
 
 pub(crate) const OVER_BUDGET: &str = "Queue full";
 
@@ -332,6 +335,17 @@ impl Shared {
                 .map(|d| d.id)
                 .collect();
             tx.table_mut::<Deliveries>().remove_all(doomed);
+            let hooks = tx.try_table::<Hooks>();
+            let discarded: Vec<i64> = tx
+                .try_table::<LastResponses>()
+                .into_iter()
+                .flat_map(LastResponses::iter)
+                .filter(|l| hooks.is_none_or(|h| h.get(l.hook_id).is_none()))
+                .map(|l| l.hook_id)
+                .collect();
+            if !discarded.is_empty() {
+                tx.table_mut::<LastResponses>().remove_all(discarded);
+            }
             let rows = tx.table::<Deliveries>();
             Ok(bodies
                 .kept
@@ -778,10 +792,14 @@ impl Shared {
                     .collect()
             });
             let mut table = tx.table_mut::<Deliveries>();
+            let mut answered = None;
             for (e, d) in ready.values() {
                 if *e == epoch && owner_exists && table.insert(d.clone()).is_ok() {
                     logged.push_back(d.id);
                     inserted.push(d);
+                    if d.app_id == 0 && d.status != OVER_BUDGET {
+                        answered = Some(d);
+                    }
                 } else {
                     gone.push(d.id);
                 }
@@ -791,6 +809,15 @@ impl Shared {
                         gone.push(old);
                     }
                 }
+            }
+            if let Some(d) = answered
+                && tx.try_table::<LastResponses>().is_some()
+            {
+                let _ = tx.table_mut::<LastResponses>().replace(LastResponse {
+                    hook_id: d.hook_id,
+                    status_code: d.status_code,
+                    status: d.status.clone(),
+                });
             }
             Ok(())
         });

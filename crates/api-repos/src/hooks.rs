@@ -5,7 +5,7 @@ use http::header::LOCATION;
 use hubdouble_admin::Registrar;
 use hubdouble_api_apps::{DeliveryLog, get_delivery, list_deliveries, redeliver_delivery};
 use hubdouble_git::{ObjectData, RefChange};
-use hubdouble_hooks::{ContentType, Hook, HookOwner, Hooks, LatestPushes, is_event};
+use hubdouble_hooks::{ContentType, Hook, HookOwner, Hooks, LastResponses, LatestPushes, is_event};
 use hubdouble_model::{AccountKind, ApiError, FieldError, Grant, Requirement, Scope};
 use hubdouble_render::Urls;
 use hubdouble_rest::{Ctx, Reply};
@@ -48,6 +48,7 @@ pub(crate) fn register(r: &mut Registrar<'_>) {
     r.store
         .register_table::<Hooks>()
         .register_table::<LatestPushes>()
+        .register_table::<LastResponses>()
         .on_delete(forget);
     let rest = &mut *r.rest;
     rest.handle("repos/list-webhooks", REPO_READ, list);
@@ -111,6 +112,7 @@ fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
         .collect();
     for hook in hooks {
         tx.table_mut::<Deliveries>().remove_children(hook);
+        tx.table_mut::<LastResponses>().remove(hook);
     }
     tx.table_mut::<Hooks>().remove_where(|h| h.owner == owner);
     Ok(())
@@ -353,6 +355,7 @@ fn delete(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let id = hook(ctx)?.id;
     let tx = ctx.tx_mut()?;
     tx.table_mut::<Deliveries>().remove_children(id);
+    tx.table_mut::<LastResponses>().remove(id);
     tx.table_mut::<Hooks>().remove(id);
     Ok(Reply::empty())
 }

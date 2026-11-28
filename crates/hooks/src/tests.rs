@@ -22,8 +22,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::delivery::{Wire, signature_1, signature_256};
 use crate::{
-    ConnectFuture, Connector, ContentType, Handle, Hook, HookOwner, Hooks, HooksError, Io, Notice,
-    Options, emit, ping, redeliver,
+    ConnectFuture, Connector, ContentType, Handle, Hook, HookOwner, Hooks, HooksError, Io,
+    LastResponses, Notice, Options, emit, ping, redeliver,
 };
 
 const ORG: i64 = 10;
@@ -1248,6 +1248,67 @@ async fn a_hooks_last_response_skips_a_queue_full_record_that_was_never_sent() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_hook_stays_active_after_a_queue_full_record_evicts_its_only_answered_attempt() {
+    let sizing = world_with_issues_hook();
+    emit_one(&sizing, event("issues", WIDGET));
+    let one = sizing.take_outbox()[0].entry.payload.len();
+    // Given a log capacity of one, a queue byte limit of one payload and a hook attempt in flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.queue_bytes = one;
+        o.log_capacity = 1;
+    });
+    emit_one(&store, event("issues", WIDGET));
+    let in_flight = hits.recv().await.unwrap();
+    // When a second event is refused as Queue full and the attempt then answers 200
+    emit_one(&store, event("issues", WIDGET));
+    in_flight.reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+    let statuses: Vec<i64> = store
+        .view(|tx| {
+            Ok(tx
+                .table::<Deliveries>()
+                .children(ISSUES_HOOK)
+                .map(|d| d.status_code)
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(statuses, [0]);
+    // Then the hook's last response is still the answered attempt
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 200, "status": "active", "message": "OK"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_seeded_hook_keeps_its_last_response_over_a_reset_that_keeps_its_log() {
+    // Given a seeded hook whose attempt after the snapshot answered 200
+    let store = world_with_issues_hook();
+    let snapshot = store.snapshot();
+    let (hooks, hits) = start(&store, |_| {});
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("issues", WIDGET));
+    hooks.drain().await.unwrap();
+    // When a reset restores the snapshot
+    hooks.reset(&snapshot).await.unwrap();
+    // Then the hook keeps its log and its last response is that attempt
+    assert_eq!(logged_ids(&store, ISSUES_HOOK).len(), 1);
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 200, "status": "active", "message": "OK"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn past_the_log_byte_budget_the_oldest_deliveries_lose_their_bodies() {
     let numbered = |n: i64| {
         let mut e = event("push", WIDGET);
@@ -1548,6 +1609,7 @@ const ISSUES_HOOK: i64 = 300;
 fn world_with_issues_hook() -> Store {
     let mut builder = StoreBuilder::new();
     builder.register_table::<Hooks>();
+    builder.register_table::<LastResponses>();
     let store = world_of(builder);
     store
         .update_quiet(|tx| {
