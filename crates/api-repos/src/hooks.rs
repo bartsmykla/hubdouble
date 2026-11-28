@@ -332,7 +332,9 @@ fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 
 fn delete(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let id = hook(ctx)?.id;
-    ctx.tx_mut()?.table_mut::<Hooks>().remove(id);
+    let tx = ctx.tx_mut()?;
+    tx.table_mut::<Deliveries>().remove_children(id);
+    tx.table_mut::<Hooks>().remove(id);
     Ok(Reply::empty())
 }
 

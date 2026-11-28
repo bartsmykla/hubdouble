@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use http::{Method, StatusCode};
 use hubdouble_hooks::{Hooks, LatestPushes};
 use hubdouble_model::{Clock, Token, TokenKind};
-use hubdouble_store::Tokens;
+use hubdouble_store::{Deliveries, Tokens};
 use hubdouble_testkit::fixture::{
     ALICE_ID, ALICE_TOKEN, APP_PUBLIC_KEY, BOB_TOKEN, ORG, ORG_ID, PUBLIC_REPO_ID,
 };
@@ -940,4 +940,32 @@ async fn deleting_a_repository_drops_its_hooks_and_its_latest_push() {
     // Then
     assert!(deleted.status.is_success(), "{}", deleted.status);
     assert_eq!(rows(&server), (0, 0));
+}
+
+#[tokio::test]
+async fn deleting_a_hook_drops_its_deliveries() {
+    // Given
+    let server = server().await;
+    let alice = alice(&server);
+    let id = create(&alice, REPO_HOOKS, &hook(&server, "s", &["push"], true)).await;
+    let kept = create(&alice, ORG_HOOKS, &hook(&server, "s", &["push"], true)).await;
+    drained(&server).await;
+    let logged = |server: &TestServer, hook_id: i64| {
+        server
+            .server
+            .services()
+            .store
+            .view(|tx| Ok(tx.table::<Deliveries>().children(hook_id).count()))
+            .unwrap()
+    };
+    assert_eq!((logged(&server, id), logged(&server, kept)), (1, 1));
+
+    // When
+    let deleted = alice
+        .call(Method::DELETE, &format!("{REPO_HOOKS}/{id}"))
+        .await;
+
+    // Then
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    assert_eq!((logged(&server, id), logged(&server, kept)), (0, 1));
 }

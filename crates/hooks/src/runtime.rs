@@ -610,6 +610,10 @@ impl Shared {
         let mut gone = Vec::new();
         let _ = self.store.update(|tx| {
             let epoch = self.store.epoch();
+            let owner_exists = tx
+                .try_table::<Hooks>()
+                .is_some_and(|hooks| hooks.get(app).is_some())
+                || tx.table::<Apps>().get(app).is_some();
             let logged = logged.get_or_insert_with(|| {
                 tx.table::<Deliveries>()
                     .children(app)
@@ -618,7 +622,7 @@ impl Shared {
             });
             let mut table = tx.table_mut::<Deliveries>();
             for (e, d) in ready.values() {
-                if *e == epoch && table.insert(d.clone()).is_ok() {
+                if *e == epoch && owner_exists && table.insert(d.clone()).is_ok() {
                     logged.push_back(d.id);
                     inserted.push(d);
                 } else {

@@ -22,7 +22,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::delivery::{signature_1, signature_256};
 use crate::{
-    ConnectFuture, Connector, Handle, HooksError, Io, Notice, Options, emit, ping, redeliver,
+    ConnectFuture, Connector, ContentType, Handle, Hook, HookOwner, Hooks, HooksError, Io, Notice,
+    Options, emit, ping, redeliver,
 };
 
 const ORG: i64 = 10;
@@ -217,7 +218,11 @@ fn installation(id: i64, app_id: i64, repos: Option<Vec<i64>>) -> Installation {
 }
 
 fn world() -> Store {
-    let store = StoreBuilder::new().build_with(Arc::new(config()));
+    world_of(StoreBuilder::new())
+}
+
+fn world_of(builder: StoreBuilder) -> Store {
+    let store = builder.build_with(Arc::new(config()));
     store
         .update_quiet(|tx| {
             let mut accounts = tx.table_mut::<Accounts>();
@@ -781,6 +786,52 @@ async fn the_log_shows_an_attempt_only_after_every_lower_id_finished() {
             .unwrap()
     };
     assert_eq!((n_of(1), n_of(2)), (json!(1), json!(2)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_attempt_that_ends_after_its_hook_or_app_is_deleted_is_not_logged() {
+    // Given a repository hook and an App that both get a push
+    const HOOK: i64 = 300;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>().insert(Hook {
+                id: HOOK,
+                owner: HookOwner::Repo(WIDGET),
+                url: "http://hook.test/a".to_owned(),
+                content_type: ContentType::Json,
+                secret: None,
+                insecure_ssl: false,
+                events: vec!["push".to_owned()],
+                active: true,
+                created_at: Timestamp::SEED,
+                updated_at: Timestamp::SEED,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    let (hooks, mut hits) = start(&store, |o| o.workers = 2);
+    emit_one(&store, event("push", WIDGET));
+    let held = [hits.recv().await.unwrap(), hits.recv().await.unwrap()];
+
+    // When both are deleted while their attempts are in flight
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>().remove(HOOK);
+            tx.table_mut::<Apps>().remove(APP_A);
+            Ok(())
+        })
+        .unwrap();
+    for hit in held {
+        hit.reply.send(200).unwrap();
+    }
+    hooks.drain().await.unwrap();
+
+    // Then neither attempt is logged
+    assert_eq!(logged_ids(&store, HOOK), Vec::<i64>::new());
+    assert_eq!(logged_ids(&store, APP_A), Vec::<i64>::new());
 }
 
 #[tokio::test(start_paused = true)]
