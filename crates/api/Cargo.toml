@@ -11,15 +11,26 @@ publish.workspace = true
 [dependencies]
 hubdouble-admin.workspace = true
 hubdouble-api-actions.workspace = true
+hubdouble-api-activity.workspace = true
 hubdouble-api-apps.workspace = true
+hubdouble-api-billing.workspace = true
 hubdouble-api-checks.workspace = true
+hubdouble-api-codespaces.workspace = true
+hubdouble-api-copilot.workspace = true
+hubdouble-api-deployments.workspace = true
+hubdouble-api-gists.workspace = true
 hubdouble-api-gitdata.workspace = true
 hubdouble-api-issues.workspace = true
+hubdouble-api-meta.workspace = true
+hubdouble-api-migrations.workspace = true
 hubdouble-api-orgs.workspace = true
+hubdouble-api-packages.workspace = true
+hubdouble-api-projects.workspace = true
 hubdouble-api-pulls.workspace = true
 hubdouble-api-repos.workspace = true
 hubdouble-api-reviews.workspace = true
 hubdouble-api-search.workspace = true
+hubdouble-api-security.workspace = true
 hubdouble-api-users.workspace = true
 
 [lints]

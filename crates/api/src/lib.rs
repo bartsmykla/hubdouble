@@ -15,4 +15,15 @@ pub fn register_all(r: &mut Registrar<'_>) {
     hubdouble_api_actions::register(r);
     hubdouble_api_repos::register(r);
     hubdouble_api_search::register(r);
+    hubdouble_api_deployments::register(r);
+    hubdouble_api_activity::register(r);
+    hubdouble_api_meta::register(r);
+    hubdouble_api_security::register(r);
+    hubdouble_api_packages::register(r);
+    hubdouble_api_projects::register(r);
+    hubdouble_api_gists::register(r);
+    hubdouble_api_migrations::register(r);
+    hubdouble_api_codespaces::register(r);
+    hubdouble_api_copilot::register(r);
+    hubdouble_api_billing::register(r);
 }

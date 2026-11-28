@@ -2288,15 +2288,26 @@ version = "0.1.0"
 dependencies = [
  "hubdouble-admin",
  "hubdouble-api-actions",
+ "hubdouble-api-activity",
  "hubdouble-api-apps",
+ "hubdouble-api-billing",
  "hubdouble-api-checks",
+ "hubdouble-api-codespaces",
+ "hubdouble-api-copilot",
+ "hubdouble-api-deployments",
+ "hubdouble-api-gists",
  "hubdouble-api-gitdata",
  "hubdouble-api-issues",
+ "hubdouble-api-meta",
+ "hubdouble-api-migrations",
  "hubdouble-api-orgs",
+ "hubdouble-api-packages",
+ "hubdouble-api-projects",
  "hubdouble-api-pulls",
  "hubdouble-api-repos",
  "hubdouble-api-reviews",
  "hubdouble-api-search",
+ "hubdouble-api-security",
  "hubdouble-api-users",
 ]
 
@@ -2328,6 +2339,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hubdouble-api-activity"
+version = "0.1.0"
+dependencies = [
+ "hubdouble-admin",
+]
+
+[[package]]
 name = "hubdouble-api-apps"
 version = "0.1.0"
 dependencies = [
@@ -2352,6 +2370,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hubdouble-api-billing"
+version = "0.1.0"
+dependencies = [
+ "hubdouble-admin",
+]
+
+[[package]]
 name = "hubdouble-api-checks"
 version = "0.1.0"
 dependencies = [
@@ -2369,6 +2394,34 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "hubdouble-api-codespaces"
+version = "0.1.0"
+dependencies = [
+ "hubdouble-admin",
+]
+
+[[package]]
+name = "hubdouble-api-copilot"
+version = "0.1.0"
+dependencies = [
+ "hubdouble-admin",
+]
+
+[[package]]
+name = "hubdouble-api-deployments"
+version = "0.1.0"
+dependencies = [
+ "hubdouble-admin",
+]
+
+[[package]]
+name = "hubdouble-api-gists"
+version = "0.1.0"
+dependencies = [
+ "hubdouble-admin",
 ]
 
 [[package]]
@@ -2416,6 +2469,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hubdouble-api-meta"
+version = "0.1.0"
+dependencies = [
+ "hubdouble-admin",
+]
+
+[[package]]
+name = "hubdouble-api-migrations"
+version = "0.1.0"
+dependencies = [
+ "hubdouble-admin",
+]
+
+[[package]]
 name = "hubdouble-api-orgs"
 version = "0.1.0"
 dependencies = [
@@ -2433,6 +2500,20 @@ dependencies = [
  "hubdouble-store",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "hubdouble-api-packages"
+version = "0.1.0"
+dependencies = [
+ "hubdouble-admin",
+]
+
+[[package]]
+name = "hubdouble-api-projects"
+version = "0.1.0"
+dependencies = [
+ "hubdouble-admin",
 ]
 
 [[package]]
@@ -2523,6 +2604,13 @@ dependencies = [
  "hubdouble-store",
  "rust-stemmers",
  "serde_json",
+]
+
+[[package]]
+name = "hubdouble-api-security"
+version = "0.1.0"
+dependencies = [
+ "hubdouble-admin",
 ]
 
 [[package]]
