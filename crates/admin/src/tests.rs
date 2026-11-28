@@ -273,6 +273,39 @@ fn the_seed_kinds_build_accounts_orgs_repos_apps_installations_and_tokens() {
 }
 
 #[test]
+fn no_account_takes_the_id_or_login_of_the_ghost_user() {
+    for taken in [
+        json!({"kind": "user", "login": "ghost"}),
+        json!({"kind": "user", "login": "Ghost"}),
+        json!({"kind": "user", "id": 10137, "login": "casper"}),
+        json!({"kind": "org", "id": 10137, "login": "spooks"}),
+    ] {
+        // Given
+        let w = world();
+        // When
+        let e = w.seed(vec![taken.clone()]).unwrap_err();
+        // Then
+        assert_eq!(e.status, 422, "{taken}");
+    }
+
+    // Given
+    let w = world();
+    // When
+    w.seed(vec![
+        json!({"kind": "user", "id": 10136, "login": "alice"}),
+        json!({"kind": "user", "login": "bob"}),
+    ])
+    .unwrap();
+    // Then
+    w.store
+        .view(|tx| {
+            assert_eq!(tx.table::<Accounts>().by_login("bob").unwrap().id, 10138);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn a_failing_entry_changes_nothing_and_names_its_position() {
     // Given
     let w = world();

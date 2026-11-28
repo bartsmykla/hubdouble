@@ -442,6 +442,17 @@ async fn the_content_of_a_deleted_user_reads_back_as_the_ghost_user() {
         "{body}"
     );
     assert_eq!(body["data"]["node"]["author"]["login"], "ghost", "{body}");
+
+    // And the ghost user's own profile answers as on GitHub, by login and by ID
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    for path in ["users/ghost", "user/10137"] {
+        let answer = alice.get(path).await;
+        assert_eq!(answer.status.as_u16(), 200, "{path}: {:?}", answer.body);
+        let user = answer.json();
+        ghost(&user);
+        assert_eq!(user["name"], "Deleted user", "{user}");
+        assert_eq!(user["created_at"], "2008-05-13T06:14:25Z", "{user}");
+    }
 }
 
 #[tokio::test]
