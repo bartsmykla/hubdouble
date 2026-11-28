@@ -60,6 +60,30 @@ const INSTALLATION_ONLY: Requirement = Requirement {
     scope: Scope::Installation,
     scopes: &[],
 };
+const READ_HOOKS: Requirement = Requirement {
+    any_of: &[Grant::read("repository_hooks")],
+    all_of: &[],
+    scope: Scope::Repo,
+    scopes: &["read:repo_hook", "repo"],
+};
+const WRITE_HOOKS: Requirement = Requirement {
+    any_of: &[Grant::write("repository_hooks")],
+    all_of: &[],
+    scope: Scope::Repo,
+    scopes: &["write:repo_hook", "repo"],
+};
+const DELETE_HOOKS: Requirement = Requirement {
+    any_of: &[Grant::write("repository_hooks")],
+    all_of: &[],
+    scope: Scope::Repo,
+    scopes: &["admin:repo_hook", "repo"],
+};
+const ORG_EVENTS: Requirement = Requirement {
+    any_of: &[Grant::read("organization_events")],
+    all_of: &[],
+    scope: Scope::Org,
+    scopes: &[],
+};
 const USER_EMAILS: Requirement = Requirement {
     any_of: &[Grant::read("email_addresses")],
     all_of: &[],
@@ -815,4 +839,134 @@ fn the_permission_list_holds_every_app_permission_of_the_openapi_bundle() {
         .collect();
 
     assert!(missing.is_empty(), "missing {missing:?}");
+}
+
+#[test]
+fn the_public_read_permissions_are_those_github_serves_publicly_on_a_repository_or_org() {
+    // Given GitHub's permission table
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/inventory/rest-permissions.tsv"
+    );
+    let table = std::fs::read_to_string(path).expect("table");
+
+    // When the permissions of the public repository and org reads are collected
+    let mut public = std::collections::BTreeSet::new();
+    for line in table.lines().skip(1) {
+        let cells: Vec<&str> = line.split('\t').collect();
+        let (route, grants, public_read) = (cells[1], cells[4], cells[5]);
+        let targeted = route.contains("{owner}") && route.contains("{repo}")
+            || route.contains("{org}")
+            || route.contains("{repository_id}");
+        if !targeted || public_read != "yes" || matches!(grants, "-" | "?" | "x") {
+            continue;
+        }
+        let grants: Vec<(&str, &str)> = grants
+            .split(['|', ','])
+            .filter_map(|g| g.split_once('='))
+            .collect();
+        if grants.iter().all(|(_, access)| *access == "read") {
+            public.extend(grants.iter().map(|(permission, _)| *permission));
+        }
+    }
+
+    // Then they are exactly the public read permissions
+    let ours: std::collections::BTreeSet<&str> = hubdouble_auth::PUBLIC_READ_PERMISSIONS
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(ours, public);
+}
+
+#[test]
+fn an_installation_outside_a_public_repository_reads_only_what_github_serves_publicly() {
+    // Given a public repository that the installation does not cover
+    let store = store();
+    store
+        .update(|tx| {
+            let mut r = (**tx.table::<Repos>().get(UNINSTALLED).expect("r")).clone();
+            r.visibility = hubdouble_model::Visibility::Public;
+            tx.table_mut::<Repos>().replace(r)?;
+            Ok(())
+        })
+        .expect("publish");
+    let full = actor(&store, "ghs_full");
+
+    // When it reads the contents and the webhooks
+    let contents = on_repo(&store, &full, &READ_CONTENTS, UNINSTALLED);
+    let hooks = on_repo(&store, &full, &READ_HOOKS, UNINSTALLED).expect_err("denied");
+
+    // Then only the contents pass
+    assert_eq!(status(contents), 200);
+    assert_eq!(hooks.status, 403);
+    assert_eq!(
+        header(&hooks, "X-Accepted-GitHub-Permissions"),
+        Some("repository_hooks=read")
+    );
+    assert_eq!(
+        status(on_repo(&store, &Actor::Anonymous, &READ_HOOKS, UNINSTALLED)),
+        404
+    );
+}
+
+#[test]
+fn the_org_dashboard_needs_a_signed_in_user_and_an_app_installed_on_the_org() {
+    // Given an org that the App is not installed on
+    let store = store();
+    let other = 12;
+    store
+        .update(|tx| {
+            let mut org = (**tx.table::<Accounts>().get(ACME).expect("acme")).clone();
+            org.id = other;
+            org.node_id = format!("O_{other}");
+            org.login = "other".to_owned();
+            tx.table_mut::<Accounts>().insert(org)?;
+            Ok(())
+        })
+        .expect("org");
+
+    // When the dashboard is read
+    let anonymous = on_org(&store, &Actor::Anonymous, &ORG_EVENTS, ACME);
+    let uninstalled = on_org(&store, &actor(&store, "ghu_alice"), &ORG_EVENTS, other);
+    let member = on_org(&store, &actor(&store, "ghp_carol"), &ORG_EVENTS, ACME);
+    let outsider = on_org(&store, &actor(&store, "ghp_alice"), &ORG_EVENTS, ACME);
+
+    // Then an anonymous caller is 401 and the uninstalled App's user token 403
+    assert_eq!(status(anonymous), 401);
+    let e = uninstalled.expect_err("denied");
+    assert_eq!(e.status, 403);
+    assert_eq!(
+        header(&e, "X-Accepted-GitHub-Permissions"),
+        Some("organization_events=read")
+    );
+    // And a signed-in user passes, member or not, as GitHub then serves the public events
+    assert_eq!(status(member), 200);
+    assert_eq!(status(outsider), 200);
+}
+
+#[test]
+fn a_classic_token_with_only_a_webhook_scope_manages_the_webhooks_of_a_repository_it_admins() {
+    // Given dave, an acme owner, and bob, a reader, with tokens that hold only admin:repo_hook
+    let store = store();
+    store
+        .update(|tx| {
+            let mut tokens = tx.table_mut::<hubdouble_store::Tokens>();
+            tokens.insert(personal(290, "ghp_dave_hooks", DAVE, &["admin:repo_hook"]))?;
+            tokens.insert(personal(291, "ghp_bob_hooks", BOB, &["admin:repo_hook"]))?;
+            Ok(())
+        })
+        .expect("tokens");
+    let dave = actor(&store, "ghp_dave_hooks");
+    let bob = actor(&store, "ghp_bob_hooks");
+
+    // When they update and delete the webhooks of the public and the private repository
+    let answers = |who: &Actor| {
+        [PUBLIC, PRIVATE].map(|repo| {
+            [&WRITE_HOOKS, &DELETE_HOOKS].map(|req| status(on_repo(&store, who, req, repo)))
+        })
+    };
+
+    // Then the owner passes, and the reader still needs the admin role
+    assert_eq!(answers(&dave), [[200, 200], [200, 200]]);
+    assert_eq!(answers(&bob), [[404, 404], [404, 404]]);
 }

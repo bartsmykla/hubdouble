@@ -7,9 +7,12 @@ use hubdouble_model::{
 use hubdouble_store::{Accounts, Installations, Memberships, Repos, Teams, Tx};
 
 use crate::contract::{Actor, Target};
+use crate::requirement::PUBLIC_READ_PERMISSIONS;
 use crate::sso::has_sso;
 
 const MAX_TEAM_DEPTH: usize = 32;
+const SIGNED_IN_ORG_READS: &[&str] = &["organization_events"];
+const WEBHOOK_SCOPES: &[&str] = &["admin:repo_hook", "write:repo_hook", "read:repo_hook"];
 
 pub(crate) fn authorize(
     tx: &Tx,
@@ -148,12 +151,19 @@ fn repo_access(
     repo: &Repo,
     base_url: &str,
 ) -> Result<(), ApiError> {
-    if !can_see(tx, actor, repo) {
+    let reaches = match actor {
+        Actor::User { token, user } if webhook_scope(token, req) => {
+            !repo.is_private() || repo_role(tx, user.id, repo).is_some()
+        }
+        _ => can_see(tx, actor, repo),
+    };
+    if !reaches {
         return Err(ApiError::not_found());
     }
+    let public_read = public_read(req);
     match actor {
         Actor::Anonymous if hidden(req) => Err(ApiError::not_found()),
-        Actor::Anonymous if is_read(req) => Ok(()),
+        Actor::Anonymous if public_read => Ok(()),
         Actor::Anonymous => Err(requires_authentication()),
         Actor::App { .. } => Err(integration_denied(req)),
         Actor::Installation {
@@ -164,7 +174,7 @@ fn repo_access(
             let allowed = if covers(installation, Some(token), repo) {
                 satisfies(req, |p| installation_level(token, installation, p))
             } else {
-                is_read(req)
+                public_read
             };
             if allowed {
                 Ok(())
@@ -176,11 +186,11 @@ fn repo_access(
             if repo.is_private() {
                 sso(tx, token, user, repo.owner_id, base_url)?;
             }
-            user_to_server(token, req, is_read(req), |app| {
+            user_to_server(token, req, public_read, |app| {
                 app_installation(tx, app, repo)
             })?;
             classic_scopes(token, req)?;
-            if token.kind == TokenKind::Personal && !is_read(req) {
+            if token.kind == TokenKind::Personal && !is_read(req) && !webhook_scope(token, req) {
                 let wanted = if repo.is_private() {
                     &["repo"][..]
                 } else {
@@ -190,8 +200,9 @@ fn repo_access(
                     return Err(scope_denied(wanted));
                 }
             }
-            let held =
-                repo_role(tx, user.id, repo).or((!repo.is_private()).then_some(RepoRole::Read));
+            let held = repo_role(tx, user.id, repo)
+                .or((!repo.is_private() && (public_read || !is_read(req)))
+                    .then_some(RepoRole::Read));
             if held >= Some(needed_role(req)) {
                 Ok(())
             } else if hidden(req) {
@@ -210,13 +221,7 @@ fn org_access(
     org: &Account,
     base_url: &str,
 ) -> Result<(), ApiError> {
-    let public_read = is_read(req)
-        && !hidden(req)
-        && (req.any_of.is_empty()
-            || req
-                .any_of
-                .iter()
-                .any(|grant| grant.permission != "organization_self_hosted_runners"));
+    let public_read = public_read(req);
     match actor {
         Actor::Anonymous if public_read => Ok(()),
         Actor::Anonymous if hidden(req) => Err(ApiError::not_found()),
@@ -247,7 +252,7 @@ fn org_access(
                     .map(AsRef::as_ref)
             })?;
             classic_scopes(token, req)?;
-            if public_read {
+            if public_read || signed_in_read(req) {
                 return Ok(());
             }
             let role = tx
@@ -374,6 +379,21 @@ fn is_read(req: &Requirement) -> bool {
         .all(|g| g.access == Access::Read)
 }
 
+fn public_read(req: &Requirement) -> bool {
+    let public =
+        |g: &Grant| g.access == Access::Read && PUBLIC_READ_PERMISSIONS.contains(&g.permission);
+    req.all_of.iter().all(public) && (req.any_of.is_empty() || req.any_of.iter().any(public))
+}
+
+fn signed_in_read(req: &Requirement) -> bool {
+    !req.any_of.is_empty()
+        && req
+            .any_of
+            .iter()
+            .chain(req.all_of)
+            .all(|g| g.access == Access::Read && SIGNED_IN_ORG_READS.contains(&g.permission))
+}
+
 fn hidden(req: &Requirement) -> bool {
     req.any_of
         .iter()
@@ -410,6 +430,14 @@ fn classic_scopes(token: &Token, req: &Requirement) -> Result<(), ApiError> {
     } else {
         Err(scope_denied(req.scopes))
     }
+}
+
+fn webhook_scope(token: &Token, req: &Requirement) -> bool {
+    token.kind == TokenKind::Personal
+        && req
+            .scopes
+            .iter()
+            .any(|w| WEBHOOK_SCOPES.contains(w) && holds_scope(&token.scopes, w))
 }
 
 fn holds_scope(held: &[String], wanted: &str) -> bool {

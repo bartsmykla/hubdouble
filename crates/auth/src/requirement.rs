@@ -66,6 +66,26 @@ pub const APP_PERMISSIONS: &[&str] = &[
     "workflows",
 ];
 
+/// The App permissions whose reads GitHub serves as public data: the permissions of the
+/// repository and org reads that `docs/inventory/rest-permissions.tsv` marks `public_read`. A
+/// read whose grants are all of these passes for an anonymous caller, for an installation that
+/// does not cover the target and for a user token of an App not installed on it. Every other
+/// read needs that access.
+pub const PUBLIC_READ_PERMISSIONS: &[&str] = &[
+    "actions",
+    "attestations",
+    "contents",
+    "deployments",
+    "issues",
+    "members",
+    "metadata",
+    "organization_projects",
+    "pages",
+    "pull_requests",
+    "repository_advisories",
+    "statuses",
+];
+
 /// Checks that a registered operation's requirement can deny access: a repository or org
 /// requirement names at least one permission and its path names the target the choke point
 /// checks, a public requirement names none, and every permission is a GitHub App permission.
