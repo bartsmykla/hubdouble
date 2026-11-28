@@ -403,6 +403,57 @@ fn a_team_event_on_a_fork_reaches_the_teams_organization_and_not_the_forks_owner
     }
 }
 
+fn hook_row(id: i64, owner: HookOwner, event: &str) -> Hook {
+    Hook {
+        id,
+        owner,
+        url: format!("http://hook.test/{id}"),
+        content_type: ContentType::Json,
+        secret: None,
+        insecure_ssl: false,
+        events: vec![event.to_owned()],
+        active: true,
+        created_at: Timestamp::SEED,
+        updated_at: Timestamp::SEED,
+    }
+}
+
+#[test]
+fn a_wildcard_hook_gets_no_event_that_github_sends_only_to_apps() {
+    // Given a repository hook and an organization hook that subscribe to every event
+    const REPO_HOOK: i64 = 320;
+    const ORG_HOOK: i64 = 321;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>()
+                .insert(hook_row(REPO_HOOK, HookOwner::Repo(WIDGET), "*"))?;
+            tx.table_mut::<Hooks>()
+                .insert(hook_row(ORG_HOOK, HookOwner::Org(ORG), "*"))?;
+            Ok(())
+        })
+        .unwrap();
+    let mut got = BTreeMap::new();
+    for name in ["push", "workflow_dispatch"] {
+        // When the repository emits a webhook event and an App-only event
+        emit_one(&store, event(name, WIDGET));
+        let mut hooks: Vec<Option<i64>> = store
+            .take_outbox()
+            .iter()
+            .map(|c| c.entry.hook_id)
+            .filter(Option::is_some)
+            .collect();
+        hooks.sort_unstable();
+        got.insert(name, hooks);
+    }
+
+    // Then both hooks get push and neither gets workflow_dispatch
+    assert_eq!(got["push"], [Some(REPO_HOOK), Some(ORG_HOOK)]);
+    assert_eq!(got["workflow_dispatch"], []);
+}
+
 #[test]
 fn repository_deleted_reaches_organization_hooks_and_no_app_or_repository_hook() {
     // Given an App installed on every repository, a repository hook and an organization hook,
@@ -418,23 +469,16 @@ fn repository_deleted_reaches_organization_hooks_and_no_app_or_repository_hook()
                 .replace(app(APP_A, "alpha", &["repository"]))?;
             tx.table_mut::<Installations>()
                 .replace(installation(INSTALL_A, APP_A, None))?;
-            for (id, owner) in [
-                (REPO_HOOK, HookOwner::Repo(WIDGET)),
-                (ORG_HOOK, HookOwner::Org(ORG)),
-            ] {
-                tx.table_mut::<Hooks>().insert(Hook {
-                    id,
-                    owner,
-                    url: format!("http://hook.test/{id}"),
-                    content_type: ContentType::Json,
-                    secret: None,
-                    insecure_ssl: false,
-                    events: vec!["repository".to_owned()],
-                    active: true,
-                    created_at: Timestamp::SEED,
-                    updated_at: Timestamp::SEED,
-                })?;
-            }
+            tx.table_mut::<Hooks>().insert(hook_row(
+                REPO_HOOK,
+                HookOwner::Repo(WIDGET),
+                "repository",
+            ))?;
+            tx.table_mut::<Hooks>().insert(hook_row(
+                ORG_HOOK,
+                HookOwner::Org(ORG),
+                "repository",
+            ))?;
             Ok(())
         })
         .unwrap();

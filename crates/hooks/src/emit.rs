@@ -153,6 +153,7 @@ fn hooks_get(e: &Event) -> bool {
     e.app_id.is_none()
         && e.installation_id.is_none()
         && !ALWAYS_DELIVERED.contains(&e.name)
+        && crate::hook::is_event(e.name)
         && match e.name {
             "check_suite" => e.action == Some("completed"),
             "check_run" => matches!(e.action, Some("created" | "completed")),
