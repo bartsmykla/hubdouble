@@ -36,6 +36,15 @@ pub(crate) fn delete(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiErr
         for team in teams {
             delete(tx, &Deleted::Team(team))?;
         }
+        let bots: Vec<_> = tx
+            .table::<Apps>()
+            .iter()
+            .filter(|a| a.owner_id == account.id)
+            .filter_map(|a| tx.table::<Accounts>().get(a.bot_id).cloned())
+            .collect();
+        for bot in bots {
+            delete(tx, &Deleted::Account(bot))?;
+        }
     }
     if let Deleted::Repo(repo) = deleted {
         let environments: Vec<_> = tx

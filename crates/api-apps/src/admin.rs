@@ -11,7 +11,9 @@ use hubdouble_model::{
 };
 use hubdouble_render::Urls;
 use hubdouble_rest::Params;
-use hubdouble_store::{Accounts, Apps, Installations, RepoRedirects, Repos, Tokens, Tx, TxMut};
+use hubdouble_store::{
+    Accounts, Apps, Deleted, Installations, RepoRedirects, Repos, Tokens, Tx, TxMut,
+};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -177,11 +179,15 @@ fn update_app(
 }
 
 fn delete_app(tx: &mut TxMut<'_>, params: &Params) -> Result<(), ApiError> {
-    let id = find_app(tx, params)?.id;
+    let app = find_app(tx, params)?;
+    let (id, bot_id) = (app.id, app.bot_id);
     if tx.table::<Installations>().children(id).next().is_some() {
         return Err(ApiError::conflict("Delete the App's installations first"));
     }
     revoke_tokens(tx, |token| token.app_id == Some(id))?;
+    if let Some(bot) = tx.table::<Accounts>().get(bot_id).cloned() {
+        tx.delete(&Deleted::Account(bot))?;
+    }
     tx.table_mut::<Apps>().remove(id);
     Ok(())
 }

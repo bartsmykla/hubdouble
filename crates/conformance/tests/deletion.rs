@@ -1,4 +1,5 @@
-use http::Method;
+use http::header::{self, HeaderValue};
+use http::{HeaderMap, Method};
 use hubdouble_hooks::Hooks;
 use hubdouble_store::{
     CheckRuns, Environments, IssueComments, Issues, Releases, Rulesets, Statuses, Teams,
@@ -571,6 +572,7 @@ async fn deleting_a_user_drops_the_apps_they_own_with_installations_and_tokens()
     // Given carol's App installed on acme, with an installation token
     let server = start(vec![
         json!({"kind": "app", "id": CAROL_APP_ID, "slug": "carol-app", "owner": "carol",
+               "client_id": "Iv1.carolapp", "device_flow": true,
                "public_key": fixture::APP_PUBLIC_KEY, "permissions": {"metadata": "read"}}),
         json!({"kind": "installation", "id": CAROL_INSTALLATION_ID, "app": "carol-app",
                "account": "acme", "permissions": {"metadata": "read"}}),
@@ -594,6 +596,25 @@ async fn deleting_a_user_drops_the_apps_they_own_with_installations_and_tokens()
         status(&installation, "installation/repositories").await,
         200
     );
+    let mut form = HeaderMap::new();
+    form.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-www-form-urlencoded"),
+    );
+    form.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+    let started = GoGithub::new(&server)
+        .call_json_headers(
+            Method::POST,
+            "login/device/code",
+            b"client_id=Iv1.carolapp".to_vec(),
+            form,
+        )
+        .await;
+    assert_eq!(started.status.as_u16(), 200, "{:?}", started.body);
+    let user_code = started.json()["user_code"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{:?}", started.body))
+        .to_owned();
 
     // When carol is deleted
     admin(&server, Method::DELETE, "user/carol", None).await;
@@ -612,8 +633,47 @@ async fn deleting_a_user_drops_the_apps_they_own_with_installations_and_tokens()
         assert_eq!(answer.status.as_u16(), 404, "{path}");
     }
 
+    // And its bot account and its pending device code are gone, so a new App takes the slug
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    assert_eq!(status(&alice, "users/carol-app[bot]").await, 404);
+    let decided = server
+        .admin(
+            Method::POST,
+            &format!("oauth/device/{user_code}"),
+            Some(&json!({"login": fixture::BOB})),
+        )
+        .await;
+    assert_eq!(decided.status.as_u16(), 404);
+    admin(
+        &server,
+        Method::POST,
+        "app",
+        Some(&json!({"slug": "carol-app", "owner": "bob",
+                     "public_key": fixture::APP_PUBLIC_KEY})),
+    )
+    .await;
+
     // And the App of another owner stays
     admin(&server, Method::GET, "app/fixture-app", None).await;
+}
+
+#[tokio::test]
+async fn deleting_an_app_drops_its_bot_account_and_frees_its_slug() {
+    // Given an App without installations
+    let spare = json!({"slug": "spare-app", "owner": "acme",
+                       "public_key": fixture::APP_PUBLIC_KEY});
+    let mut seeded = spare.clone();
+    seeded["kind"] = json!("app");
+    let server = start(vec![seeded]).await;
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    assert_eq!(status(&alice, "users/spare-app[bot]").await, 200);
+
+    // When the App is deleted
+    admin(&server, Method::DELETE, "app/spare-app", None).await;
+
+    // Then its bot account is gone and a new App takes the slug
+    assert_eq!(status(&alice, "users/spare-app[bot]").await, 404);
+    admin(&server, Method::POST, "app", Some(&spare)).await;
 }
 
 #[tokio::test]

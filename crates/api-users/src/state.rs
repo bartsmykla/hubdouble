@@ -102,8 +102,9 @@ fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
         let id = account.id;
         tx.table_mut::<DefaultUsers>()
             .remove_where(|d| d.user_id == id);
+        let app = account.app_id;
         tx.table_mut::<DeviceCodes>()
-            .remove_where(|c| c.decision == Some(Decision::Approved(id)));
+            .remove_where(|c| c.decision == Some(Decision::Approved(id)) || Some(c.app_id) == app);
     }
     Ok(())
 }
