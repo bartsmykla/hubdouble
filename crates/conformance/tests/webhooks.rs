@@ -91,9 +91,7 @@ async fn create(client: &GoGithub, path: &str, body: &Value) -> i64 {
 }
 
 async fn drained(server: &TestServer) -> Vec<Delivery> {
-    let drained = server.admin(Method::POST, "hooks/drain", None).await;
-    assert_eq!(drained.status, StatusCode::NO_CONTENT);
-    server.receiver.received().await
+    server.deliveries_in_queue_order().await
 }
 
 fn to_hook<'a>(deliveries: &'a [Delivery], hook_id: i64, event: &str) -> Vec<&'a Delivery> {
