@@ -229,6 +229,20 @@ fn check_name(name: Option<&str>, required: bool) -> Result<(), ApiError> {
     }
 }
 
+fn check_unique(tx: &Tx, hook: &Hook) -> Result<(), ApiError> {
+    let taken = tx
+        .table::<Hooks>()
+        .children(hook.owner.id())
+        .any(|h| h.id != hook.id && h.url == hook.url);
+    if taken {
+        return Err(invalid(match hook.owner {
+            HookOwner::Repo(_) => "Hook already exists on this repository",
+            HookOwner::Org(_) => "Hook already exists on this organization",
+        }));
+    }
+    Ok(())
+}
+
 fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let owner = owner(ctx)?;
     let tx = ctx.tx();
@@ -264,17 +278,7 @@ fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     };
     check_wildcard(&hook.events)?;
     apply_config(&mut hook, config)?;
-    let taken = ctx
-        .tx()
-        .table::<Hooks>()
-        .children(owner.id())
-        .any(|h| h.url == hook.url);
-    if taken {
-        return Err(invalid(match owner {
-            HookOwner::Repo(_) => "Hook already exists on this repository",
-            HookOwner::Org(_) => "Hook already exists on this organization",
-        }));
-    }
+    check_unique(ctx.tx(), &hook)?;
     let sender = sender(ctx);
     let urls = ctx.urls().clone();
     let tx = ctx.tx_mut()?;
@@ -303,6 +307,7 @@ fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 }
 
 fn save(ctx: &mut Ctx<'_>, mut hook: Hook) -> Result<Arc<Hook>, ApiError> {
+    check_unique(ctx.tx(), &hook)?;
     hook.updated_at = ctx.now();
     let tx = ctx.tx_mut()?;
     let id = hook.id;

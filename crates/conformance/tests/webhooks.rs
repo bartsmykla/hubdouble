@@ -775,6 +775,82 @@ async fn invalid_hooks_are_rejected() {
     );
 }
 
+#[tokio::test]
+async fn an_update_may_not_give_a_hook_the_url_of_another_hook_of_its_owner() {
+    // Given
+    let server = server().await;
+    let alice = alice(&server);
+    let url = server.receiver.url().to_owned();
+    let other = format!("{url}?other");
+    let mut ids = Vec::new();
+    for path in [REPO_HOOKS, ORG_HOOKS] {
+        create(
+            &alice,
+            path,
+            &json!({"name": "web", "config": {"url": url}}),
+        )
+        .await;
+        ids.push(
+            create(
+                &alice,
+                path,
+                &json!({"name": "web", "config": {"url": other}}),
+            )
+            .await,
+        );
+    }
+    let (repo_id, org_id) = (ids[0], ids[1]);
+
+    // When
+    let refused = [
+        alice
+            .call_json(
+                Method::PATCH,
+                &format!("{REPO_HOOKS}/{repo_id}"),
+                &json!({"config": {"url": url}}),
+            )
+            .await,
+        alice
+            .call_json(
+                Method::PATCH,
+                &format!("{REPO_HOOKS}/{repo_id}/config"),
+                &json!({"url": url}),
+            )
+            .await,
+        alice
+            .call_json(
+                Method::PATCH,
+                &format!("{ORG_HOOKS}/{org_id}"),
+                &json!({"config": {"url": url}}),
+            )
+            .await,
+        alice
+            .call_json(
+                Method::PATCH,
+                &format!("{ORG_HOOKS}/{org_id}/config"),
+                &json!({"url": url}),
+            )
+            .await,
+    ];
+    let kept = alice
+        .call_json(
+            Method::PATCH,
+            &format!("{REPO_HOOKS}/{repo_id}"),
+            &json!({"config": {"url": other}, "active": false}),
+        )
+        .await;
+
+    // Then
+    for answer in &refused {
+        assert_invalid_hook(answer);
+    }
+    assert_eq!(kept.status, StatusCode::OK, "{}", kept.json());
+    for (path, id) in [(REPO_HOOKS, repo_id), (ORG_HOOKS, org_id)] {
+        let config = alice.get(&format!("{path}/{id}/config")).await.json();
+        assert_eq!(config["url"], json!(other));
+    }
+}
+
 fn assert_invalid_hook(answer: &Answer) {
     assert_eq!(
         answer.status,
