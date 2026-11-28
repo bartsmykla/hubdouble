@@ -9,7 +9,7 @@ use hubdouble_model::{
     RepoRole, Timestamp,
 };
 use hubdouble_rest::Params;
-use hubdouble_store::{Accounts, Deleted, Memberships, Repos, Teams, Tx, TxMut};
+use hubdouble_store::{Accounts, Apps, Deleted, Memberships, Repos, Teams, Tx, TxMut};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
@@ -41,6 +41,11 @@ fn delete_user(
     _: Value,
 ) -> Result<(), ApiError> {
     let user = rest::user(tx, param(params, "login")?)?.clone();
+    if tx.table::<Apps>().iter().any(|app| app.bot_id == user.id) {
+        return Err(ApiError::unprocessable(
+            "Delete the App to delete its bot account",
+        ));
+    }
     tx.delete(&Deleted::Account(user))
 }
 

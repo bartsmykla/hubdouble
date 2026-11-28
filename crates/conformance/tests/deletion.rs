@@ -884,6 +884,45 @@ async fn deleting_a_user_drops_the_apps_they_own_with_installations_and_tokens()
 }
 
 #[tokio::test]
+async fn deleting_the_bot_account_of_an_existing_app_is_refused_with_422() {
+    // Given carol's App installed on acme, with an installation token
+    let server = start(vec![
+        json!({"kind": "app", "id": CAROL_APP_ID, "slug": "carol-app", "owner": "carol",
+               "public_key": fixture::APP_PUBLIC_KEY, "permissions": {"metadata": "read"}}),
+        json!({"kind": "installation", "id": CAROL_INSTALLATION_ID, "app": "carol-app",
+               "account": "acme", "permissions": {"metadata": "read"}}),
+    ])
+    .await;
+    let minted = GoGithub::enterprise(&server)
+        .with_token(CAROL_APP_JWT)
+        .post(
+            &format!("app/installations/{CAROL_INSTALLATION_ID}/access_tokens"),
+            &json!({}),
+        )
+        .await;
+    assert_eq!(minted.status.as_u16(), 201, "{:?}", minted.body);
+    let token = minted.json()["token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{:?}", minted.body))
+        .to_owned();
+    let installation = GoGithub::new(&server).with_token(&token);
+
+    // When the admin API deletes the App's bot account
+    let answer = server
+        .admin(Method::DELETE, "user/carol-app[bot]", None)
+        .await;
+
+    // Then it refuses with 422, and the bot account and the installation token stay
+    assert_eq!(answer.status.as_u16(), 422, "{:?}", answer.body);
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    assert_eq!(status(&alice, "users/carol-app[bot]").await, 200);
+    assert_eq!(
+        status(&installation, "installation/repositories").await,
+        200
+    );
+}
+
+#[tokio::test]
 async fn an_account_cannot_be_renamed_to_the_ghost_login() {
     // Given carol
     let server = start(Vec::new()).await;
