@@ -1312,8 +1312,12 @@ async fn a_hooks_last_response_is_its_newest_sent_attempt_after_the_log_drops_it
     // When a third event is refused as Queue full, the second attempt answers 200 and the first
     // then answers 404
     emit_one(&store, numbered(3));
+    hooks.shared.wait_stats(|s| s.unlogged == 3).await;
     by_n.remove(&2).unwrap().reply.send(200).unwrap();
-    hooks.shared.wait_stats(|s| s.in_flight == 1).await;
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 1 && s.unlogged == 2)
+        .await;
     by_n.remove(&1).unwrap().reply.send(404).unwrap();
     hooks.drain().await.unwrap();
     let statuses: Vec<i64> = store
