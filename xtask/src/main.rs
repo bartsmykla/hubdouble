@@ -6,11 +6,13 @@ use std::process::ExitCode;
 
 mod graphql_pin;
 mod inventory;
+mod ratchet;
 mod smoke_kind;
 
 const BUNDLE: &str = "spec/openapi/api.github.com.json";
 const OUTPUT: &str = "crates/spec/src/ops_gen.rs";
 const GRAPHQL_SCHEMA: &str = "spec/graphql/schema.graphql";
+const COVERAGE: &str = "docs/coverage.txt";
 const SLASH_PARAMS: [&str; 6] = ["ref", "path", "branch", "basehead", "tag", "tree_sha"];
 const METHODS: [(&str, &str); 5] = [
     ("get", "Get"),
@@ -25,12 +27,13 @@ fn main() -> ExitCode {
     let result = match args.as_slice() {
         [task] if task == "gen" => generate(&root()),
         [task, rest @ ..] if task == "inventory" => inventory::run(&root(), rest),
+        [task, rest @ ..] if task == "coverage-ratchet" => ratchet::run(&root(), rest),
         [task] if task == "smoke-kind" => smoke_kind::run(&root()),
         [task] if task == "graphql-pin" => {
             graphql_pin::run(&root(), &|name| std::env::var(name).ok())
         }
         _ => Err(
-            "usage: xtask gen | xtask inventory --client <path> [--names <file>] [--check] | xtask smoke-kind | xtask graphql-pin"
+            "usage: xtask gen | xtask inventory --client <path> [--names <file>] [--check] | xtask coverage-ratchet <base revision> | xtask smoke-kind | xtask graphql-pin"
                 .into(),
         ),
     };
@@ -76,7 +79,35 @@ fn generate(root: &Path) -> Result<(), Box<dyn Error>> {
         ops.len(),
         nodes.len()
     );
-    write_graphql_schema(root)
+    write_graphql_schema(root)?;
+    write_coverage(root)
+}
+
+fn write_coverage(root: &Path) -> Result<(), Box<dyn Error>> {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let out = std::process::Command::new(cargo)
+        .current_dir(root)
+        .args([
+            "run",
+            "--quiet",
+            "--locked",
+            "-p",
+            "hubdouble",
+            "--",
+            "coverage",
+            "--missing",
+        ])
+        .output()?;
+    if !out.status.success() {
+        return Err(format!(
+            "hubdouble coverage failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+        .into());
+    }
+    std::fs::write(root.join(COVERAGE), &out.stdout)?;
+    eprintln!("xtask: wrote {COVERAGE}");
+    Ok(())
 }
 
 fn write_graphql_schema(root: &Path) -> Result<(), Box<dyn Error>> {

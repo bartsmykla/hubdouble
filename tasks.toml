@@ -45,6 +45,10 @@ run = "cargo run --locked -p xtask -- gen"
 description = "Read live GET /graphql and one introspection POST with GITHUB_TOKEN or GH_TOKEN, rewrite the GraphQL pins in spec/graphql and regenerate the schema"
 run = "cargo run --locked -p xtask -- graphql-pin"
 
+["coverage:ratchet"]
+description = "Fail when an operation that docs/coverage.txt registers at the given base revision is missing now"
+run = "cargo run --locked -p xtask -- coverage-ratchet"
+
 [inventory]
 description = "Generate the client's API inventory"
 run = "cargo run --locked -p xtask -- inventory"
