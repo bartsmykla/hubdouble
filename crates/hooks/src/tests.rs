@@ -1287,6 +1287,42 @@ async fn reset_drops_the_log_of_a_hook_made_after_the_seed_and_keeps_the_app_log
 }
 
 #[tokio::test(start_paused = true)]
+async fn reset_drops_the_log_of_an_app_made_after_the_seed() {
+    // Given a delivery to an App made and installed after the seed
+    const APP: i64 = 400;
+    const INSTALL: i64 = 401;
+    let store = world();
+    let snapshot = store.snapshot();
+    let (hooks, hits) = start(&store, |_| {});
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    let seeded_log = logged_ids(&store, APP_A);
+    let seeded_bytes = hooks.stats().log_bytes;
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Apps>()
+                .insert(app(APP, "late", &["release"]))?;
+            tx.table_mut::<Installations>()
+                .insert(installation(INSTALL, APP, None))?;
+            Ok(())
+        })
+        .unwrap();
+    emit_one(&store, event("release", WIDGET));
+    hooks.drain().await.unwrap();
+    assert_eq!(logged_ids(&store, APP).len(), 1);
+    assert!(hooks.stats().log_bytes > seeded_bytes);
+
+    // When reset discards the App
+    hooks.reset(&snapshot).await.unwrap();
+
+    // Then its deliveries are gone and the seeded App keeps its log and its bytes alone
+    assert_eq!(logged_ids(&store, APP), Vec::<i64>::new());
+    assert_eq!(logged_ids(&store, APP_A), seeded_log);
+    assert_eq!(hooks.stats().log_bytes, seeded_bytes);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_reset_that_ends_while_a_discarded_hooks_attempts_run_leaves_none_unlogged() {
     // Given an App attempt in flight that holds a first reset open
     const HOOK: i64 = 300;

@@ -269,10 +269,17 @@ impl Shared {
         let mut st = self.state.lock();
         let Ok(doomed) = self.store.update(|tx| {
             let hooks = tx.try_table::<Hooks>();
+            let apps = tx.table::<Apps>();
             let doomed: Vec<i64> = tx
                 .table::<Deliveries>()
                 .iter()
-                .filter(|d| d.app_id == 0 && hooks.is_none_or(|h| h.get(d.hook_id).is_none()))
+                .filter(|d| {
+                    if d.app_id == 0 {
+                        hooks.is_none_or(|h| h.get(d.hook_id).is_none())
+                    } else {
+                        apps.get(d.app_id).is_none()
+                    }
+                })
                 .map(|d| d.id)
                 .collect();
             tx.table_mut::<Deliveries>()
