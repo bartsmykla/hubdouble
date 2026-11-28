@@ -15,12 +15,26 @@ const SEARCH: &str = "query($query: String!) {
   }
 }";
 
+const MEMBERS_APP_ID: i64 = 4201;
+const MEMBERS_INSTALLATION_ID: i64 = 5201;
+
 async fn server() -> TestServer {
     let mut builder = TestServer::builder().frame(hubdouble_api::register_all);
     for entry in fixture::seed() {
         builder = builder.entry(entry);
     }
     builder
+        .entry(json!({
+            "kind": "app", "id": MEMBERS_APP_ID, "slug": "members-app", "name": "Members App",
+            "owner": fixture::ORG, "public_key": fixture::APP_PUBLIC_KEY,
+            "permissions": {"members": "read", "metadata": "read", "pull_requests": "read"},
+            "events": [],
+        }))
+        .entry(json!({
+            "kind": "installation", "id": MEMBERS_INSTALLATION_ID, "app": "members-app",
+            "account": fixture::ORG,
+            "permissions": {"members": "read", "metadata": "read", "pull_requests": "read"},
+        }))
         .entry(json!({
             "kind": "team", "org": "acme", "name": "Secret", "privacy": "secret",
             "members": [{"login": "alice"}],
@@ -36,6 +50,39 @@ async fn server() -> TestServer {
         }))
         .start()
         .await
+}
+
+fn insert_app_tokens(server: &TestServer, tokens: &[(&str, i64, Option<i64>)]) {
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            for &(token, app_id, installation_id) in tokens {
+                let id = tx.next_id();
+                tx.table_mut::<Tokens>().insert(Token {
+                    id,
+                    token: token.into(),
+                    kind: if installation_id.is_some() {
+                        TokenKind::Installation
+                    } else {
+                        TokenKind::User
+                    },
+                    user_id: installation_id.is_none().then_some(ALICE_ID),
+                    app_id: Some(app_id),
+                    installation_id,
+                    repo_ids: None,
+                    permissions: BTreeMap::new(),
+                    scopes: Vec::new(),
+                    expires_at: None,
+                    revoked: false,
+                    owner_seeded: true,
+                    created_at: Timestamp::SEED,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 fn created(answer: &Answer) -> Value {
@@ -130,67 +177,32 @@ async fn a_team_qualifier_matches_only_a_team_the_searcher_can_see() {
 }
 
 #[tokio::test]
-async fn a_team_qualifier_needs_the_app_of_a_user_token_installed_on_the_org_with_members_read() {
+async fn a_team_qualifier_needs_an_app_installed_on_the_org_with_members_read() {
     // Given alice, an admin of acme, with a user token of the fixture App, whose installation
-    // on acme has no members permission, and one of an App installed on acme with members=read
-    const WITHOUT_MEMBERS: &str = "ghu_alice_of_the_app_without_members";
-    const WITH_MEMBERS: &str = "ghu_alice_of_the_app_with_members";
-    let server = TestServer::builder()
-        .frame(hubdouble_api::register_all)
-        .entry(json!({
-            "kind": "app", "id": 4201, "slug": "members-app", "name": "Members App",
-            "owner": fixture::ORG, "public_key": fixture::APP_PUBLIC_KEY,
-            "permissions": {"members": "read", "metadata": "read", "pull_requests": "read"},
-            "events": [],
-        }))
-        .entry(json!({
-            "kind": "installation", "id": 5201, "app": "members-app", "account": fixture::ORG,
-            "permissions": {"members": "read", "metadata": "read", "pull_requests": "read"},
-        }));
-    let server = fixture::seed()
-        .into_iter()
-        .fold(server, hubdouble_testkit::Builder::entry)
-        .entry(json!({
-            "kind": "team", "org": "acme", "name": "Secret", "privacy": "secret",
-            "members": [{"login": "alice"}],
-            "repositories": [{"repository": "acme/public", "permission": "read"}],
-        }))
-        .entry(json!({
-            "kind": "team", "org": "acme", "name": "Reviewers",
-            "repositories": [{"repository": "acme/public", "permission": "read"}],
-        }))
-        .entry(json!({
-            "kind": "pull_request", "repository": "acme/public", "user": "alice",
-            "title": "Ship the feature", "head": "feature", "base": "main",
-        }))
-        .start()
-        .await;
-    server
-        .server
-        .services()
-        .store
-        .update(|tx| {
-            for (token, app_id) in [(WITHOUT_MEMBERS, fixture::APP_ID), (WITH_MEMBERS, 4201)] {
-                let id = tx.next_id();
-                tx.table_mut::<Tokens>().insert(Token {
-                    id,
-                    token: token.into(),
-                    kind: TokenKind::User,
-                    user_id: Some(ALICE_ID),
-                    app_id: Some(app_id),
-                    installation_id: None,
-                    repo_ids: None,
-                    permissions: BTreeMap::new(),
-                    scopes: Vec::new(),
-                    expires_at: None,
-                    revoked: false,
-                    owner_seeded: true,
-                    created_at: Timestamp::SEED,
-                })?;
-            }
-            Ok(())
-        })
-        .unwrap_or_else(|error| panic!("{error}"));
+    // on acme has no members permission, and one of an App installed on acme with
+    // members=read, and an installation token of each App
+    const USER_WITHOUT_MEMBERS: &str = "ghu_alice_of_the_app_without_members";
+    const USER_WITH_MEMBERS: &str = "ghu_alice_of_the_app_with_members";
+    const INSTALLATION_WITHOUT_MEMBERS: &str = "ghs_installation_without_members";
+    const INSTALLATION_WITH_MEMBERS: &str = "ghs_installation_with_members";
+    let server = server().await;
+    insert_app_tokens(
+        &server,
+        &[
+            (USER_WITHOUT_MEMBERS, fixture::APP_ID, None),
+            (USER_WITH_MEMBERS, MEMBERS_APP_ID, None),
+            (
+                INSTALLATION_WITHOUT_MEMBERS,
+                fixture::APP_ID,
+                Some(fixture::INSTALLATION_ID),
+            ),
+            (
+                INSTALLATION_WITH_MEMBERS,
+                MEMBERS_APP_ID,
+                Some(MEMBERS_INSTALLATION_ID),
+            ),
+        ],
+    );
     created(
         &GoGithub::new(&server)
             .with_token(ALICE_TOKEN)
@@ -203,7 +215,12 @@ async fn a_team_qualifier_needs_the_app_of_a_user_token_installed_on_the_org_wit
 
     // When each token searches for the pull request that requests both teams
     let mut seen = Vec::new();
-    for token in [WITHOUT_MEMBERS, WITH_MEMBERS] {
+    for token in [
+        USER_WITHOUT_MEMBERS,
+        INSTALLATION_WITHOUT_MEMBERS,
+        USER_WITH_MEMBERS,
+        INSTALLATION_WITH_MEMBERS,
+    ] {
         let client = GoGithub::new(&server).with_token(token);
         let mut row = Vec::new();
         for query in [
@@ -216,7 +233,9 @@ async fn a_team_qualifier_needs_the_app_of_a_user_token_installed_on_the_org_wit
     }
 
     // Then only the App with members=read on acme resolves acme's teams
-    assert_eq!(seen, vec![vec![vec![], vec![]], vec![vec![1], vec![1]]]);
+    let hidden = vec![vec![], vec![]];
+    let found = vec![vec![1], vec![1]];
+    assert_eq!(seen, vec![hidden.clone(), hidden, found.clone(), found]);
 }
 
 #[tokio::test]

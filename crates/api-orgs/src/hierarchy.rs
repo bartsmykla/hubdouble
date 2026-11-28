@@ -51,7 +51,14 @@ impl TeamViewer {
     #[must_use]
     pub fn new(tx: &Tx, actor: &Actor, org_id: i64) -> Self {
         match actor {
-            Actor::Installation { installation, .. } if installation.account_id == org_id => {
+            Actor::Installation {
+                installation,
+                token,
+                ..
+            } if installation.account_id == org_id
+                && reads(installation.permissions.get("members"))
+                && (token.permissions.is_empty() || reads(token.permissions.get("members"))) =>
+            {
                 Self::Admin
             }
             Actor::User { token, .. }
@@ -87,8 +94,11 @@ fn reads_members(tx: &Tx, app_id: i64, org_id: i64) -> bool {
     tx.table::<Installations>()
         .of(app_id, org_id)
         .filter(|i| i.suspended_at.is_none())
-        .and_then(|i| i.permissions.get("members"))
-        .is_some_and(|access| *access >= Access::Read)
+        .is_some_and(|i| reads(i.permissions.get("members")))
+}
+
+fn reads(access: Option<&Access>) -> bool {
+    access.is_some_and(|access| *access >= Access::Read)
 }
 
 pub fn pushes(tx: &Tx, actor: &Actor, repo: &Repo) -> bool {
