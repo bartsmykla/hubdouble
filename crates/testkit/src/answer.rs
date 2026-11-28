@@ -281,8 +281,12 @@ pub fn api_path(path: &str) -> &str {
 ///   (<https://docs.github.com/en/actions/reference/security/oidc#methods-for-requesting-the-oidc-token>),
 ///   OAuth and the device flow
 ///   (<https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps>),
-///   and `GET /repositories/{repository_id}` against `repos/get`, which go-github v93 calls
-///   it (`Repositories.GetByID`, `github/repos.go`). GraphQL is checked by its own client.
+///   `GET /repositories/{repository_id}` against `repos/get`, which go-github v93 calls
+///   it (`Repositories.GetByID`, `github/repos.go`), and
+///   `GET /organizations/{org_id}/public_members/{username}` against
+///   `orgs/check-public-membership-for-user`, where GitHub redirects
+///   `GET /orgs/{org}/members/{username}` for a caller outside the org. Each is recorded
+///   under its own route. GraphQL is checked by its own client.
 /// - `/repositories/{id}/...` and `/organizations/{id}/...` are checked against the
 ///   `/repos/{owner}/{repo}/...` and `/orgs/{org}/...` operation they alias, and every `Link`
 ///   URL of a repository or organization answer has that by-ID form, as api.github.com writes
@@ -296,11 +300,14 @@ pub fn check(x: &Exchange<'_>, registered: &dyn Fn(&str) -> bool) -> Result<Chec
     if let Some(result) = outside_the_bundle(x, path) {
         return result;
     }
-    if x.method == "GET" && segments_eq(path, "/repositories/{repository_id}") {
-        let op = resolve_operation("GET", "/repos/o/r")
-            .ok_or_else(|| vec!["the description has no repos/get".to_owned()])?;
+    if let Some((route, alias)) = BY_ID_ROUTES
+        .iter()
+        .find(|(route, _)| x.method == "GET" && segments_eq(path, route))
+    {
+        let op = resolve_operation("GET", alias)
+            .ok_or_else(|| vec![format!("the description has no GET {alias}")])?;
         return check_operation(x, op, registered).map(|status| Checked {
-            route: "GET /repositories/{repository_id}".to_owned(),
+            route: format!("GET {route}"),
             status,
         });
     }
@@ -313,6 +320,14 @@ pub fn check(x: &Exchange<'_>, registered: &dyn Fn(&str) -> bool) -> Result<Chec
         status,
     })
 }
+
+const BY_ID_ROUTES: [(&str, &str); 2] = [
+    ("/repositories/{repository_id}", "/repos/o/r"),
+    (
+        "/organizations/{org_id}/public_members/{username}",
+        "/orgs/o/public_members/u",
+    ),
+];
 
 fn by_id_alias(path: &str) -> Option<String> {
     let numbered = |prefix: &str| {

@@ -80,7 +80,7 @@ fn gated_routes(registry: &Registry) -> BTreeSet<String> {
     routes.extend(
         registry
             .operations()
-            .filter(|op| op.registered && !op.extra)
+            .filter(|op| op.registered)
             .map(|op| format!("{} {}", op.method.as_str(), op.path)),
     );
     routes
@@ -155,13 +155,20 @@ fn the_required_cases_come_from_the_registration_and_the_description() {
 
 #[test]
 fn the_gate_covers_registered_operations_outside_the_client_inventory() {
-    // Given the whole server's registrations and an operation the client inventory leaves out
+    // Given the whole server's registrations, an operation the client inventory leaves out, and a route outside the description
     let registry = Registries::new(hubdouble_api::register_all).rest;
-    let route = "GET /repos/{owner}/{repo}/actions/secrets";
-    assert!(!inventory().contains(route));
+    let operation = "GET /repos/{owner}/{repo}/actions/secrets";
+    let outside = "GET /_actions/.well-known/openid-configuration";
+    assert!(!inventory().contains(operation));
+    assert!(!inventory().contains(outside));
 
-    // Then the gate still requires its cases
-    assert!(gated_routes(&registry).contains(route));
+    // When the gated routes are listed
+    let gated = gated_routes(&registry);
+
+    // Then the gate requires the cases of both, and only a success for the route the description lacks
+    assert!(gated.contains(operation));
+    assert!(gated.contains(outside));
+    assert_eq!(required(&registry, outside), [Case::Success]);
 }
 
 fn routes_needing(case: Case) -> Vec<(Method, String)> {
