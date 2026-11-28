@@ -278,6 +278,59 @@ async fn a_team_qualifier_needs_sso_for_a_user_token_on_an_org_that_enforces_it(
 }
 
 #[tokio::test]
+async fn a_team_qualifier_needs_an_org_scope_for_a_classic_token() {
+    // Given alice, an admin of acme, with a classic token of no scope and one of read:org
+    const NO_SCOPE: &str = "ghp_a11ce00000000000000000000000000noscope";
+    const READ_ORG: &str = "ghp_a11ce00000000000000000000000000readorg";
+    let server = server().await;
+    created(
+        &GoGithub::new(&server)
+            .with_token(ALICE_TOKEN)
+            .post(
+                "repos/acme/public/pulls/1/requested_reviewers",
+                &json!({"team_reviewers": ["secret"]}),
+            )
+            .await,
+    );
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            for (token, scopes) in [(NO_SCOPE, vec![]), (READ_ORG, vec!["read:org".to_owned()])] {
+                let id = tx.next_id();
+                tx.table_mut::<Tokens>().insert(Token {
+                    id,
+                    token: token.into(),
+                    kind: TokenKind::Personal,
+                    user_id: Some(ALICE_ID),
+                    app_id: None,
+                    installation_id: None,
+                    repo_ids: None,
+                    permissions: BTreeMap::new(),
+                    scopes,
+                    expires_at: None,
+                    revoked: false,
+                    owner_seeded: true,
+                    created_at: Timestamp::SEED,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    // When each token searches for the pull request that requests the secret team
+    let mut seen = Vec::new();
+    for token in [NO_SCOPE, READ_ORG] {
+        let client = GoGithub::new(&server).with_token(token);
+        seen.push(numbers(&client, "team-review-requested:acme/secret").await);
+    }
+
+    // Then
+    assert_eq!(seen, vec![vec![], vec![1]]);
+}
+
+#[tokio::test]
 async fn reviews_with_a_body_count_as_comments_and_comment_reactions_do_not() {
     let server = server().await;
     let alice = GoGithub::new(&server).with_token(ALICE_TOKEN);

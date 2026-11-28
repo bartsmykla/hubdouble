@@ -296,7 +296,7 @@ fn team_id(env: &Env<'_>, name: &str) -> Option<i64> {
     env.tx
         .table::<Teams>()
         .by_slug(org.id, slug)
-        .filter(|t| TeamViewer::new(env.tx, env.actor, org.id).can_see(t))
+        .filter(|t| TeamViewer::authorized(env.tx, env.actor, org).can_see(t))
         .map(|t| t.id)
 }
 

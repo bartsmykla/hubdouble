@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use hubdouble_auth::Actor;
+use hubdouble_auth::{Actor, Target};
 use hubdouble_model::{
-    Access, MembershipState, OrgRole, Repo, RepoRole, Team, TeamPrivacy, TeamRole, TokenKind,
+    Access, Account, MembershipState, OrgRole, Repo, RepoRole, Team, TeamPrivacy, TeamRole,
+    TokenKind,
 };
 use hubdouble_store::{Accounts, Installations, Memberships, Teams, Tx};
 
@@ -76,6 +77,17 @@ impl TeamViewer {
                 None => Self::Outside,
             },
             _ => Self::Outside,
+        }
+    }
+
+    /// A viewer for a caller that has not passed the org's team read check: `Outside` unless the
+    /// caller may list the org's teams, SSO and token scopes included.
+    #[must_use]
+    pub fn authorized(tx: &Tx, actor: &Actor, org: &Arc<Account>) -> Self {
+        match hubdouble_auth::authorize_operation(tx, actor, &crate::TEAMS, Target::Org(org), false)
+        {
+            Ok(()) => Self::new(tx, actor, org.id),
+            Err(_) => Self::Outside,
         }
     }
 
