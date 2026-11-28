@@ -2,11 +2,12 @@ use std::collections::BTreeMap;
 
 use http::Method;
 use hubdouble_model::{ApiError, Timestamp, Token, TokenKind, Visibility};
-use hubdouble_store::{Repos, Tokens};
+use hubdouble_store::{Accounts, Repos, Tokens};
 use hubdouble_testkit::{Answer, GoGithub, TestServer, fixture};
 use serde_json::{Value, json};
 
 const ALICE_APP_TOKEN: &str = "ghu_alice_without_organization_events";
+const ALICE_OAUTH_TOKEN: &str = "gho_alice_without_sso";
 const ALICE_PUBLIC_REPO_TOKEN: &str = "ghp_alice_with_only_public_repo";
 const DAY: i64 = 24 * 60 * 60;
 
@@ -357,6 +358,58 @@ async fn a_private_event_shows_only_to_a_token_that_still_reaches_its_repository
         assert_eq!(in_repo(&events, "acme/private"), 0, "{what}");
         assert!(in_repo(&events, "acme/public") > 0, "{what}");
     }
+}
+
+#[tokio::test]
+async fn a_private_event_of_an_sso_org_shows_only_after_the_token_is_sso_authorized() {
+    // Given alice opened an issue in the private repository of acme, which then enforces SSO,
+    // and alice holds an OAuth user token without an SSO authorization
+    let server = start().await;
+    act(&server).await;
+    let store = &server.server.services().store;
+    store
+        .update(|tx| {
+            let mut org = (**tx.table::<Accounts>().get(fixture::ORG_ID).expect("acme")).clone();
+            org.sso_enforced = true;
+            tx.table_mut::<Accounts>().replace(org)?;
+            let id = tx.next_id();
+            tx.table_mut::<Tokens>().insert(Token {
+                id,
+                token: ALICE_OAUTH_TOKEN.into(),
+                kind: TokenKind::User,
+                user_id: Some(fixture::ALICE_ID),
+                app_id: None,
+                installation_id: None,
+                repo_ids: None,
+                permissions: BTreeMap::new(),
+                scopes: vec!["repo".to_owned()],
+                expires_at: None,
+                revoked: false,
+                owner_seeded: true,
+                created_at: Timestamp::SEED,
+            })?;
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+    let alice = GoGithub::new(&server).with_token(ALICE_OAUTH_TOKEN);
+
+    // When she reads her feed and the repository's feed
+    let before = feed(&alice, "users/alice/events").await;
+    let repository = alice.get("repos/acme/private/events").await;
+
+    // Then neither shows the private event: her feed leaves it out and the repository answers 403
+    assert_eq!(in_repo(&before, "acme/private"), 0);
+    assert!(in_repo(&before, "acme/public") > 0);
+    assert_eq!(repository.status.as_u16(), 403, "{:?}", repository.body);
+
+    // When the token is authorized for acme's SSO
+    store
+        .update(|tx| hubdouble_auth::record_sso(tx, fixture::ALICE_ID, fixture::ORG_ID))
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    // Then her feed shows the private event
+    let after = feed(&alice, "users/alice/events").await;
+    assert!(in_repo(&after, "acme/private") > 0);
 }
 
 #[tokio::test]

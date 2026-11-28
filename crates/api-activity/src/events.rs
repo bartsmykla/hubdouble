@@ -1,13 +1,15 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use hubdouble_auth::{Actor, can_see, repo_role};
+use hubdouble_auth::{Actor, Target, authorize, can_see, repo_role};
 use hubdouble_model::{Account, AccountKind, ApiError, Repo, RepoRole, Timestamp};
 use hubdouble_render::Urls;
 use hubdouble_rest::{Ctx, PageLimit, Reply};
 use hubdouble_store::{Accounts, ActivityEvent, ActivityEvents, Repos, Tx};
 use serde::Serialize;
 use serde_json::Value;
+
+use crate::REPO_METADATA;
 
 const EVENTS: PageLimit = PageLimit {
     results: 300,
@@ -137,7 +139,9 @@ fn is_user(actor: &Actor, user: &Account) -> bool {
 fn shown(ctx: &Ctx<'_>, e: &ActivityEvent, own: bool) -> bool {
     let tx = ctx.tx();
     match tx.table::<Repos>().get(e.repo_id) {
-        Some(repo) if repo.is_private() => own && can_see(tx, ctx.actor(), repo),
+        Some(repo) if repo.is_private() => {
+            own && authorize(tx, ctx.actor(), &REPO_METADATA, Target::Repo(repo)).is_ok()
+        }
         Some(_) => e.public || own,
         None => e.public,
     }
