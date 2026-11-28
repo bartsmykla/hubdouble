@@ -9,7 +9,7 @@ use hubdouble_model::{
     RepoRole, Timestamp,
 };
 use hubdouble_rest::Params;
-use hubdouble_store::{Accounts, Memberships, Repos, Teams, Tx, TxMut};
+use hubdouble_store::{Accounts, Deleted, Memberships, Repos, Teams, Tx, TxMut};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
@@ -25,6 +25,23 @@ pub fn register(admin: &mut Admin) {
     let collaborator = "/repository/{owner}/{repo}/collaborators/{login}";
     admin.route(Method::PUT, collaborator, write(put_collaborator));
     admin.route(Method::DELETE, collaborator, write(remove_collaborator));
+    admin.route(Method::DELETE, "/org/{org}", write(delete_org));
+    admin.route(Method::DELETE, "/user/{login}", write(delete_user));
+}
+
+fn delete_org(tx: &mut TxMut<'_>, params: &Params, _: Timestamp, _: Value) -> Result<(), ApiError> {
+    let org = org(tx, params)?.clone();
+    tx.delete(&Deleted::Account(org))
+}
+
+fn delete_user(
+    tx: &mut TxMut<'_>,
+    params: &Params,
+    _: Timestamp,
+    _: Value,
+) -> Result<(), ApiError> {
+    let user = rest::user(tx, param(params, "login")?)?.clone();
+    tx.delete(&Deleted::Account(user))
 }
 
 type Read = fn(&Tx, &Params) -> Result<Value, ApiError>;

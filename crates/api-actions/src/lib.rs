@@ -12,7 +12,7 @@ use hubdouble_admin::Registrar;
 use hubdouble_git::{Git, ObjectId};
 use hubdouble_model::{ApiError, FieldError, Grant, Repo, Requirement, Scope};
 use hubdouble_rest::{Ctx, Page, Reply};
-use hubdouble_store::TxMut;
+use hubdouble_store::{Deleted, Entity as _, TxMut, WorkflowJobs, WorkflowRuns};
 use serde::Serialize;
 use serde::ser::SerializeMap as _;
 
@@ -31,6 +31,38 @@ const fn repository(any_of: &'static [Grant]) -> Requirement {
     }
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a deletion subscriber returns a Result"
+)]
+fn forget_runs(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    let Deleted::Repo(repo) = deleted else {
+        return Ok(());
+    };
+    let workflows: Vec<i64> = tx
+        .table::<workflows::Workflows>()
+        .in_repo(repo.id)
+        .map(|w| w.id())
+        .collect();
+    let runs: Vec<i64> = tx
+        .table::<WorkflowRuns>()
+        .in_repo(repo.id)
+        .map(|r| r.id)
+        .collect();
+    let jobs: Vec<i64> = tx
+        .table::<WorkflowJobs>()
+        .in_repo(repo.id)
+        .map(|j| j.id)
+        .collect();
+    tx.table_mut::<runs::RunNumbers>().remove_all(workflows);
+    tx.table_mut::<runs::RunContexts>().remove_all(runs);
+    tx.table_mut::<runs::JobKeys>().remove_all(jobs);
+    tx.table_mut::<runs::Attempts>().remove_in_repo(repo.id);
+    tx.table_mut::<workflows::Workflows>()
+        .remove_in_repo(repo.id);
+    Ok(())
+}
+
 pub fn register(r: &mut Registrar<'_>) {
     r.store
         .register_table::<workflows::Workflows>()
@@ -40,7 +72,9 @@ pub fn register(r: &mut Registrar<'_>) {
         .register_table::<runs::JobKeys>()
         .register_table::<configuration::Settings>()
         .register_table::<configuration::Entries>()
-        .register_table::<oidc::SigningKey>();
+        .register_table::<oidc::SigningKey>()
+        .on_delete(forget_runs)
+        .on_delete(configuration::forget);
     r.git.on_ref_update(workflows::ref_updated);
     workflows::register(r.rest);
     runs::register(r.rest);

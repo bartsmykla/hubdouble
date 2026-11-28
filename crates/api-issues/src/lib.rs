@@ -23,7 +23,9 @@ pub fn register(r: &mut Registrar<'_>) {
     r.store.register_table::<events::IssueEvents>();
     r.store.register_table::<links::IssueLinks>();
     r.store.register_table::<links::MergeCloses>();
-    r.store.register_table::<links::CommitCloses>();
+    r.store
+        .register_table::<links::CommitCloses>()
+        .on_delete(links::forget);
     r.git.on_ref_update(links::ref_updated);
     r.admin.kind("issue_link", links::seed);
 

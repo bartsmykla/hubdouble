@@ -467,7 +467,7 @@ impl GitBuilder {
     /// Registers git's tables (the refs) on the store builder.
     #[must_use]
     pub fn new(store: &mut StoreBuilder) -> GitBuilder {
-        store.register_table::<refs::Refs>();
+        store.register_table::<refs::Refs>().on_delete(refs::forget);
         GitBuilder {
             subscribers: Vec::new(),
             clock: Arc::new(SystemClock),

@@ -7,7 +7,7 @@ use hubdouble_model::{
     AccountKind, ApiError, Conclusion, Grant, Repo, RepositorySelection, Requirement, Timestamp,
 };
 use hubdouble_rest::{Ctx, Reply};
-use hubdouble_store::{Accounts, Entity, Repos, Rows, Table, Tx};
+use hubdouble_store::{Accounts, Deleted, Entity, Repos, Rows, Table, Tx, TxMut};
 use serde::{Deserialize, Serialize};
 
 use crate::oidc;
@@ -51,6 +51,28 @@ struct Policy {
 
 pub(crate) type Entries = Rows<Entry>;
 
+pub(crate) fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    let id = match deleted {
+        Deleted::Repo(repo) => repo.id,
+        Deleted::Account(account) => account.id,
+        Deleted::Team(_) => return Ok(()),
+    };
+    tx.table_mut::<Entries>().remove_children(id);
+    let selecting: Vec<_> = tx
+        .table::<Entries>()
+        .iter()
+        .filter(|e| e.selected.contains(&id))
+        .cloned()
+        .collect();
+    for entry in selecting {
+        let mut entry = (*entry).clone();
+        entry.selected.retain(|r| *r != id);
+        tx.table_mut::<Entries>().replace(entry)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
 pub(crate) struct Entry {
     id: i64,
     scope: i64,
@@ -74,7 +96,7 @@ impl Entity for Entry {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct EntryValue {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]

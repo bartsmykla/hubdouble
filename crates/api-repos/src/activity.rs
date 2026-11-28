@@ -7,7 +7,7 @@ use hubdouble_git::{Git, ObjectId, RefChange};
 use hubdouble_model::{ApiError, Timestamp, node_id};
 use hubdouble_render::{SimpleUser, query_escape};
 use hubdouble_rest::{Ctx, Reply};
-use hubdouble_store::{Accounts, Entity, Issues, Rows, Tx, TxMut};
+use hubdouble_store::{Accounts, Deleted, Entity, Issues, Rows, Tx, TxMut};
 use serde::Serialize;
 
 use crate::CONTENTS;
@@ -51,9 +51,20 @@ impl Entity for Activity {
 pub(crate) type Activities = Rows<Activity>;
 
 pub(crate) fn register(r: &mut Registrar<'_>) {
-    r.store.register_table::<Activities>();
+    r.store.register_table::<Activities>().on_delete(forget);
     r.git.on_ref_update(record);
     r.rest.handle("repos/list-activities", CONTENTS, list);
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a deletion subscriber returns a Result"
+)]
+fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    if let Deleted::Repo(repo) = deleted {
+        tx.table_mut::<Activities>().remove_in_repo(repo.id);
+    }
+    Ok(())
 }
 
 fn merged_pull(tx: &Tx, c: &RefChange, branch: &str, new: ObjectId) -> bool {

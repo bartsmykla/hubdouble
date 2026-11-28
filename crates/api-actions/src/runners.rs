@@ -1,7 +1,7 @@
 use hubdouble_admin::{Registrar, SeedCtx};
 use hubdouble_model::{ApiError, Grant, Requirement, Scope};
 use hubdouble_rest::{Ctx, Reply};
-use hubdouble_store::{Entity, Rows};
+use hubdouble_store::{Deleted, Entity, Rows, TxMut};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -25,6 +25,18 @@ impl Entity for OrgRunner {
     fn id(&self) -> i64 {
         self.runner.id
     }
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a deletion subscriber returns a Result"
+)]
+fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    if let Deleted::Account(account) = deleted {
+        tx.table_mut::<OrgRunners>()
+            .remove_where(|r| r.org_id == account.id);
+    }
+    Ok(())
 }
 
 #[derive(Deserialize, Serialize)]
@@ -74,7 +86,7 @@ enum LabelKind {
 }
 
 pub(crate) fn register(r: &mut Registrar<'_>) {
-    r.store.register_table::<OrgRunners>();
+    r.store.register_table::<OrgRunners>().on_delete(forget);
     r.admin.kind("actions_runner", seed);
     r.rest
         .handle("actions/get-self-hosted-runner-for-org", ORG_RUNNERS, get);

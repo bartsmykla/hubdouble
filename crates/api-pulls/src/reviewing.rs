@@ -50,6 +50,18 @@ pub fn review_submitted(tx: &mut TxMut<'_>, review_id: i64) {
         .insert(review_id, order);
 }
 
+pub(crate) fn forget_reviews(tx: &mut TxMut<'_>, reviews: &[i64]) {
+    if reviews
+        .iter()
+        .any(|id| tx.table::<ReviewOrder>().submitted.contains_key(id))
+    {
+        let mut order = tx.table_mut::<ReviewOrder>();
+        for id in reviews {
+            order.get_mut().submitted.remove(id);
+        }
+    }
+}
+
 fn last_push(tx: &Tx, issue: &Issue) -> (i64, u64) {
     tx.table::<LastPushes>()
         .get(issue.id)

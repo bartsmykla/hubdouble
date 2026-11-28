@@ -48,6 +48,7 @@ A fault requires `status` from 100 through 599. Use optional `method` (case inse
 | Method and path | Request body | Response |
 | --- | --- | --- |
 | `GET /_hubdouble/user/{login}` | None | `200` with `id`, `node_id`, `login`, `type`, and `tokens`. Each token has `id`, `token`, `kind`, `scopes`, `expires_at`, and `revoked`. |
+| `DELETE /_hubdouble/user/{login}` | None | `204`. Deletes the user or bot, its repositories, memberships, tokens, installations, and every row that other features keep for them. |
 | `GET /_hubdouble/app/{slug}` | None | `200` with `id`, `slug`, `node_id`, `client_id`, `client_secret`, `public_key`, `private_key`, `webhook`, and `bot` (object with `id` and `login`, or null). |
 | `PATCH /_hubdouble/app/{slug}` | Optional `name`, `permissions` map, `events` list, and `webhook` object. The webhook requires `url` and accepts `secret` and `active` (default true). | `200` with `{"id":number}`. |
 | `DELETE /_hubdouble/app/{slug}` | None | `204`. Removes the App and revokes its tokens. Returns `409` if the App still has installations. |
@@ -72,6 +73,7 @@ The App routes accept a numeric App ID in place of the slug. App and user reads 
 | `PATCH /_hubdouble/releases/{release_id}` | Optional `sender`, `tag_name`, `target_commitish`, `name`, `body`, `draft`, and `prerelease`. | `200` with the updated release object. |
 | `GET /_hubdouble/org/{org}/members/{login}` | None | `200` with the membership object, including `url`, `organization_url`, `organization`, `user`, `role`, and `state`. |
 | `PUT /_hubdouble/org/{org}/members/{login}` | Optional `sender`, `role` (`member` or `admin`), `state` (`active` or `pending`), and `public` (boolean). A new membership defaults to `member`, `active`, and private. | `204`. Creates or updates the membership. |
+| `DELETE /_hubdouble/org/{org}` | None | `204`. Deletes the organization, its repositories and teams, memberships, installations, and every row that other features keep for them. |
 | `DELETE /_hubdouble/org/{org}/members/{login}` | Optional `sender` | `204`. Removes the membership. |
 | `PUT /_hubdouble/repository/{owner}/{repo}/collaborators/{login}` | Required `permission` and optional `sender` | `204`. Sets the collaborator's permission. |
 | `DELETE /_hubdouble/repository/{owner}/{repo}/collaborators/{login}` | Optional `sender` | `204`. Removes the collaborator. |

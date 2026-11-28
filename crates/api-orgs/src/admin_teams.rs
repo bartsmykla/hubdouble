@@ -7,7 +7,7 @@ use hubdouble_model::{
     Timestamp, node_id,
 };
 use hubdouble_rest::Params;
-use hubdouble_store::{Repos, Teams, Tx, TxMut};
+use hubdouble_store::{Deleted, Repos, Teams, Tx, TxMut};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
 
@@ -290,7 +290,7 @@ fn delete(
         updated.updated_at = now;
         tx.table_mut::<Teams>().replace(updated)?;
     }
-    tx.table_mut::<Teams>().remove(team.id);
+    tx.delete(&Deleted::Team(team.clone()))?;
     events::team(tx, &source, "deleted", &team, None, None);
     Ok(())
 }

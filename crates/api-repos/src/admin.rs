@@ -12,7 +12,7 @@ use hubdouble_git::{Git, ObjectId};
 use hubdouble_model::{AccountKind, ApiError, Release, Repo, Visibility};
 use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
 use hubdouble_rest::Params;
-use hubdouble_store::{Accounts, Releases, RepoRedirects, Repos, Table, Tx, TxMut};
+use hubdouble_store::{Accounts, Deleted, Releases, RepoRedirects, Repos, Table, Tx, TxMut};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -333,8 +333,7 @@ fn delete_repo(
             .0
             .insert(repo.id, format!("{owner}/{}", repo.name));
     }
-    clear_repository_properties(tx, repo.id);
-    tx.table_mut::<Repos>().remove(repo.id);
+    tx.delete(&Deleted::Repo(repo))?;
     Ok(None)
 }
 

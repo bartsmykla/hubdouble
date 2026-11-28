@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use hubdouble_store::{Repos, Table, Tx, TxMut};
+use hubdouble_model::ApiError;
+use hubdouble_store::{Deleted, Repos, Table, Tx, TxMut};
 
 use crate::contract::{ObjectId, Ref};
 
@@ -24,6 +25,19 @@ pub(crate) fn network_root(tx: &Tx, repo: i64) -> i64 {
         }
     }
     id
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a deletion subscriber returns a Result"
+)]
+pub(crate) fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    if let Deleted::Repo(repo) = deleted
+        && tx.table::<Refs>().by_repo.contains_key(&repo.id)
+    {
+        tx.table_mut::<Refs>().get_mut().by_repo.remove(&repo.id);
+    }
+    Ok(())
 }
 
 pub(crate) fn get(tx: &Tx, repo: i64, name: &str) -> Option<ObjectId> {

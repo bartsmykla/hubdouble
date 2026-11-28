@@ -10,6 +10,7 @@ use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 
 use crate::counters::Counters;
+use crate::deletion::{Deleted, DeletionSubscriber};
 use crate::outbox::{Committed, OutboxEntry, OutboxUse};
 
 /// A table the store holds. Each registered type is one table; the store keeps them in a
@@ -45,9 +46,14 @@ type Undo = Box<dyn FnOnce(&mut Tx) + Send>;
 pub struct Tx {
     tables: HashMap<TypeId, Box<dyn AnyTable>>,
     config: Arc<Config>,
+    deletions: Arc<[DeletionSubscriber]>,
 }
 
 impl Tx {
+    pub(crate) fn deletion_subscribers(&self) -> Arc<[DeletionSubscriber]> {
+        Arc::clone(&self.deletions)
+    }
+
     #[must_use]
     pub fn config(&self) -> &Config {
         &self.config
@@ -116,6 +122,20 @@ impl TxMut<'_> {
     /// Buffers a webhook delivery; it reaches the outbox only when the transaction commits.
     pub fn push_outbox(&mut self, entry: OutboxEntry) {
         self.work.outbox.push(entry);
+    }
+
+    /// Deletes a repository, a team or an account with every row that names it, in this
+    /// transaction. An account's repositories and an organization's teams are deleted first,
+    /// each as a deletion of its own. Then every [`DeletionSubscriber`] runs, in registration
+    /// order, and last the store drops its own rows: the entity, the rows in a deleted
+    /// repository, and the references other rows hold, such as a team's repository list or the
+    /// head repository of a pull request from a deleted fork, which becomes `None`.
+    ///
+    /// # Errors
+    ///
+    /// What a subscriber returns.
+    pub fn delete(&mut self, deleted: &Deleted) -> Result<(), ApiError> {
+        crate::deletion::delete(self, deleted)
     }
 
     /// A shorter-lived handle on the same transaction, for a context that holds a `TxMut` by value.
@@ -463,6 +483,7 @@ impl Store {
 /// Registers every table before start; no table is added after [`StoreBuilder::build`].
 pub struct StoreBuilder {
     tables: HashMap<TypeId, Box<dyn AnyTable>>,
+    deletions: Vec<DeletionSubscriber>,
 }
 
 impl Default for StoreBuilder {
@@ -477,6 +498,7 @@ impl StoreBuilder {
     pub fn new() -> StoreBuilder {
         let mut b = StoreBuilder {
             tables: HashMap::new(),
+            deletions: Vec::new(),
         };
         crate::tables::register_frozen(&mut b);
         b
@@ -497,6 +519,13 @@ impl StoreBuilder {
         self
     }
 
+    /// Adds a subscriber that [`TxMut::delete`] runs: the crate that registers a table keyed by
+    /// a repository, team or account removes its rows of the deleted entity there.
+    pub fn on_delete(&mut self, f: DeletionSubscriber) -> &mut StoreBuilder {
+        self.deletions.push(f);
+        self
+    }
+
     /// As [`StoreBuilder::build_with`] with [`Config::default`], for tests.
     #[must_use]
     pub fn build(self) -> Store {
@@ -511,6 +540,7 @@ impl StoreBuilder {
                     tx: Tx {
                         tables: self.tables,
                         config,
+                        deletions: self.deletions.into(),
                     },
                     next_seq: 0,
                 }),

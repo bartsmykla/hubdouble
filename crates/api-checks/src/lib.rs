@@ -69,7 +69,9 @@ pub fn register(r: &mut Registrar<'_>) {
         statuses::combined,
     );
     graphql::register(r.gql);
-    r.store.register_table::<pushes::FirstPushes>();
+    r.store
+        .register_table::<pushes::FirstPushes>()
+        .on_delete(pushes::forget);
     r.git.on_ref_update(suites::pushed);
     seed::register(r.admin);
 }

@@ -8,8 +8,8 @@ use hubdouble_model::{
 };
 
 use crate::{
-    Accounts, Blob, Blobs, Committed, Counters, Deliveries, OutboxEntry, OutboxUse, Repos,
-    Sequence, Store, StoreBuilder, Table, TxMut,
+    Accounts, Blob, Blobs, Committed, Counters, Deleted, DeletionSubscriber, Deliveries,
+    OutboxEntry, OutboxUse, Repos, Sequence, Store, StoreBuilder, Table, TxMut,
 };
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -500,4 +500,92 @@ fn an_index_key_held_by_another_row_is_refused() {
 
     assert_eq!(taken.unwrap_err().status, 422);
     assert_eq!(seen(&s).logins, ["Octo"]);
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a deletion subscriber returns a Result"
+)]
+fn note_deletion(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    let name = match deleted {
+        Deleted::Repo(r) => format!("repo {}", r.id),
+        Deleted::Team(t) => format!("team {}", t.id),
+        Deleted::Account(a) => format!("account {}", a.id),
+    };
+    let still_there = match deleted {
+        Deleted::Repo(r) => tx.table::<Repos>().get(r.id).is_some(),
+        Deleted::Team(_) => true,
+        Deleted::Account(a) => tx.table::<Accounts>().get(a.id).is_some(),
+    };
+    tx.table_mut::<Notes>()
+        .get_mut()
+        .0
+        .push(format!("{name} {still_there}"));
+    Ok(())
+}
+
+fn refuse_deletion(_: &mut TxMut<'_>, _: &Deleted) -> Result<(), ApiError> {
+    Err(ApiError::unprocessable("kept"))
+}
+
+fn deleting(subscriber: DeletionSubscriber) -> Store {
+    let mut b = StoreBuilder::new();
+    b.register_table::<Notes>().on_delete(subscriber);
+    let s = b.build();
+    s.update(|tx| {
+        tx.table_mut::<Accounts>().insert(account(1, "octo"))?;
+        tx.table_mut::<Accounts>().insert(account(2, "other"))?;
+        tx.table_mut::<Repos>().insert(repo(10, 1, "first"))?;
+        tx.table_mut::<Repos>().insert(repo(11, 1, "second"))?;
+        tx.table_mut::<Repos>().insert(repo(12, 2, "kept"))?;
+        Ok(())
+    })
+    .unwrap();
+    s
+}
+
+#[test]
+fn deleting_an_account_deletes_its_repositories_first_and_subscribers_see_the_rows() {
+    // Given an account with two repositories and another account with one
+    let s = deleting(note_deletion);
+
+    // When the first account is deleted
+    s.update(|tx| {
+        let octo = tx.table::<Accounts>().get(1).cloned().unwrap();
+        tx.delete(&Deleted::Account(octo))
+    })
+    .unwrap();
+
+    // Then each repository went as its own deletion before the account, the subscriber saw
+    // each row before the store dropped it, and the other account's repository stays
+    s.view(|tx| {
+        assert_eq!(
+            tx.table::<Notes>().0,
+            ["repo 10 true", "repo 11 true", "account 1 true"]
+        );
+        assert!(tx.table::<Accounts>().get(1).is_none());
+        let repos: Vec<i64> = tx.table::<Repos>().iter().map(|r| r.id).collect();
+        assert_eq!(repos, [12]);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_subscriber_that_refuses_a_deletion_rolls_the_transaction_back() {
+    // Given a subscriber that refuses every deletion
+    let s = deleting(refuse_deletion);
+
+    // When a repository is deleted
+    let refused = s.update(|tx| {
+        let repo = tx.table::<Repos>().get(10).cloned().unwrap();
+        tx.delete(&Deleted::Repo(repo))
+    });
+
+    // Then the deletion fails and the repository stays
+    assert_eq!(refused.unwrap_err().status, 422);
+    assert!(
+        s.view(|tx| Ok(tx.table::<Repos>().get(10).is_some()))
+            .unwrap()
+    );
 }

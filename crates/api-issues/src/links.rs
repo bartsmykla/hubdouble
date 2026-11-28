@@ -1,5 +1,6 @@
 mod targets;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use hubdouble_admin::SeedCtx;
@@ -8,7 +9,7 @@ use hubdouble_git::{Git, ObjectId, RefChange};
 use hubdouble_model::{
     Access, ApiError, Issue, IssueState, Repo, RepoRole, RepositorySelection, Timestamp, Visibility,
 };
-use hubdouble_store::{Accounts, Entity, Installations, Issues, Repos, Rows, Tx, TxMut};
+use hubdouble_store::{Accounts, Deleted, Entity, Installations, Issues, Repos, Rows, Tx, TxMut};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -162,6 +163,31 @@ impl Entity for CommitClose {
 }
 
 pub(crate) type CommitCloses = Rows<CommitClose>;
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a deletion subscriber returns a Result"
+)]
+pub(crate) fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    let Deleted::Repo(repo) = deleted else {
+        return Ok(());
+    };
+    let issues: BTreeSet<i64> = tx
+        .table::<Issues>()
+        .in_repo(repo.id)
+        .map(|i| i.id)
+        .collect();
+    tx.table_mut::<events::IssueEvents>()
+        .remove_in_repo(repo.id);
+    tx.table_mut::<IssueLinks>()
+        .remove_where(|l| l.repo_id == repo.id || issues.contains(&l.pull_issue_id));
+    tx.table_mut::<MergeCloses>()
+        .remove_all(issues.iter().copied());
+    let prefix = format!("{}/", repo.id);
+    tx.table_mut::<CommitCloses>()
+        .remove_where(|c| c.key.starts_with(&prefix));
+    Ok(())
+}
 
 pub(crate) fn ref_updated(
     tx: &mut TxMut<'_>,

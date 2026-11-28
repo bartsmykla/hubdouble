@@ -1,6 +1,6 @@
 use hubdouble_git::{Git, ObjectId, RefChange};
 use hubdouble_model::ApiError;
-use hubdouble_store::{Entity, Rows, Tx, TxMut};
+use hubdouble_store::{Deleted, Entity, Rows, Tx, TxMut};
 
 pub(crate) type FirstPushes = Rows<FirstPush>;
 
@@ -39,9 +39,22 @@ pub(crate) fn record(tx: &mut TxMut<'_>, git: &Git, change: &RefChange) -> Resul
     if pushes.by_key(&key).is_some() {
         return Ok(());
     }
-    let id = i64::try_from(pushes.len()).unwrap_or(i64::MAX - 1) + 1;
+    let id = pushes.iter().next_back().map_or(1, |last| last.id + 1);
     tx.table_mut::<FirstPushes>()
         .insert(FirstPush { id, key, before })?;
+    Ok(())
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a deletion subscriber returns a Result"
+)]
+pub(crate) fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    if let Deleted::Repo(repo) = deleted {
+        let prefix = key(repo.id, "");
+        tx.table_mut::<FirstPushes>()
+            .remove_where(|push| push.key.starts_with(&prefix));
+    }
     Ok(())
 }
 

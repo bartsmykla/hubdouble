@@ -4,7 +4,7 @@ use std::sync::Arc;
 use hubdouble_model::{
     Account, App, CheckRun, CheckSuite, Delivery, Installation, Issue, IssueComment, Label,
     Membership, Pull, Reaction, Release, ReleaseAsset, Repo, Review, ReviewComment, ReviewThread,
-    Ruleset, Status, Team, Token, WorkflowJob, WorkflowRun,
+    Ruleset, Status, Team, Timestamp, Token, WorkflowJob, WorkflowRun,
 };
 
 use crate::blobs::Blobs;
@@ -35,6 +35,7 @@ pub type WorkflowRuns = Rows<WorkflowRun>;
 pub type WorkflowJobs = Rows<WorkflowJob>;
 pub type Rulesets = Rows<Ruleset>;
 pub type Deliveries = Rows<Delivery>;
+pub type ActivityEvents = Rows<ActivityEvent>;
 
 pub(crate) fn register_frozen(b: &mut StoreBuilder) {
     b.register_table::<Counters>()
@@ -62,6 +63,7 @@ pub(crate) fn register_frozen(b: &mut StoreBuilder) {
         .register_table::<WorkflowJobs>()
         .register_table::<Rulesets>()
         .register_table::<Deliveries>()
+        .register_table::<ActivityEvents>()
         .register_table::<RepoRedirects>();
 }
 
@@ -88,6 +90,11 @@ impl RepoRedirects {
     /// Drops the redirect of `owner/name`, as a repository now has that name.
     pub fn claim(&mut self, owner: &str, name: &str) {
         self.names.remove(&full_name(owner, name));
+    }
+
+    /// Drops every redirect to a deleted repository.
+    pub fn forget(&mut self, repo_id: i64) {
+        self.names.retain(|_, id| *id != repo_id);
     }
 }
 
@@ -421,5 +428,35 @@ impl Entity for Delivery {
     }
     fn keep_on_reset(&self) -> bool {
         true
+    }
+}
+
+/// One entry of GitHub's events API: what an actor did in a repository, as the feeds list it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActivityEvent {
+    pub id: i64,
+    /// GitHub's event type, such as `PushEvent`.
+    pub kind: &'static str,
+    pub actor_id: i64,
+    pub repo_id: i64,
+    /// The repository's `owner/name` when the event happened; a later rename keeps it.
+    pub repo_name: String,
+    /// The organization that owned the repository, if one did.
+    pub org_id: Option<i64>,
+    pub payload: serde_json::Value,
+    /// Whether the repository was public when the event happened.
+    pub public: bool,
+    pub created_at: Timestamp,
+}
+
+impl Entity for ActivityEvent {
+    fn id(&self) -> i64 {
+        self.id
+    }
+    fn repo_id(&self) -> Option<i64> {
+        Some(self.repo_id)
+    }
+    fn parent_id(&self) -> Option<i64> {
+        Some(self.actor_id)
     }
 }
