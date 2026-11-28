@@ -573,6 +573,39 @@ async fn the_push_test_sends_a_push_only_to_a_hook_that_subscribes_to_push() {
 }
 
 #[tokio::test]
+async fn repository_deleted_reaches_organization_hooks_only() {
+    // Given a repository hook and an organization hook that hear repository
+    let server = server().await;
+    let alice = alice(&server);
+    let repo_hook = alice
+        .post(REPO_HOOKS, &hook(&server, "s", &["repository"], true))
+        .await
+        .json()["id"]
+        .as_i64()
+        .unwrap();
+    let org_hook = alice
+        .post(ORG_HOOKS, &hook(&server, "s", &["repository"], true))
+        .await
+        .json()["id"]
+        .as_i64()
+        .unwrap();
+    drained(&server).await;
+
+    // When the repository is deleted
+    let deleted = server
+        .admin(Method::DELETE, "repos/acme/public", None)
+        .await;
+
+    // Then only the organization hook gets repository deleted
+    assert!(deleted.status.is_success(), "{:?}", deleted.body);
+    let sent = drained(&server).await;
+    let to_org = to_hook(&sent, org_hook, "repository");
+    assert_eq!(to_org.len(), 1);
+    assert_eq!(to_org[0].json()["action"], "deleted");
+    assert!(to_hook(&sent, repo_hook, "repository").is_empty());
+}
+
+#[tokio::test]
 async fn the_test_url_of_a_hook_sends_the_push_test() {
     // Given
     let server = server().await;

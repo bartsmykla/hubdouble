@@ -96,7 +96,16 @@ fn scope<'t>(tx: &'t Tx, e: &Event) -> Option<(Option<&'t Arc<Repo>>, i64)> {
     Some((repo, account))
 }
 
+/// GitHub's `repository` `deleted` event goes to organization hooks only: "GitHub Apps and
+/// repository webhooks will not receive this event."
+fn organization_hooks_only(e: &Event) -> bool {
+    e.name == "repository" && e.action == Some("deleted")
+}
+
 pub(crate) fn recipients(tx: &Tx, e: &Event) -> Vec<(i64, Option<Arc<Installation>>)> {
+    if organization_hooks_only(e) {
+        return Vec::new();
+    }
     let apps = tx.table::<Apps>();
     let wants = |app_id: i64| {
         apps.get(app_id)
@@ -158,7 +167,8 @@ pub(crate) fn hook_recipients(tx: &Tx, e: &Event) -> Vec<i64> {
     let Some((repo, account)) = scope(tx, e) else {
         return Vec::new();
     };
-    repo.map(|r| r.id)
+    repo.filter(|_| !organization_hooks_only(e))
+        .map(|r| r.id)
         .into_iter()
         .chain([account])
         .flat_map(|parent| hooks.children(parent))

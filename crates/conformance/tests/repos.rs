@@ -1115,7 +1115,7 @@ async fn repository_admin_writes_deliver_their_repository_actions() {
         .admin(Method::DELETE, "repos/acme/prompts", Some(&json!({})))
         .await;
     let gone = alice(&server).get("repos/acme/prompts").await;
-    let got = deliveries(&server, 7).await;
+    let got = deliveries(&server, 6).await;
     // Then
     assert!(create.status.is_success(), "{:?}", create.body);
     let created = delivered(&got, "repository", "created");
@@ -1143,5 +1143,9 @@ async fn repository_admin_writes_deliver_their_repository_actions() {
         delivered(&got, "repository", "publicized")["repository"]["private"],
         false
     );
-    delivered(&got, "repository", "deleted");
+    assert!(
+        !got.iter()
+            .any(|d| d.header("x-github-event") == "repository" && d.json()["action"] == "deleted"),
+        "GitHub Apps do not receive repository deleted"
+    );
 }
