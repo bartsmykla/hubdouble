@@ -768,15 +768,6 @@ async fn hook_links_keep_the_api_prefix_of_the_request() {
     );
 }
 
-fn assert_denied(answer: &Answer, permission: &str) {
-    assert_eq!(answer.status, StatusCode::FORBIDDEN);
-    assert!(
-        answer
-            .header("x-accepted-github-permissions")
-            .contains(permission)
-    );
-}
-
 #[tokio::test]
 async fn hooks_are_hidden_from_callers_who_cannot_administer_them() {
     // Given
@@ -843,12 +834,12 @@ async fn hooks_are_hidden_from_callers_who_cannot_administer_them() {
         &org_member,
         &nobody,
         &nobody_org,
+        &repo_denied,
+        &org_denied,
+        &scope_missing,
     ] {
         assert_eq!(answer.status, StatusCode::NOT_FOUND);
     }
-    assert_denied(&repo_denied, "repository_hooks");
-    assert_denied(&org_denied, "organization_hooks");
-    assert_eq!(scope_missing.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

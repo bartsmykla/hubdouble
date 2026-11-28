@@ -181,6 +181,8 @@ fn repo_access(
             };
             if allowed {
                 Ok(())
+            } else if hidden(req) {
+                Err(ApiError::not_found())
             } else {
                 Err(integration_denied(req))
             }
@@ -246,6 +248,8 @@ fn org_access(
             };
             if allowed {
                 Ok(())
+            } else if hidden(req) {
+                Err(ApiError::not_found())
             } else {
                 Err(integration_denied(req))
             }

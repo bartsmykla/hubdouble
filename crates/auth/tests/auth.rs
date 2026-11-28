@@ -914,13 +914,9 @@ fn an_installation_outside_a_public_repository_reads_only_what_github_serves_pub
     let contents = on_repo(&store, &full, &READ_CONTENTS, UNINSTALLED);
     let hooks = on_repo(&store, &full, &READ_HOOKS, UNINSTALLED).expect_err("denied");
 
-    // Then only the contents pass
+    // Then only the contents pass, and the webhooks stay hidden
     assert_eq!(status(contents), 200);
-    assert_eq!(hooks.status, 403);
-    assert_eq!(
-        header(&hooks, "X-Accepted-GitHub-Permissions"),
-        Some("repository_hooks=read")
-    );
+    assert_eq!(hooks.status, 404);
     assert_eq!(
         status(on_repo(&store, &Actor::Anonymous, &READ_HOOKS, UNINSTALLED)),
         404

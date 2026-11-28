@@ -115,7 +115,15 @@ fn required(registry: &Registry, route: &str) -> Vec<Case> {
         let metadata_read = |g: &Grant| g.permission == "metadata" && g.access == Access::Read;
         let every_installation_has_it =
             req.any_of.iter().any(metadata_read) && req.all_of.iter().all(metadata_read);
-        if (!req.any_of.is_empty() || !req.all_of.is_empty()) && !every_installation_has_it {
+        let hides_hooks = req
+            .any_of
+            .iter()
+            .chain(req.all_of)
+            .any(|g| matches!(g.permission, "repository_hooks" | "organization_hooks"));
+        if (!req.any_of.is_empty() || !req.all_of.is_empty())
+            && !every_installation_has_it
+            && !hides_hooks
+        {
             cases.push(Case::MissingPermission);
         }
     }
@@ -149,6 +157,11 @@ fn the_required_cases_come_from_the_registration_and_the_description() {
         case("GET /repos/{owner}/{repo}"),
         [Case::Success, Case::UnseenRepository]
     );
+    assert_eq!(
+        case("GET /repos/{owner}/{repo}/hooks"),
+        [Case::Success, Case::UnseenRepository]
+    );
+    assert_eq!(case("GET /orgs/{org}/hooks"), [Case::Success]);
     assert_eq!(case("GET /app"), [Case::Success]);
     assert_eq!(case("POST /graphql"), [Case::Success]);
 }
