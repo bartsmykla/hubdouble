@@ -775,17 +775,17 @@ async fn invalid_hooks_are_rejected() {
     );
 }
 
-fn assert_bad_event(answer: &Answer) {
+fn assert_invalid_hook(answer: &Answer) {
     assert_eq!(
         answer.status,
         StatusCode::UNPROCESSABLE_ENTITY,
         "{}",
         answer.json()
     );
-    let body = answer.json();
-    assert_eq!(body["message"], "Validation Failed");
-    assert_eq!(body["errors"][0]["resource"], "Hook");
-    assert_eq!(body["errors"][0]["code"], "custom");
+    let errors = &answer.json()["errors"];
+    assert_eq!(errors.as_array().map(Vec::len), Some(1), "{errors}");
+    assert_eq!(errors[0]["resource"], "Hook");
+    assert_eq!(errors[0]["code"], "custom");
 }
 
 #[tokio::test]
@@ -870,7 +870,7 @@ async fn a_hook_accepts_only_known_event_names() {
 
     // Then
     for answer in &refused {
-        assert_bad_event(answer);
+        assert_invalid_hook(answer);
     }
     assert_eq!(changed.status, StatusCode::OK, "{}", changed.json());
     assert_eq!(
