@@ -1385,6 +1385,45 @@ async fn a_hooks_last_response_is_its_newest_dropped_answer_before_a_running_att
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_hooks_newer_logged_answer_beats_an_older_answer_the_log_dropped() {
+    // Given a log capacity of one and three hook attempts in flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 3;
+        o.log_capacity = 1;
+    });
+    let mut attempts = Vec::new();
+    for _ in 0..3 {
+        emit_one(&store, event("issues", WIDGET));
+        attempts.push(hits.recv().await.unwrap());
+    }
+    let [one, two, three]: [Hit; 3] = attempts.try_into().ok().unwrap();
+    // When the second attempt answers 200, the third answers 404 so the log drops the second, and
+    // the first then answers 500
+    two.reply.send(200).unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 2 && s.unlogged == 3)
+        .await;
+    three.reply.send(404).unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 1 && s.unlogged == 2)
+        .await;
+    one.reply.send(500).unwrap();
+    hooks.drain().await.unwrap();
+    // Then the hook's last response is the third attempt
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 404, "status": "misconfigured", "message": "Invalid HTTP Response: 404"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_seeded_hook_keeps_its_last_response_over_a_reset_that_keeps_its_log() {
     // Given a seeded hook whose attempt after the snapshot answered 200
     let store = world_with_issues_hook();
