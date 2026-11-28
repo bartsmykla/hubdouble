@@ -245,9 +245,7 @@ async fn comment(gh: &GoGithub, number: i64, body: &str) -> Value {
 }
 
 async fn deliveries(server: &TestServer) -> Vec<Delivery> {
-    let drained = server.admin(Method::POST, "hooks/drain", None).await;
-    assert_eq!(drained.status, StatusCode::NO_CONTENT);
-    server.receiver.received().await
+    server.deliveries_in_queue_order().await
 }
 
 fn of<'d>(all: &'d [Delivery], event: &str, action: &str) -> Vec<&'d Delivery> {

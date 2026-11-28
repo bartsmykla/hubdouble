@@ -1376,7 +1376,8 @@ async fn a_ready_pull_request_requests_its_code_owners_and_a_draft_waits_until_i
             .map_or_default(|t| t.iter().map(|t| &t["slug"]).collect());
         assert_eq!(logins, [&json!("carol")], "{draft}");
         assert_eq!(slugs, [&json!("owners")], "{draft}");
-        let requested: Vec<(Value, Value)> = deliveries(&server)
+        let requested: Vec<(Value, Value)> = server
+            .deliveries_in_queue_order()
             .await
             .iter()
             .map(Delivery::json)

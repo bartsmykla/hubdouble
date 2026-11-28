@@ -105,7 +105,7 @@ async fn deleting_a_branch_or_a_tag_delivers_a_signed_delete_webhook() {
     assert_eq!(drained.status, StatusCode::NO_CONTENT);
 
     // Then
-    let received = server.receiver.received().await;
+    let received = server.deliveries_in_queue_order().await;
     let deletes: Vec<_> = received
         .iter()
         .filter(|d| d.header("x-github-event") == "delete")
@@ -170,7 +170,7 @@ async fn an_injected_event_is_signed_and_logged_for_the_app_it_names() {
             StatusCode::UNPROCESSABLE_ENTITY
         ]
     );
-    let received = server.receiver.received().await;
+    let received = server.deliveries_in_queue_order().await;
     let [deleted, revoked] = &received[..] else {
         panic!("expected two deliveries, got {}", received.len());
     };

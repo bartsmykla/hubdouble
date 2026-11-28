@@ -730,7 +730,7 @@ async fn a_suite_whose_runs_are_all_skipped_concludes_skipped() {
         }
         suites.push((head, suite));
     }
-    let all = drain(&server).await;
+    let all = server.deliveries_in_queue_order().await;
     // Then the suite concludes skipped only when every run is skipped, as live GitHub answers
     for ((head, suite), (_, _, want)) in suites.iter().zip(cases) {
         let listed = checked(
@@ -878,7 +878,7 @@ async fn statuses_list_and_combine_as_the_client_reads_them() {
         200,
         "repos/get-combined-status-for-ref",
     );
-    let all = drain(&server).await;
+    let all = server.deliveries_in_queue_order().await;
     // Then
     assert_eq!(first["state"], "pending");
     assert_eq!(first["context"], "agent/run");
