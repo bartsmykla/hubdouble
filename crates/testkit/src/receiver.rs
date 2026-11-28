@@ -33,13 +33,16 @@ impl Delivery {
             .unwrap_or("")
     }
 
+    /// The payload: the JSON body, or the `payload` parameter of a form-encoded body.
+    ///
     /// # Panics
     ///
-    /// When the body is not JSON.
+    /// When the payload is not JSON.
     #[must_use]
     pub fn json(&self) -> Value {
-        serde_json::from_slice(&self.body)
-            .unwrap_or_else(|e| panic!("the delivery is not JSON: {e}"))
+        let json = crate::validate::delivery_json(self.header("content-type"), &self.body)
+            .unwrap_or_else(|| panic!("the delivery has neither a JSON nor a form body"));
+        serde_json::from_slice(&json).unwrap_or_else(|e| panic!("the delivery is not JSON: {e}"))
     }
 
     /// Whether `X-Hub-Signature-256` is `sha256=` and the HMAC SHA-256 of the body with `secret`.

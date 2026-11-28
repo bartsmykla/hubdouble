@@ -152,6 +152,7 @@ fn repo_access(
         return Err(ApiError::not_found());
     }
     match actor {
+        Actor::Anonymous if hidden(req) => Err(ApiError::not_found()),
         Actor::Anonymous if is_read(req) => Ok(()),
         Actor::Anonymous => Err(requires_authentication()),
         Actor::App { .. } => Err(integration_denied(req)),
@@ -193,6 +194,8 @@ fn repo_access(
                 repo_role(tx, user.id, repo).or((!repo.is_private()).then_some(RepoRole::Read));
             if held >= Some(needed_role(req)) {
                 Ok(())
+            } else if hidden(req) {
+                Err(ApiError::not_found())
             } else {
                 Err(user_denied(token, req))
             }
@@ -208,6 +211,7 @@ fn org_access(
     base_url: &str,
 ) -> Result<(), ApiError> {
     let public_read = is_read(req)
+        && !hidden(req)
         && (req.any_of.is_empty()
             || req
                 .any_of
@@ -215,6 +219,7 @@ fn org_access(
                 .any(|grant| grant.permission != "organization_self_hosted_runners"));
     match actor {
         Actor::Anonymous if public_read => Ok(()),
+        Actor::Anonymous if hidden(req) => Err(ApiError::not_found()),
         Actor::Anonymous => Err(requires_authentication()),
         Actor::App { .. } => Err(integration_denied(req)),
         Actor::Installation {
@@ -264,6 +269,8 @@ fn org_access(
             };
             if allowed {
                 Ok(())
+            } else if hidden(req) {
+                Err(ApiError::not_found())
             } else {
                 Err(user_denied(token, req))
             }
@@ -367,12 +374,21 @@ fn is_read(req: &Requirement) -> bool {
         .all(|g| g.access == Access::Read)
 }
 
+fn hidden(req: &Requirement) -> bool {
+    req.any_of
+        .iter()
+        .chain(req.all_of)
+        .any(|g| matches!(g.permission, "repository_hooks" | "organization_hooks"))
+}
+
 fn role_for(g: &Grant) -> RepoRole {
     match (g.access, g.permission) {
+        (_, "repository_hooks") | (Access::Admin, _) | (Access::Write, "administration") => {
+            RepoRole::Admin
+        }
         (Access::Read, _) | (Access::Write, "issues" | "pull_requests" | "discussions") => {
             RepoRole::Read
         }
-        (Access::Admin, _) | (Access::Write, "administration") => RepoRole::Admin,
         (Access::Write, _) => RepoRole::Write,
     }
 }
@@ -389,6 +405,8 @@ fn classic_scopes(token: &Token, req: &Requirement) -> Result<(), ApiError> {
         || req.scopes.iter().any(|w| holds_scope(&token.scopes, w))
     {
         Ok(())
+    } else if hidden(req) {
+        Err(ApiError::not_found())
     } else {
         Err(scope_denied(req.scopes))
     }

@@ -3,7 +3,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use hubdouble_model::{ApiError, Clock, Repo, SystemClock, Timestamp};
+use hubdouble_model::{ApiError, Clock, Event, Repo, SystemClock, Timestamp};
 use hubdouble_store::{Accounts, Repos, Store, StoreBuilder, Tx, TxMut};
 use parking_lot::{Mutex, RwLock};
 use serde::{Serialize, Serializer};
@@ -632,6 +632,16 @@ impl Git {
             subscriber(tx, self, &change).map_err(GitError::Rejected)?;
         }
         Ok(())
+    }
+
+    /// The `push` event that `change` delivers, without moving any ref; `None` for a ref that
+    /// is neither a branch nor a tag.
+    ///
+    /// # Errors
+    ///
+    /// [`GitError::NotFound`] when the repository's fork network lacks a commit of the change.
+    pub fn push_event(&self, tx: &Tx, change: &RefChange) -> Result<Option<Event>, GitError> {
+        events::push(tx, &self.odb(tx, change.repo_id), change)
     }
 
     /// # Errors

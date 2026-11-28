@@ -2,6 +2,7 @@ mod activity;
 mod admin;
 mod codeowners;
 mod graphql;
+mod hooks;
 mod releases;
 mod repos;
 mod rules;
@@ -22,6 +23,7 @@ pub fn register(r: &mut Registrar<'_>) {
     codeowners::register(r);
     rules::register(r);
     releases::register(r);
+    hooks::register(r);
     graphql::register(r);
     admin::register(r);
 }

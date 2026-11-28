@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use bytes::Bytes;
-use hubdouble_model::{App, Clock, Delivery, DeliveryRequest, DeliveryResponse, Timestamp};
+use hubdouble_model::{Clock, Delivery, DeliveryRequest, DeliveryResponse, Timestamp};
 use hubdouble_store::{
-    Apps, Committed, Counters, Deliveries, OutboxUse, Sequence, Snapshot, Store,
+    Apps, Committed, Counters, Deliveries, OutboxEntry, OutboxUse, Sequence, Snapshot, Store, Tx,
 };
 use parking_lot::Mutex;
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
@@ -14,13 +14,14 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::delivery::{Outcome, Pool, send, signature_1, signature_256};
-use crate::{HooksError, Notice, Options, QUEUE_BYTES, Stats};
+use crate::{ContentType, Hooks, HooksError, Notice, Options, QUEUE_BYTES, Stats};
 
 const OVER_BUDGET: &str = "Queue full";
 
 pub(crate) struct Job {
     id: i64,
     epoch: u64,
+    log: i64,
     app_id: i64,
     installation_id: Option<i64>,
     repo_id: Option<i64>,
@@ -31,6 +32,7 @@ pub(crate) struct Job {
     url: String,
     headers: BTreeMap<String, String>,
     body: Bytes,
+    wire: Bytes,
     over_budget: bool,
 }
 
@@ -40,7 +42,7 @@ impl Job {
             id: self.id,
             guid: self.guid,
             app_id: self.app_id,
-            hook_id: self.app_id,
+            hook_id: self.log,
             installation_id: self.installation_id,
             repo_id: self.repo_id,
             event: self.event,
@@ -63,9 +65,47 @@ impl Job {
     }
 }
 
+struct Target {
+    log: i64,
+    app_id: i64,
+    url: String,
+    secret: Option<String>,
+    form: bool,
+    kind: &'static str,
+    owner_id: i64,
+}
+
+impl Target {
+    fn of(tx: &Tx, entry: &OutboxEntry) -> Option<Target> {
+        if let Some(id) = entry.hook_id {
+            let hook = tx.try_table::<Hooks>()?.get(id).filter(|h| h.active)?;
+            return Some(Target {
+                log: id,
+                app_id: 0,
+                url: hook.url.clone(),
+                secret: hook.secret.clone(),
+                form: hook.content_type == ContentType::Form,
+                kind: hook.owner.target_type(),
+                owner_id: hook.owner.id(),
+            });
+        }
+        let app = tx.table::<Apps>().get(entry.app_id)?;
+        let hook = app.webhook.as_ref().filter(|w| w.active)?;
+        Some(Target {
+            log: app.id,
+            app_id: app.id,
+            url: hook.url.clone(),
+            secret: hook.secret.clone(),
+            form: false,
+            kind: "integration",
+            owner_id: app.id,
+        })
+    }
+}
+
 struct Assigned {
     id: i64,
-    app: Arc<App>,
+    target: Target,
     committed: Committed,
 }
 
@@ -215,7 +255,7 @@ impl Shared {
             self.space.add_permits(dropped.len());
             for job in dropped {
                 self.release_job(&job);
-                self.finish(&mut st, job.app_id, job.id, None);
+                self.finish(&mut st, job.log, job.id, None);
             }
             let stale: Vec<(i64, i64)> = st
                 .apps
@@ -281,20 +321,17 @@ impl Shared {
                 let epoch = self.store.epoch();
                 let mut out = Vec::with_capacity(batch.len());
                 for c in batch {
-                    let app = tx
-                        .table::<Apps>()
-                        .get(c.entry.app_id)
-                        .filter(|app| app.webhook.as_ref().is_some_and(|w| w.active))
-                        .filter(|_| c.epoch == epoch)
-                        .cloned();
-                    let Some(app) = app else {
+                    let target = (c.epoch == epoch)
+                        .then(|| Target::of(tx, &c.entry))
+                        .flatten();
+                    let Some(target) = target else {
                         self.release(&c);
                         continue;
                     };
                     let id = tx.table_mut::<Counters>().next(Sequence::Delivery);
                     out.push(Assigned {
                         id,
-                        app,
+                        target,
                         committed: c,
                     });
                 }
@@ -319,61 +356,75 @@ impl Shared {
         self.release_bytes(job.over_budget, job.body.len());
     }
 
-    fn job(a: Assigned) -> Option<Job> {
-        let Assigned { id, app, committed } = a;
+    fn job(a: Assigned) -> Job {
+        let Assigned {
+            id,
+            target,
+            committed,
+        } = a;
         let epoch = committed.epoch;
         let over_budget = committed.over_budget;
         let entry = committed.entry;
         let event = entry.event.into_owned();
         let action = entry.action.map(Cow::into_owned);
-        let hook = app.webhook.as_ref()?;
         let (guid, redelivery) = match entry.redelivery_of {
             Some(guid) => (guid, true),
             None => (uuid::Uuid::new_v4().to_string(), false),
         };
         let body = entry.payload;
-        let app_id = app.id.to_string();
+        let (content_type, wire) = if target.form {
+            let mut form = b"payload=".to_vec();
+            form.extend(url::form_urlencoded::byte_serialize(&body).flat_map(str::bytes));
+            ("application/x-www-form-urlencoded", Bytes::from(form))
+        } else {
+            ("application/json", body.clone())
+        };
         let mut headers = BTreeMap::from([
             ("Accept".to_owned(), "*/*".to_owned()),
-            ("Content-Type".to_owned(), "application/json".to_owned()),
+            ("Content-Type".to_owned(), content_type.to_owned()),
             (
                 "User-Agent".to_owned(),
                 "GitHub-Hookshot/hubdouble".to_owned(),
             ),
             ("X-GitHub-Delivery".to_owned(), guid.clone()),
             ("X-GitHub-Event".to_owned(), event.clone()),
-            ("X-GitHub-Hook-ID".to_owned(), app_id.clone()),
-            ("X-GitHub-Hook-Installation-Target-ID".to_owned(), app_id),
+            ("X-GitHub-Hook-ID".to_owned(), target.log.to_string()),
+            (
+                "X-GitHub-Hook-Installation-Target-ID".to_owned(),
+                target.owner_id.to_string(),
+            ),
             (
                 "X-GitHub-Hook-Installation-Target-Type".to_owned(),
-                "integration".to_owned(),
+                target.kind.to_owned(),
             ),
         ]);
-        if let Some(secret) = hook.secret.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(secret) = target.secret.as_deref().filter(|s| !s.is_empty()) {
             headers.insert(
                 "X-Hub-Signature".to_owned(),
-                signature_1(secret.as_bytes(), &body),
+                signature_1(secret.as_bytes(), &wire),
             );
             headers.insert(
                 "X-Hub-Signature-256".to_owned(),
-                signature_256(secret.as_bytes(), &body),
+                signature_256(secret.as_bytes(), &wire),
             );
         }
-        Some(Job {
+        Job {
             id,
             epoch,
-            app_id: app.id,
+            log: target.log,
+            app_id: target.app_id,
             installation_id: entry.installation_id,
             repo_id: entry.repo_id,
             event,
             action,
             guid,
             redelivery,
-            url: hook.url.clone(),
+            url: target.url,
             headers,
             body,
+            wire,
             over_budget,
-        })
+        }
     }
 
     async fn enqueue(&self, batch: Vec<Committed>) -> Result<(), HooksError> {
@@ -384,7 +435,7 @@ impl Shared {
         if let Some(observe) = &self.options.observer {
             for a in &assigned {
                 observe(&Notice::Event {
-                    app_id: a.app.id,
+                    app_id: a.target.app_id,
                     delivery_id: a.id,
                     event: &a.committed.entry.event,
                     action: a.committed.entry.action.as_deref(),
@@ -392,37 +443,15 @@ impl Shared {
             }
         }
         self.last_id.store(last.id, Ordering::SeqCst);
-        let jobs: Vec<Result<Job, (i64, i64)>> = assigned
-            .into_iter()
-            .map(|a| {
-                let pair = (a.app.id, a.id);
-                let (over_budget, bytes) =
-                    (a.committed.over_budget, a.committed.entry.payload.len());
-                Shared::job(a).ok_or_else(|| {
-                    self.release_bytes(over_budget, bytes);
-                    pair
-                })
-            })
-            .collect();
+        let jobs: Vec<Job> = assigned.into_iter().map(Shared::job).collect();
         {
             let mut st = self.state.lock();
             for job in &jobs {
-                let (app, id) = match job {
-                    Ok(j) => (j.app_id, j.id),
-                    Err(pair) => *pair,
-                };
-                st.unlogged.insert(id);
-                st.apps.entry(app).or_default().running.insert(id);
+                st.unlogged.insert(job.id);
+                st.apps.entry(job.log).or_default().running.insert(job.id);
             }
         }
         for job in jobs {
-            let job = match job {
-                Ok(job) => job,
-                Err((app, id)) => {
-                    self.finish(&mut self.state.lock(), app, id, None);
-                    continue;
-                }
-            };
             if job.over_budget {
                 self.refuse(job);
                 continue;
@@ -441,7 +470,7 @@ impl Shared {
             } else {
                 self.space.add_permits(1);
                 self.release_job(&job);
-                self.finish(&mut st, job.app_id, job.id, None);
+                self.finish(&mut st, job.log, job.id, None);
             }
         }
         self.notify();
@@ -449,7 +478,7 @@ impl Shared {
     }
 
     fn refuse(&self, job: Job) {
-        let (app, id, epoch) = (job.app_id, job.id, job.epoch);
+        let (app, id, epoch) = (job.log, job.id, job.epoch);
         let bytes = job.body.len();
         let mut delivery = job.logged(self.clock.now(), 0.0, Outcome::failed(OVER_BUDGET));
         if bytes == 0 {
@@ -468,7 +497,7 @@ impl Shared {
         self.space.add_permits(1);
         if job.epoch != self.store.epoch() {
             self.release_job(&job);
-            self.finish(&mut st, job.app_id, job.id, None);
+            self.finish(&mut st, job.log, job.id, None);
             return None;
         }
         *st.in_flight.entry(job.epoch).or_default() += 1;
@@ -478,7 +507,7 @@ impl Shared {
     }
 
     async fn attempt(&self, job: Job) {
-        let (app, id, epoch) = (job.app_id, job.id, job.epoch);
+        let (app, id, epoch) = (job.log, job.id, job.epoch);
         let sent = job.body.len() + header_bytes(&job.headers);
         let delivered_at = self.clock.now();
         let started = Instant::now();
@@ -489,7 +518,7 @@ impl Shared {
                 &self.pool,
                 &job.url,
                 &job.headers,
-                job.body.clone(),
+                job.wire.clone(),
                 self.options.response_bytes,
             ),
         )

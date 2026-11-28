@@ -1,4 +1,4 @@
-operations: 127 of 1281 registered (9.9%)
+operations: 150 of 1281 registered (11.7%)
   actions: 22/208
   activity: 0/34
   agent-automations: 0/12
@@ -35,7 +35,7 @@ operations: 127 of 1281 registered (9.9%)
   meta: 0/5
   metrics: 0/10
   migrations: 0/22
-  orgs: 2/129
+  orgs: 13/129
   packages: 0/27
   pages: 0/12
   private-registries: 0/6
@@ -44,7 +44,7 @@ operations: 127 of 1281 registered (9.9%)
   rate-limit: 0/1
   reactions: 4/15
   releases: 3/13
-  repos: 7/74
+  repos: 19/74
   search: 0/7
   secret-scanning: 0/17
   security-advisories: 0/14
@@ -851,7 +851,6 @@ missing:
     orgs/create-invitation
     orgs/create-issue-field
     orgs/create-issue-type
-    orgs/create-webhook
     orgs/custom-properties-for-repos-create-or-update-organization-definition
     orgs/custom-properties-for-repos-create-or-update-organization-definitions
     orgs/custom-properties-for-repos-create-or-update-organization-values
@@ -865,7 +864,6 @@ missing:
     orgs/delete-attestations-by-subject-digest
     orgs/delete-issue-field
     orgs/delete-issue-type
-    orgs/delete-webhook
     orgs/disable-selected-repository-immutable-releases-organization
     orgs/enable-or-disable-security-product-on-all-org-repos
     orgs/enable-selected-repository-immutable-releases-organization
@@ -884,9 +882,6 @@ missing:
     orgs/get-org-role
     orgs/get-org-ruleset-history
     orgs/get-org-ruleset-version
-    orgs/get-webhook
-    orgs/get-webhook-config-for-org
-    orgs/get-webhook-delivery
     orgs/list
     orgs/list-app-installations
     orgs/list-artifact-deployment-records
@@ -914,10 +909,6 @@ missing:
     orgs/list-pending-invitations
     orgs/list-public-members
     orgs/list-security-manager-teams
-    orgs/list-webhook-deliveries
-    orgs/list-webhooks
-    orgs/ping-webhook
-    orgs/redeliver-webhook-delivery
     orgs/remove-member
     orgs/remove-membership-for-user
     orgs/remove-outside-collaborator
@@ -941,8 +932,6 @@ missing:
     orgs/update-membership-for-authenticated-user
     orgs/update-pat-access
     orgs/update-pat-accesses
-    orgs/update-webhook
-    orgs/update-webhook-config-for-org
     repos/create-org-ruleset
     repos/delete-org-ruleset
     repos/get-org-rule-suite
@@ -1080,14 +1069,12 @@ missing:
     repos/create-or-update-file-contents
     repos/create-repo-ruleset
     repos/create-using-template
-    repos/create-webhook
     repos/custom-properties-for-repos-create-or-update-repository-values
     repos/custom-properties-for-repos-get-repository-values
     repos/delete
     repos/delete-autolink
     repos/delete-file
     repos/delete-repo-ruleset
-    repos/delete-webhook
     repos/disable-automated-security-fixes
     repos/disable-immutable-releases
     repos/disable-private-vulnerability-reporting
@@ -1108,9 +1095,6 @@ missing:
     repos/get-repo-ruleset-history
     repos/get-repo-ruleset-version
     repos/get-repo-rulesets
-    repos/get-webhook
-    repos/get-webhook-config-for-repo
-    repos/get-webhook-delivery
     repos/list-attestations
     repos/list-autolinks
     repos/list-contributors
@@ -1123,17 +1107,10 @@ missing:
     repos/list-public
     repos/list-tags
     repos/list-teams
-    repos/list-webhook-deliveries
-    repos/list-webhooks
-    repos/ping-webhook
-    repos/redeliver-webhook-delivery
     repos/replace-all-topics
-    repos/test-push-webhook
     repos/transfer
     repos/update
     repos/update-repo-ruleset
-    repos/update-webhook
-    repos/update-webhook-config-for-repo
   search:
     search/code
     search/commits

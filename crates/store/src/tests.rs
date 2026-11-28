@@ -104,6 +104,7 @@ fn delivery(id: i64) -> Delivery {
 fn entry(event: &'static str) -> OutboxEntry {
     OutboxEntry {
         app_id: 1,
+        hook_id: None,
         installation_id: None,
         repo_id: None,
         event: event.into(),

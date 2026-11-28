@@ -2590,6 +2590,7 @@ dependencies = [
  "http-body-util",
  "hubdouble-admin",
  "hubdouble-api-actions",
+ "hubdouble-api-apps",
  "hubdouble-api-gitdata",
  "hubdouble-auth",
  "hubdouble-git",
@@ -2800,6 +2801,7 @@ dependencies = [
  "sha2 0.11.1",
  "thiserror 2.0.21",
  "tokio",
+ "url",
  "uuid",
 ]
 
@@ -2923,6 +2925,7 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]

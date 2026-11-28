@@ -417,7 +417,7 @@ impl Entity for Delivery {
         self.repo_id
     }
     fn parent_id(&self) -> Option<i64> {
-        Some(self.app_id)
+        Some(self.hook_id)
     }
     fn keep_on_reset(&self) -> bool {
         true

@@ -332,13 +332,26 @@ pub fn webhook_payload(
 /// `X-GitHub-Hook-ID` and `X-GitHub-Hook-Installation-Target-ID` (numbers),
 /// `X-GitHub-Hook-Installation-Target-Type`, `X-Hub-Signature-256` (`sha256=` and 64 hex) and
 /// `X-Hub-Signature` (`sha1=` and 40 hex), both or neither, a `User-Agent` that starts with
-/// `GitHub-Hookshot/`, and `Content-Type: application/json`.
+/// `GitHub-Hookshot/`, and `Content-Type: application/json`, or
+/// `application/x-www-form-urlencoded` with the JSON in a `payload` parameter.
 ///
 /// # Errors
 ///
 /// Each way the delivery differs from GitHub's docs.
 pub fn webhook_delivery(headers: &http::HeaderMap, body: &[u8]) -> Result<(), Vec<String>> {
     checked_webhook_delivery(headers, body).map(|_| ())
+}
+
+/// The JSON of a delivery body: the body itself for `application/json`, and the `payload`
+/// parameter for `application/x-www-form-urlencoded`, as a `form` webhook sends it.
+pub(crate) fn delivery_json(content_type: &str, body: &[u8]) -> Option<Vec<u8>> {
+    match content_type.split(';').next().map(str::trim) {
+        Some("application/json") => Some(body.to_vec()),
+        Some("application/x-www-form-urlencoded") => url::form_urlencoded::parse(body)
+            .find(|(name, _)| name == "payload")
+            .map(|(_, value)| value.into_owned().into_bytes()),
+        _ => None,
+    }
 }
 
 pub(crate) fn checked_webhook_delivery(
@@ -394,10 +407,14 @@ pub(crate) fn checked_webhook_delivery(
     if !header("user-agent").starts_with("GitHub-Hookshot/") {
         errors.push(format!("User-Agent {:?}", header("user-agent")));
     }
-    if header("content-type").split(';').next().map(str::trim) != Some("application/json") {
-        errors.push(format!("Content-Type {:?}", header("content-type")));
-    }
-    let payload = match serde_json::from_slice::<Value>(body) {
+    let Some(json) = delivery_json(header("content-type"), body) else {
+        errors.push(format!(
+            "Content-Type {:?} with a body that is neither JSON nor a payload form",
+            header("content-type")
+        ));
+        return Err(errors);
+    };
+    let payload = match serde_json::from_slice::<Value>(&json) {
         Ok(payload) => {
             let action = payload.get("action").and_then(Value::as_str);
             if let Err(e) = webhook_payload(event, action, &payload) {
@@ -541,6 +558,15 @@ mod tests {
             broken.insert(name, bad.parse().unwrap());
             assert!(webhook_delivery(&broken, ping).is_err(), "{name}");
         }
+        let mut form = headers.clone();
+        form.insert(
+            "content-type",
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        let encoded: String = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("payload", std::str::from_utf8(ping).unwrap())
+            .finish();
+        assert_eq!(webhook_delivery(&form, encoded.as_bytes()), Ok(()));
         let mut unsigned = headers.clone();
         unsigned.remove("x-hub-signature");
         assert!(webhook_delivery(&unsigned, ping).is_err());

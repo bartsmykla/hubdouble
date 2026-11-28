@@ -19,12 +19,14 @@ pub enum HooksError {
     NoWebhook(i64),
     #[error("installation {0} does not belong to the App")]
     UnknownInstallation(i64),
+    #[error("webhook {0} does not exist")]
+    UnknownHook(i64),
 }
 
 impl From<HooksError> for ApiError {
     fn from(e: HooksError) -> ApiError {
         match e {
-            HooksError::UnknownDelivery(_) => ApiError::not_found(),
+            HooksError::UnknownDelivery(_) | HooksError::UnknownHook(_) => ApiError::not_found(),
             HooksError::NoWebhook(_) | HooksError::UnknownInstallation(_) => {
                 ApiError::unprocessable(e.to_string())
             }
@@ -35,6 +37,11 @@ impl From<HooksError> for ApiError {
 
 /// Renders `e`'s payload and resolves its recipients inside the transaction, then pushes one
 /// [`hubdouble_store::OutboxEntry`] per recipient with [`TxMut::push_outbox`].
+///
+/// Besides the Apps below, every active [`crate::Hook`] of the repository and of its owner (or of
+/// `org_id`) that subscribes to the event receives it, without `installation`, unless the event
+/// names an App or an installation. Of `check_suite` such hooks get only `completed`, of
+/// `check_run` only `created` and `completed`, and never an installation-family event.
 ///
 /// With `installation_id` set, only that installation's App receives it (and only when
 /// `app_id`, if set, names that App). With only `app_id` set, only that App receives it.
@@ -75,15 +82,46 @@ pub fn ping(tx: &mut TxMut<'_>, app_id: i64) {
     crate::emit::ping(tx, app_id);
 }
 
-/// Queues a redelivery of a logged attempt: the same GUID and payload, a new delivery ID and
-/// `redelivery: true`.
+/// Queues the `ping` GitHub sends when a repository or organization webhook is created or
+/// pinged: `zen`, `hook_id`, `hook`, `repository` or `organization`, and `sender`.
 ///
 /// # Errors
 ///
-/// [`HooksError::UnknownDelivery`] when the App has no such delivery, or when the delivery lost
+/// [`HooksError::UnknownHook`] when the hook or its repository or organization is gone.
+pub fn ping_hook(
+    tx: &mut TxMut<'_>,
+    hook_id: i64,
+    sender_id: Option<i64>,
+) -> Result<(), HooksError> {
+    crate::emit::ping_hook(tx, hook_id, sender_id)
+}
+
+/// Queues one delivery of `event` to one repository or organization webhook, whatever it
+/// subscribes to, signed and logged as every other event. `repository` or `organization`, and
+/// `sender`, are added unless the payload has them.
+///
+/// # Errors
+///
+/// [`HooksError::UnknownHook`] when the hook does not exist.
+pub fn deliver_to_hook(
+    tx: &mut TxMut<'_>,
+    hook_id: i64,
+    event: &'static str,
+    sender_id: Option<i64>,
+    payload: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), HooksError> {
+    crate::emit::deliver_to_hook(tx, hook_id, event, sender_id, payload)
+}
+
+/// Queues a redelivery of a logged attempt: the same GUID and payload, a new delivery ID and
+/// `redelivery: true`. `hook_id` is the App's ID for an App's webhook.
+///
+/// # Errors
+///
+/// [`HooksError::UnknownDelivery`] when the hook has no such delivery, or when the delivery lost
 /// its body to [`Options::log_bytes`].
-pub fn redeliver(tx: &mut TxMut<'_>, app_id: i64, delivery_id: i64) -> Result<(), HooksError> {
-    crate::emit::redeliver(tx, app_id, delivery_id)
+pub fn redeliver(tx: &mut TxMut<'_>, hook_id: i64, delivery_id: i64) -> Result<(), HooksError> {
+    crate::emit::redeliver(tx, hook_id, delivery_id)
 }
 
 /// The default of [`Options::queue_bytes`].

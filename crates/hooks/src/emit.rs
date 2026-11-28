@@ -9,7 +9,7 @@ use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
 use crate::push::PushRepository;
-use crate::{HooksError, Injection};
+use crate::{HookOwner, Hooks, HooksError, Injection};
 
 const ALWAYS_DELIVERED: [&str; 4] = [
     "installation",
@@ -130,6 +130,35 @@ pub(crate) fn recipients(tx: &Tx, e: &Event) -> Vec<(i64, Option<Arc<Installatio
                 && wants(i.app_id)
         })
         .map(|i| (i.app_id, Some(i.clone())))
+        .collect()
+}
+
+fn hooks_get(e: &Event) -> bool {
+    e.app_id.is_none()
+        && e.installation_id.is_none()
+        && !ALWAYS_DELIVERED.contains(&e.name)
+        && match e.name {
+            "check_suite" => e.action == Some("completed"),
+            "check_run" => matches!(e.action, Some("created" | "completed")),
+            _ => true,
+        }
+}
+
+pub(crate) fn hook_recipients(tx: &Tx, e: &Event) -> Vec<i64> {
+    let Some(hooks) = tx.try_table::<Hooks>().filter(|_| hooks_get(e)) else {
+        return Vec::new();
+    };
+    let repo = e.repo_id.and_then(|id| tx.table::<Repos>().get(id));
+    if e.repo_id.is_some() && repo.is_none() {
+        return Vec::new();
+    }
+    let org = repo.map(|r| r.owner_id).or(e.org_id);
+    repo.map(|r| r.id)
+        .into_iter()
+        .chain(org)
+        .flat_map(|parent| hooks.children(parent))
+        .filter(|h| h.active && h.subscribes(e.name))
+        .map(|h| h.id)
         .collect()
 }
 
@@ -279,7 +308,8 @@ fn webhook_form(p: &mut Map<String, Value>) {
 
 pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
     let recipients = recipients(tx, &e);
-    if recipients.is_empty() {
+    let hooks = hook_recipients(tx, &e);
+    if recipients.is_empty() && hooks.is_empty() {
         return;
     }
     let mut payload = std::mem::take(&mut e.payload);
@@ -299,6 +329,7 @@ pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
         let body = payload_body(&mut buffer, &payload, &rendered, installation.as_deref());
         tx.push_outbox(OutboxEntry {
             app_id,
+            hook_id: None,
             installation_id: installation.map(|i| i.id),
             repo_id: e.repo_id,
             event: e.name.into(),
@@ -307,6 +338,76 @@ pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
             redelivery_of: None,
         });
     }
+    for hook_id in hooks {
+        let body = payload_body(&mut buffer, &payload, &rendered, None);
+        tx.push_outbox(OutboxEntry {
+            app_id: 0,
+            hook_id: Some(hook_id),
+            installation_id: None,
+            repo_id: e.repo_id,
+            event: e.name.into(),
+            action: e.action.map(Into::into),
+            payload: body,
+            redelivery_of: None,
+        });
+    }
+}
+
+pub(crate) fn deliver_to_hook(
+    tx: &mut TxMut<'_>,
+    hook_id: i64,
+    event: &'static str,
+    sender_id: Option<i64>,
+    payload: &Map<String, Value>,
+) -> Result<(), HooksError> {
+    let hook = tx
+        .try_table::<Hooks>()
+        .and_then(|hooks| hooks.get(hook_id))
+        .cloned()
+        .ok_or(HooksError::UnknownHook(hook_id))?;
+    let (repo, org) = match hook.owner {
+        HookOwner::Repo(id) => (Some(id), None),
+        HookOwner::Org(id) => (None, Some(id)),
+    };
+    let subjects = Subjects {
+        repo,
+        org,
+        sender: sender_id,
+        push: event == "push",
+    };
+    let rendered = rendered(tx, &subjects, payload);
+    let body = payload_body(&mut Vec::new(), payload, &rendered, None);
+    tx.push_outbox(OutboxEntry {
+        app_id: 0,
+        hook_id: Some(hook_id),
+        installation_id: None,
+        repo_id: repo,
+        event: event.into(),
+        action: payload
+            .get("action")
+            .and_then(Value::as_str)
+            .map(|a| a.to_owned().into()),
+        payload: body,
+        redelivery_of: None,
+    });
+    Ok(())
+}
+
+pub(crate) fn ping_hook(
+    tx: &mut TxMut<'_>,
+    hook_id: i64,
+    sender_id: Option<i64>,
+) -> Result<(), HooksError> {
+    let hook = tx
+        .try_table::<Hooks>()
+        .and_then(|hooks| hooks.get(hook_id))
+        .and_then(|hook| hook.render(tx))
+        .ok_or(HooksError::UnknownHook(hook_id))?;
+    let mut payload = Map::new();
+    payload.insert("zen".to_owned(), Value::from(ZEN));
+    payload.insert("hook_id".to_owned(), Value::from(hook_id));
+    payload.insert("hook".to_owned(), hook);
+    deliver_to_hook(tx, hook_id, "ping", sender_id, &payload)
 }
 
 pub(crate) fn inject(tx: &mut TxMut<'_>, i: Injection) -> Result<(), HooksError> {
@@ -345,6 +446,7 @@ pub(crate) fn inject(tx: &mut TxMut<'_>, i: Injection) -> Result<(), HooksError>
     );
     tx.push_outbox(OutboxEntry {
         app_id: i.app_id,
+        hook_id: None,
         installation_id: i.installation_id,
         repo_id: i.repo_id,
         event: i.event.into(),
@@ -387,6 +489,7 @@ pub(crate) fn ping(tx: &mut TxMut<'_>, app_id: i64) {
     });
     tx.push_outbox(OutboxEntry {
         app_id,
+        hook_id: None,
         installation_id: None,
         repo_id: None,
         event: "ping".into(),
@@ -406,17 +509,18 @@ fn body(buffer: &mut Vec<u8>, payload: &impl Serialize) -> Bytes {
 
 pub(crate) fn redeliver(
     tx: &mut TxMut<'_>,
-    app_id: i64,
+    hook_id: i64,
     delivery_id: i64,
 ) -> Result<(), HooksError> {
     let d = tx
         .table::<Deliveries>()
         .get(delivery_id)
-        .filter(|d| d.app_id == app_id && !d.request.payload.is_empty())
+        .filter(|d| d.hook_id == hook_id && !d.request.payload.is_empty())
         .cloned()
         .ok_or(HooksError::UnknownDelivery(delivery_id))?;
     tx.push_outbox(OutboxEntry {
-        app_id,
+        app_id: d.app_id,
+        hook_id: (d.app_id != d.hook_id).then_some(d.hook_id),
         installation_id: d.installation_id,
         repo_id: d.repo_id,
         event: d.event.clone().into(),

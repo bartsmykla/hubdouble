@@ -11,6 +11,8 @@ use hubdouble_render::Integration;
 use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::{Accounts, Apps, Installations};
 
+pub use deliveries::{DeliveryLog, get_delivery, list_deliveries, redeliver_delivery};
+
 const APP: Requirement = Requirement {
     scope: Scope::App,
     any_of: &[],
