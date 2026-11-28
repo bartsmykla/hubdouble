@@ -438,6 +438,24 @@ async fn a_hook_keeps_its_own_delivery_log_and_redelivers_from_it() {
         .await
         .json();
     assert_ne!(org_log[0]["id"], delivery_id);
+    let org_delivery = format!("{ORG_HOOKS}/{other}/deliveries/{}", org_log[0]["id"]);
+    let org_got = alice.get(&org_delivery).await;
+    assert_eq!(org_got.status, StatusCode::OK);
+    assert_eq!(org_got.json()["request"]["payload"]["hook_id"], other);
+    assert_eq!(
+        alice
+            .call(Method::POST, &format!("{org_delivery}/attempts"))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    for list in [log.clone(), format!("{ORG_HOOKS}/{other}/deliveries")] {
+        assert_eq!(
+            alice.get(&format!("{list}?cursor=bogus")).await.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{list}"
+        );
+    }
     assert_eq!(
         alice
             .get(&format!("{ORG_HOOKS}/{other}/deliveries/{delivery_id}"))
@@ -601,6 +619,12 @@ async fn invalid_hooks_are_rejected() {
     let alice = alice(&server);
     let url = server.receiver.url().to_owned();
     let id = create(&alice, REPO_HOOKS, &json!({"config": {"url": url}})).await;
+    let org_id = create(
+        &alice,
+        ORG_HOOKS,
+        &json!({"name": "web", "config": {"url": url}}),
+    )
+    .await;
     let bodies = [
         json!({"config": {}}),
         json!({"name": "email", "config": {"url": "https://example.com/a"}}),
@@ -633,6 +657,15 @@ async fn invalid_hooks_are_rejected() {
             .call_json(
                 Method::PATCH,
                 &format!("{REPO_HOOKS}/{id}"),
+                &json!({"config": {"content_type": "xml"}}),
+            )
+            .await,
+    );
+    answers.push(
+        alice
+            .call_json(
+                Method::PATCH,
+                &format!("{ORG_HOOKS}/{org_id}"),
                 &json!({"config": {"content_type": "xml"}}),
             )
             .await,

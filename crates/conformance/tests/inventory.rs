@@ -19,7 +19,29 @@ const NO_GITHUB_422: &str = "the pinned description lists 422, but no input sent
 const APP_ONLY_422: &str =
     "the pinned description lists 422, the docs name no cause, and only an App can call it";
 
+const HOOK_DELIVERY_422: &str = "the pinned description lists 422 for a delivery read or redelivery, and the docs name no cause";
+
 const DESCRIBED_NOT_SENT: &[(&str, Case, &str)] = &[
+    (
+        "GET /orgs/{org}/hooks/{hook_id}/deliveries/{delivery_id}",
+        Case::Invalid,
+        HOOK_DELIVERY_422,
+    ),
+    (
+        "POST /orgs/{org}/hooks/{hook_id}/deliveries/{delivery_id}/attempts",
+        Case::Invalid,
+        HOOK_DELIVERY_422,
+    ),
+    (
+        "GET /repos/{owner}/{repo}/hooks/{hook_id}/deliveries/{delivery_id}",
+        Case::Invalid,
+        HOOK_DELIVERY_422,
+    ),
+    (
+        "POST /repos/{owner}/{repo}/hooks/{hook_id}/deliveries/{delivery_id}/attempts",
+        Case::Invalid,
+        HOOK_DELIVERY_422,
+    ),
     (
         "GET /app/hook/deliveries/{delivery_id}",
         Case::Invalid,
