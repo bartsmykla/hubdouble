@@ -376,6 +376,44 @@ async fn team_reads_refuse_a_user_token_of_an_app_not_installed_on_the_org() {
 }
 
 #[tokio::test]
+async fn graphql_team_and_collaborator_reads_refuse_an_app_without_access_to_the_org() {
+    // Given bob, a member of acme and a maintainer of acme/public, with a user token of an App
+    // installed only on acme-sso and one of the App installed on acme, and an installation
+    // of acme-sso
+    let server = with_other_org_app().await;
+    let inside = Graphql::new(GoGithub::enterprise(&server).with_token(ACME_APP_USER));
+    let outside = Graphql::new(GoGithub::enterprise(&server).with_token(OTHER_APP_USER));
+    let installation =
+        Graphql::new(GoGithub::enterprise(&server).with_token(OTHER_ORG_INSTALLATION));
+    let teams = r#"query { organization(login: "acme") { teams(first: 10) { nodes { id } } } }"#;
+    let collaborators = r#"query { repository(owner: "acme", name: "public") { collaborators(first: 1) { edges { node { login } } } } }"#;
+    let listed = inside.query(teams, &json!({})).await.json();
+    let team_id = listed["data"]["organization"]["teams"]["nodes"][0]["id"].clone();
+    assert!(team_id.is_string(), "{listed}");
+    let node = "query($id: ID!) { node(id: $id) { ... on Team { id } } }";
+
+    // When the App without access to acme reads acme's teams, a team node and the
+    // collaborators, and the installation of acme-sso reads acme's teams
+    let answers = [
+        outside.query(teams, &json!({})).await.json(),
+        outside.query(node, &json!({"id": team_id})).await.json(),
+        outside.query(collaborators, &json!({})).await.json(),
+        installation.query(teams, &json!({})).await.json(),
+    ];
+
+    // Then GitHub refuses each, as rest-permissions.tsv marks teams/list,
+    // teams/get-by-name and repos/list-collaborators public_read=no
+    for answer in &answers {
+        assert_eq!(answer["errors"][0]["type"], "FORBIDDEN", "{answer}");
+    }
+    let inside_collaborators = inside.query(collaborators, &json!({})).await.json();
+    assert!(
+        inside_collaborators.get("errors").is_none(),
+        "{inside_collaborators}"
+    );
+}
+
+#[tokio::test]
 async fn collaborator_permissions_refuse_an_installation_on_another_org() {
     // Given an installation of acme-sso, which does not cover the public acme/public
     let server = with_other_org_app().await;
