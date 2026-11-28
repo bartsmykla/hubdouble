@@ -299,15 +299,17 @@ impl Shared {
             Ok(st
                 .apps
                 .iter()
-                .filter(|(log, state)| state.running.is_empty() && !owner_exists(tx, **log))
+                .filter(|(log, _)| !owner_exists(tx, **log))
                 .map(|(log, _)| *log)
                 .collect::<Vec<i64>>())
         }) else {
             return;
         };
         for log in gone {
-            st.apps.remove(&log);
             st.bodies.release_log(log);
+            if st.apps.get(&log).is_some_and(|l| l.running.is_empty()) {
+                st.apps.remove(&log);
+            }
         }
     }
 
@@ -621,6 +623,9 @@ impl Shared {
 
     fn prune(&self, st: &mut State) {
         let limit = self.options.log_bytes;
+        if st.bodies.held > limit {
+            self.forget_gone(st);
+        }
         let mut logged = Vec::new();
         while st.bodies.held > limit {
             let Some((id, (app, bytes))) = st.bodies.kept.pop_first() else {

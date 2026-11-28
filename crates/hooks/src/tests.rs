@@ -1438,6 +1438,86 @@ async fn deleting_a_hook_or_an_app_frees_its_share_of_the_log_byte_budget() {
     assert_eq!(hooks.stats().log_bytes, app_a);
 }
 
+const ISSUES_HOOK: i64 = 300;
+
+fn world_with_issues_hook() -> Store {
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>().insert(hook_row(
+                ISSUES_HOOK,
+                HookOwner::Repo(WIDGET),
+                "issues",
+            ))?;
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+async fn log_bytes_of_an_app_delivery_beside_one_more() -> usize {
+    let headers =
+        |h: &BTreeMap<String, String>| -> usize { h.iter().map(|(k, v)| k.len() + v.len()).sum() };
+    let store = world_with_issues_hook();
+    let (hooks, hits) = start(&store, |_| {});
+    let _bodies = answer_all(hits);
+    for name in ["push", "issues", "push"] {
+        emit_one(&store, event(name, WIDGET));
+        hooks.drain().await.unwrap();
+    }
+    let bytes: Vec<usize> = store
+        .view(|tx| {
+            Ok((1..=3)
+                .map(|id| {
+                    let d = tx.table::<Deliveries>().get(id).unwrap();
+                    d.request.payload.len()
+                        + headers(&d.request.headers)
+                        + d.response.payload.as_ref().map_or(0, String::len)
+                        + headers(&d.response.headers)
+                })
+                .collect())
+        })
+        .unwrap();
+    (bytes[0] + bytes[1]).max(bytes[0] + bytes[2])
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_attempt_frees_a_deleted_hooks_log_bytes_before_it_strips_an_older_app_body() {
+    let limit = log_bytes_of_an_app_delivery_beside_one_more().await;
+
+    // Given a log budget of two deliveries, an App delivery and a newer hook delivery logged
+    let store = world_with_issues_hook();
+    let (hooks, hits) = start(&store, |o| o.log_bytes = limit);
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    emit_one(&store, event("issues", WIDGET));
+    hooks.drain().await.unwrap();
+    assert_eq!(logged_ids(&store, ISSUES_HOOK), vec![2]);
+
+    // When the hook is deleted with its deliveries and the App gets one more
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Deliveries>().remove_children(ISSUES_HOOK);
+            tx.table_mut::<Hooks>().remove(ISSUES_HOOK);
+            Ok(())
+        })
+        .unwrap();
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+
+    // Then the App's older delivery keeps its request and response
+    assert_eq!(logged_ids(&store, APP_A), vec![1, 3]);
+    let first = store
+        .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
+        .unwrap()
+        .unwrap();
+    assert!(!first.request.payload.is_empty());
+    assert!(first.response.payload.is_some());
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_log_keeps_only_the_first_response_bytes_of_a_long_answer() {
     let store = world();
