@@ -1635,6 +1635,48 @@ async fn an_attempt_started_during_a_reset_does_not_count_a_restored_hooks_delet
 }
 
 #[tokio::test(start_paused = true)]
+async fn deleting_a_hook_frees_its_finished_deliveries_that_wait_behind_a_slower_one() {
+    // Given two hook attempts in flight, and the higher one finished behind the lower one
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| o.workers = 2);
+    for n in 1..=2 {
+        let mut e = event("issues", WIDGET);
+        e.payload.insert("n".to_owned(), json!(n));
+        emit_one(&store, e);
+    }
+    let mut by_n = BTreeMap::new();
+    for _ in 0..2 {
+        let hit = hits.recv().await.unwrap();
+        by_n.insert(hit.json()["n"].as_i64().unwrap(), hit);
+    }
+    by_n.remove(&2).unwrap().reply.send(200).unwrap();
+    hooks.shared.wait_stats(|s| s.in_flight == 1).await;
+
+    // When the hook is deleted with its deliveries and an App attempt then ends
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Deliveries>().remove_children(ISSUES_HOOK);
+            tx.table_mut::<Hooks>().remove(ISSUES_HOOK);
+            Ok(())
+        })
+        .unwrap();
+    emit_one(&store, event("push", WIDGET));
+    hits.recv().await.unwrap().reply.send(200).unwrap();
+    hooks.shared.wait_stats(|s| s.in_flight == 1).await;
+
+    // Then no finished hook delivery holds its body outside the log byte budget
+    assert_eq!(hooks.shared.unbudgeted_ready_bytes(), 0);
+    // Then a drain returns once the slower attempt ends, and only the App delivery holds bytes
+    by_n.remove(&1).unwrap().reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+    assert_eq!(hooks.stats().unlogged, 0);
+    assert_eq!(logged_ids(&store, ISSUES_HOOK), Vec::<i64>::new());
+    assert_eq!(logged_ids(&store, APP_A), vec![3]);
+    let (_, app, _) = app_request_app_and_hook_log_bytes().await;
+    assert_eq!(hooks.stats().log_bytes, app);
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_log_keeps_only_the_first_response_bytes_of_a_long_answer() {
     let store = world();
     // Given a cap shorter than the receiver's 8-byte answer "received"

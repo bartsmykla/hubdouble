@@ -324,10 +324,28 @@ impl Shared {
         };
         for log in gone {
             st.bodies.release_log(log);
-            if st.apps.get(&log).is_some_and(|l| l.running.is_empty()) {
+            let Some(l) = st.apps.get_mut(&log) else {
+                continue;
+            };
+            for id in std::mem::take(&mut l.ready).into_keys() {
+                st.unlogged.remove(&id);
+            }
+            l.logged = None;
+            if l.running.is_empty() {
                 st.apps.remove(&log);
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unbudgeted_ready_bytes(&self) -> usize {
+        let st = self.state.lock();
+        st.apps
+            .values()
+            .flat_map(|l| l.ready.iter())
+            .filter(|(id, _)| !st.bodies.kept.contains_key(id))
+            .map(|(_, (_, d))| body_bytes(d))
+            .sum()
     }
 
     #[cfg(test)]
