@@ -2384,6 +2384,13 @@ name = "hubdouble-api-activity"
 version = "0.1.0"
 dependencies = [
  "hubdouble-admin",
+ "hubdouble-auth",
+ "hubdouble-model",
+ "hubdouble-render",
+ "hubdouble-rest",
+ "hubdouble-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

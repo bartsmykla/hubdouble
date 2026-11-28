@@ -10,6 +10,9 @@ pub enum Sequence {
     Delivery,
     Run,
     LogCursor,
+    /// The ID of each activity event, apart from [`Sequence::Id`] so that recording an event
+    /// does not move the IDs of other objects.
+    Event,
 }
 
 /// The counter table: the generated sequences, each repository's issue and PR number, and the

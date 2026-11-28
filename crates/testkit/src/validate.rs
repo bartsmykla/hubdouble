@@ -177,6 +177,49 @@ fn convert(v: Value) -> Value {
 
 const ONE_OF_READ_AS_ANY_OF: [(&str, u16); 1] = [("git/create-blob", 422)];
 
+const EVENT_PAYLOADS: [&str; 16] = [
+    "create-event",
+    "delete-event",
+    "discussion-event",
+    "issues-event",
+    "issue-comment-event",
+    "fork-event",
+    "gollum-event",
+    "member-event",
+    "public-event",
+    "push-event",
+    "pull-request-event",
+    "pull-request-review-comment-event",
+    "pull-request-review-event",
+    "commit-comment-event",
+    "release-event",
+    "watch-event",
+];
+
+/// The description's `event` with its payload `oneOf` read as `anyOf`: `public-event` is any
+/// object, so every payload matches it and one more, and no payload passes a `oneOf`.
+fn event_with_any_payload() -> Value {
+    let payloads: Vec<Value> = EVENT_PAYLOADS
+        .iter()
+        .map(|name| json!({"$ref": format!("#/components/schemas/{name}")}))
+        .collect();
+    json!({
+        "type": "object",
+        "required": ["id", "type", "actor", "repo", "payload", "public", "created_at"],
+        "properties": {
+            "id": {"type": "string"},
+            "type": {"type": "string", "nullable": true},
+            "actor": {"$ref": "#/components/schemas/actor"},
+            "repo": {"type": "object", "required": ["id", "name", "url"], "properties": {
+                "id": {"type": "integer"}, "name": {"type": "string"}, "url": {"type": "string"}}},
+            "org": {"$ref": "#/components/schemas/actor"},
+            "payload": {"anyOf": payloads},
+            "public": {"type": "boolean"},
+            "created_at": {"type": "string", "nullable": true},
+        },
+    })
+}
+
 pub(crate) fn read_around_description_defects(
     operation_id: &str,
     status: u16,
@@ -188,6 +231,13 @@ pub(crate) fn read_around_description_defects(
         && let Some(one_of) = object.remove("oneOf")
     {
         object.insert("anyOf".to_owned(), one_of);
+    }
+    if status == 200
+        && operation_id.starts_with("activity/")
+        && schema.pointer("/items/$ref") == Some(&json!("#/components/schemas/event"))
+        && let Some(items) = schema.get_mut("items")
+    {
+        *items = event_with_any_payload();
     }
     if (operation_id, status) == ("repos/get-branch-rules", 200)
         && let Some(items) = schema.get_mut("items")

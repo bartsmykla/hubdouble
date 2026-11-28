@@ -351,7 +351,23 @@ impl<'a> Ctx<'a> {
         items: &[T],
         render: impl FnMut(&T) -> R,
     ) -> Result<Reply, ApiError> {
-        let page = self.page_params_within(limit)?;
+        self.page_within_sized(limit, 30, 100, items, render)
+    }
+
+    /// [`Ctx::page_within`] of a list whose `per_page` defaults to `default` and stops at `most`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Ctx::page_within`].
+    pub fn page_within_sized<T, R: Serialize>(
+        &self,
+        limit: &PageLimit,
+        default: usize,
+        most: usize,
+        items: &[T],
+        render: impl FnMut(&T) -> R,
+    ) -> Result<Reply, ApiError> {
+        let page = self.checked_page(Some(limit), default, most)?;
         self.page_of(page, &items[..items.len().min(limit.results)], render)
     }
 

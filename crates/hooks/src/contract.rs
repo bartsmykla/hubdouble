@@ -50,6 +50,10 @@ impl From<HooksError> for ApiError {
 /// subscribe to the event, except for the installation-family events, which always go out.
 /// `action`, `installation`, `repository`, `organization` and `sender` are added unless the
 /// payload has them.
+///
+/// Before that, an event of a repository that the events API shows (push, create, delete,
+/// issues, issue comment, pull request, review, review comment, release, member, public)
+/// becomes an [`hubdouble_store::ActivityEvent`], whether or not any App receives it.
 pub fn emit(tx: &mut TxMut<'_>, e: Event) {
     crate::emit::emit(tx, e);
 }

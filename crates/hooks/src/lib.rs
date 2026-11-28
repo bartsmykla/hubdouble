@@ -1,3 +1,4 @@
+mod activity;
 mod contract;
 mod delivery;
 mod emit;

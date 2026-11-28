@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
-use hubdouble_model::{ApiError, Config};
+use hubdouble_model::{ApiError, Clock, Config, SystemClock, Timestamp};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 
@@ -47,11 +47,18 @@ pub struct Tx {
     tables: HashMap<TypeId, Box<dyn AnyTable>>,
     config: Arc<Config>,
     deletions: Arc<[DeletionSubscriber]>,
+    clock: Arc<dyn Clock>,
 }
 
 impl Tx {
     pub(crate) fn deletion_subscribers(&self) -> Arc<[DeletionSubscriber]> {
         Arc::clone(&self.deletions)
+    }
+
+    /// The time of the store's clock, for rows that a transaction stamps without a request.
+    #[must_use]
+    pub fn now(&self) -> Timestamp {
+        self.clock.now()
     }
 
     #[must_use]
@@ -484,6 +491,7 @@ impl Store {
 pub struct StoreBuilder {
     tables: HashMap<TypeId, Box<dyn AnyTable>>,
     deletions: Vec<DeletionSubscriber>,
+    clock: Arc<dyn Clock>,
 }
 
 impl Default for StoreBuilder {
@@ -499,6 +507,7 @@ impl StoreBuilder {
         let mut b = StoreBuilder {
             tables: HashMap::new(),
             deletions: Vec::new(),
+            clock: Arc::new(SystemClock),
         };
         crate::tables::register_frozen(&mut b);
         b
@@ -526,6 +535,12 @@ impl StoreBuilder {
         self
     }
 
+    /// The clock of [`Tx::now`]; the system clock by default.
+    pub fn clock(&mut self, clock: Arc<dyn Clock>) -> &mut StoreBuilder {
+        self.clock = clock;
+        self
+    }
+
     /// As [`StoreBuilder::build_with`] with [`Config::default`], for tests.
     #[must_use]
     pub fn build(self) -> Store {
@@ -541,6 +556,7 @@ impl StoreBuilder {
                         tables: self.tables,
                         config,
                         deletions: self.deletions.into(),
+                        clock: self.clock,
                     },
                     next_seq: 0,
                 }),

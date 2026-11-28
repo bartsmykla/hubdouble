@@ -10,6 +10,13 @@ publish.workspace = true
 
 [dependencies]
 hubdouble-admin.workspace = true
+hubdouble-auth.workspace = true
+hubdouble-model.workspace = true
+hubdouble-render.workspace = true
+hubdouble-rest.workspace = true
+hubdouble-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

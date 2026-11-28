@@ -307,6 +307,7 @@ fn webhook_form(p: &mut Map<String, Value>) {
 }
 
 pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
+    crate::activity::record(tx, &e);
     let recipients = recipients(tx, &e);
     let hooks = hook_recipients(tx, &e);
     if recipients.is_empty() && hooks.is_empty() {

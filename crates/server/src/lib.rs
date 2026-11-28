@@ -90,7 +90,7 @@ impl Server {
         registries: Registries,
     ) -> Result<Server, ServerError> {
         let Registries {
-            store,
+            mut store,
             rest,
             gql,
             mut git,
@@ -98,6 +98,7 @@ impl Server {
         } = registries;
         git.clock(clock.clone());
         let config = Arc::new(config);
+        store.clock(clock.clone());
         let store = store.build_with(config.clone());
         let hooks = hubdouble_hooks::Handle::start_with(
             store.clone(),

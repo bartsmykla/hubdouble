@@ -1,6 +1,6 @@
-operations: 150 of 1281 registered (11.7%)
+operations: 159 of 1281 registered (12.4%)
   actions: 22/208
-  activity: 0/34
+  activity: 9/34
   agent-automations: 0/12
   agent-tasks: 0/5
   agents: 0/30
@@ -249,16 +249,7 @@ missing:
     activity/get-stargazer-history-for-repo
     activity/get-thread
     activity/get-thread-subscription-for-authenticated-user
-    activity/list-events-for-authenticated-user
     activity/list-notifications-for-authenticated-user
-    activity/list-org-events-for-authenticated-user
-    activity/list-public-events
-    activity/list-public-events-for-repo-network
-    activity/list-public-events-for-user
-    activity/list-public-org-events
-    activity/list-received-events-for-user
-    activity/list-received-public-events-for-user
-    activity/list-repo-events
     activity/list-repo-notifications-for-authenticated-user
     activity/list-repos-starred-by-authenticated-user
     activity/list-repos-starred-by-user
