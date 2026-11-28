@@ -57,6 +57,12 @@ pub(crate) fn tokens(access: Option<&Value>) -> [bool; 3] {
     FAMILIES.map(|f| access.is_none_or(|a| a[f].as_bool().unwrap_or(false)))
 }
 
+/// Whether GitHub serves the operation's public resources without its permission; an operation
+/// the docs do not describe leaves that to its grants, since nothing documents a refusal.
+pub(crate) fn public_read(access: Option<&Value>) -> bool {
+    access.is_none_or(|a| a["public_read"].as_bool().unwrap_or(false))
+}
+
 pub(crate) fn write(
     root: &Path,
     ops: &[Op],

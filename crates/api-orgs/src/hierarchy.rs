@@ -78,7 +78,7 @@ pub fn pushes(tx: &Tx, actor: &Actor, repo: &Repo) -> bool {
         Actor::User { user, .. } => {
             hubdouble_auth::repo_role(tx, user.id, repo) >= Some(RepoRole::Write)
         }
-        Actor::Installation { .. } => true,
+        Actor::Installation { .. } => hubdouble_auth::installation_covers(actor, repo),
         Actor::Anonymous | Actor::App { .. } => false,
     }
 }

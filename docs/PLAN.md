@@ -334,6 +334,8 @@ pub struct Requirement {
     pub scopes: &'static [&'static str],  // classic OAuth scopes
 }
 pub struct Tokens { pub installation: bool, pub user_to_server: bool, pub fine_grained: bool } // in each generated Operation and registry Entry; Tokens::ALL for an extra
+pub public_read: bool // beside tokens in each generated Operation and registry Entry: false where docs/inventory/rest-permissions.tsv marks public_read=no, true otherwise and for an extra
+pub fn authorize_operation(tx: &Tx, actor: &Actor, req: &Requirement, target: Target<'_>, public_read: bool) -> Result<(), ApiError>; // hubdouble_auth; the REST choke point passes Entry.public_read, and with false a read of public data needs its grant (no anonymous caller, uncovering installation or user token of an uninstalled App); authorize passes true
 pub type Handler = fn(&mut Ctx<'_>) -> Result<Reply, ApiError>;
 impl Registry {
     pub fn handle(&mut self, operation_id: &str, req: Requirement, h: Handler); // panics on an unknown or already registered operation

@@ -69,7 +69,8 @@ pub const APP_PERMISSIONS: &[&str] = &[
 /// The App permissions whose reads GitHub serves as public data: the permissions of the
 /// repository and org reads that `docs/inventory/rest-permissions.tsv` marks `public_read`. A
 /// read whose grants are all of these passes for an anonymous caller, for an installation that
-/// does not cover the target and for a user token of an App not installed on it. Every other
+/// does not cover the target and for a user token of an App not installed on it, unless the
+/// operation's own `public_read` flag is false ([`crate::authorize_operation`]). Every other
 /// read needs that access.
 pub const PUBLIC_READ_PERMISSIONS: &[&str] = &[
     "actions",

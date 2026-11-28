@@ -20,6 +20,7 @@ pub(crate) fn authorize(
     req: &Requirement,
     target: Target<'_>,
     base_url: &str,
+    operation_public: bool,
 ) -> Result<(), ApiError> {
     match req.scope {
         Scope::Public => Ok(()),
@@ -48,11 +49,11 @@ pub(crate) fn authorize(
             Actor::App { .. } | Actor::Installation { .. } => Err(integration_denied(req)),
         },
         Scope::Repo => match target {
-            Target::Repo(repo) => repo_access(tx, actor, req, repo, base_url),
+            Target::Repo(repo) => repo_access(tx, actor, req, repo, base_url, operation_public),
             Target::Org(_) | Target::None => Err(no_target()),
         },
         Scope::Org => match target {
-            Target::Org(org) => org_access(tx, actor, req, org, base_url),
+            Target::Org(org) => org_access(tx, actor, req, org, base_url, operation_public),
             Target::Repo(_) | Target::None => Err(no_target()),
         },
     }
@@ -150,6 +151,7 @@ fn repo_access(
     req: &Requirement,
     repo: &Repo,
     base_url: &str,
+    operation_public: bool,
 ) -> Result<(), ApiError> {
     let reaches = match actor {
         Actor::User { token, user } if webhook_scope(token, req) => {
@@ -160,7 +162,8 @@ fn repo_access(
     if !reaches {
         return Err(ApiError::not_found());
     }
-    let public_read = public_read(req);
+    let public_data = public_read(req);
+    let public_read = public_data && operation_public;
     match actor {
         Actor::Anonymous if hidden(req) => Err(ApiError::not_found()),
         Actor::Anonymous if public_read => Ok(()),
@@ -201,7 +204,7 @@ fn repo_access(
                 }
             }
             let held = repo_role(tx, user.id, repo)
-                .or((!repo.is_private() && (public_read || !is_read(req)))
+                .or((!repo.is_private() && (public_data || !is_read(req)))
                     .then_some(RepoRole::Read));
             if held >= Some(needed_role(req)) {
                 Ok(())
@@ -220,8 +223,10 @@ fn org_access(
     req: &Requirement,
     org: &Account,
     base_url: &str,
+    operation_public: bool,
 ) -> Result<(), ApiError> {
-    let public_read = public_read(req);
+    let public_data = public_read(req);
+    let public_read = public_data && operation_public;
     match actor {
         Actor::Anonymous if public_read => Ok(()),
         Actor::Anonymous if hidden(req) => Err(ApiError::not_found()),
@@ -252,7 +257,7 @@ fn org_access(
                     .map(AsRef::as_ref)
             })?;
             classic_scopes(token, req)?;
-            if public_read || signed_in_read(req) {
+            if public_data || signed_in_read(req) {
                 return Ok(());
             }
             let role = tx
@@ -335,7 +340,7 @@ fn app_installation<'t>(tx: &'t Tx, app_id: i64, repo: &Repo) -> Option<&'t Inst
         .filter(|i| covers(i, None, repo))
 }
 
-fn covers(installation: &Installation, token: Option<&Token>, repo: &Repo) -> bool {
+pub(crate) fn covers(installation: &Installation, token: Option<&Token>, repo: &Repo) -> bool {
     installation.suspended_at.is_none()
         && installation.account_id == repo.owner_id
         && (installation.repository_selection == RepositorySelection::All

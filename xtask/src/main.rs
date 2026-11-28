@@ -66,6 +66,7 @@ struct Op {
     docs: String,
     classic: String,
     tokens: [bool; 3],
+    public_read: bool,
 }
 
 #[derive(Default)]
@@ -81,7 +82,9 @@ fn generate(root: &Path) -> Result<(), Box<dyn Error>> {
     let access = permissions_table::load(root)?;
     let mut ops = operations(&bundle)?;
     for op in &mut ops {
-        op.tokens = permissions_table::tokens(access.get(&permissions_table::route(op)));
+        let documented = access.get(&permissions_table::route(op));
+        op.tokens = permissions_table::tokens(documented);
+        op.public_read = permissions_table::public_read(documented);
     }
     let nodes = tree(&ops)?;
     std::fs::write(root.join(OUTPUT), render(&ops, &nodes)?)?;
@@ -160,6 +163,7 @@ fn operations(bundle: &serde_json::Value) -> Result<Vec<Op>, Box<dyn Error>> {
                     .to_owned(),
                 classic: permissions_table::classic(op["description"].as_str().unwrap_or_default()),
                 tokens: [true; 3],
+                public_read: true,
             });
         }
     }
@@ -215,14 +219,15 @@ fn render(ops: &[Op], nodes: &[Node]) -> Result<String, Box<dyn Error>> {
         let [installation, user_to_server, fine_grained] = op.tokens;
         writeln!(
             out,
-            "    Operation {{ id: {:?}, method: Method::{}, path: {:?}, params: &{:?}, category: {:?}, subcategory: {:?}, docs: {:?}, tokens: Tokens {{ installation: {installation}, user_to_server: {user_to_server}, fine_grained: {fine_grained} }} }},",
+            "    Operation {{ id: {:?}, method: Method::{}, path: {:?}, params: &{:?}, category: {:?}, subcategory: {:?}, docs: {:?}, tokens: Tokens {{ installation: {installation}, user_to_server: {user_to_server}, fine_grained: {fine_grained} }}, public_read: {} }},",
             op.id,
             METHODS[op.method].1,
             op.path,
             params(&op.path),
             op.category,
             op.subcategory,
-            op.docs
+            op.docs,
+            op.public_read
         )?;
     }
     writeln!(out, "];")?;

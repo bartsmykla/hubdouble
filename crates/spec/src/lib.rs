@@ -77,6 +77,9 @@ pub struct Operation {
     pub docs: &'static str,
     /// The token families GitHub's docs accept for the operation.
     pub tokens: Tokens,
+    /// `false` when GitHub's docs say the operation does not serve public resources without its
+    /// permission (`public_read=no` in `docs/inventory/rest-permissions.tsv`); `true` otherwise.
+    pub public_read: bool,
 }
 
 /// Which token families an operation accepts, from the pinned `spec/github-apps/access.json`.

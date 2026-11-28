@@ -23,6 +23,9 @@ pub struct Entry {
     pub documentation_url: &'static str,
     /// The token families GitHub accepts; every family for a route outside the bundle.
     pub tokens: Tokens,
+    /// The operation's [`hubdouble_spec::Operation::public_read`]; `true` for a route outside
+    /// the bundle, whose grants alone decide.
+    pub public_read: bool,
 }
 
 enum Segment {
@@ -107,6 +110,7 @@ impl Registry {
             writes: false,
             documentation_url: OPERATIONS[i].docs,
             tokens: OPERATIONS[i].tokens,
+            public_read: OPERATIONS[i].public_read,
         });
     }
 
@@ -200,6 +204,7 @@ impl Registry {
             writes: false,
             documentation_url: "",
             tokens: Tokens::ALL,
+            public_read: true,
         };
         self.extras.push(Extra {
             method: m,

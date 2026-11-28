@@ -18,6 +18,11 @@ const TEAM_REPO_MEDIA: &str = "application/vnd.github.v3.repository+json";
 const MEMBERS_TOKEN: &str = "ghs_members_conformance";
 const METADATA_TOKEN: &str = "ghs_metadata_conformance";
 const ORG_ONLY: &str = "ghp_org_only_conformance";
+const OTHER_APP_USER: &str = "ghu_bob_of_an_app_outside_acme";
+const ACME_APP_USER: &str = "ghu_bob_of_the_app_on_acme";
+const OTHER_ORG_INSTALLATION: &str = "ghs_installation_of_acme_sso";
+const OTHER_APP_ID: i64 = 4101;
+const OTHER_INSTALLATION_ID: i64 = 5101;
 const ROOT: i64 = 6001;
 const CHILD: i64 = 6002;
 const SECRET: i64 = 6003;
@@ -263,6 +268,138 @@ async fn team_reads_need_a_signed_in_member_of_the_org() {
     for path in &team_reads {
         assert_status(&carol, path, 404).await;
     }
+}
+
+async fn with_other_org_app() -> TestServer {
+    let server = start(
+        setup()
+            .entry(json!({
+                "kind": "app", "id": OTHER_APP_ID, "slug": "other-org-app", "name": "Other Org App",
+                "owner": fixture::SSO_ORG, "public_key": fixture::APP_PUBLIC_KEY,
+                "permissions": {"members": "read", "metadata": "read"}, "events": [],
+            }))
+            .entry(json!({
+                "kind": "installation", "id": OTHER_INSTALLATION_ID, "app": "other-org-app",
+                "account": fixture::SSO_ORG,
+                "permissions": {"members": "read", "metadata": "read"},
+            })),
+    )
+    .await;
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            for (token, kind, user_id, app_id, installation_id) in [
+                (
+                    OTHER_APP_USER,
+                    TokenKind::User,
+                    Some(fixture::BOB_ID),
+                    OTHER_APP_ID,
+                    None,
+                ),
+                (
+                    ACME_APP_USER,
+                    TokenKind::User,
+                    Some(fixture::BOB_ID),
+                    fixture::APP_ID,
+                    None,
+                ),
+                (
+                    OTHER_ORG_INSTALLATION,
+                    TokenKind::Installation,
+                    None,
+                    OTHER_APP_ID,
+                    Some(OTHER_INSTALLATION_ID),
+                ),
+            ] {
+                let id = tx.next_id();
+                tx.table_mut::<Tokens>().insert(Token {
+                    id,
+                    token: token.into(),
+                    kind,
+                    user_id,
+                    app_id: Some(app_id),
+                    installation_id,
+                    repo_ids: None,
+                    permissions: BTreeMap::new(),
+                    scopes: Vec::new(),
+                    expires_at: None,
+                    revoked: false,
+                    owner_seeded: true,
+                    created_at: Timestamp::SEED,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+    server
+}
+
+#[tokio::test]
+async fn team_reads_refuse_a_user_token_of_an_app_not_installed_on_the_org() {
+    // Given bob, a member of acme, with a user token of an App installed only on acme-sso and
+    // one of the App installed on acme with members=read
+    let server = with_other_org_app().await;
+    let outside = GoGithub::enterprise(&server).with_token(OTHER_APP_USER);
+    let inside = GoGithub::enterprise(&server).with_token(ACME_APP_USER);
+    let team_reads = [
+        TEAM_PATH.to_owned(),
+        format!("{TEAM_PATH}/child"),
+        format!("{TEAM_PATH}/child/memberships/bob"),
+        TEAM_REPO.to_owned(),
+    ];
+
+    for path in &team_reads {
+        // When each token reads acme's teams, a team, a membership and a team repository
+        let refused = assert_status(&outside, path, 403).await;
+
+        // Then GitHub refuses the App without access to acme and names members=read, which
+        // rest-permissions.tsv marks public_read=no, and serves the App installed on acme
+        assert!(
+            refused
+                .header("x-accepted-github-permissions")
+                .contains("members=read"),
+            "{path}"
+        );
+        assert!(inside.get(path).await.status.is_success(), "{path}");
+    }
+
+    // And the membership check treats the App without access to acme as an outsider, which
+    // GitHub sends to the public membership check, and answers the App on acme directly
+    let redirect = assert_status(&outside, "orgs/acme/members/bob", 302).await;
+    assert!(redirect.header("location").ends_with(&format!(
+        "organizations/{}/public_members/bob",
+        fixture::ORG_ID
+    )));
+    assert_status(&inside, "orgs/acme/members/bob", 204).await;
+}
+
+#[tokio::test]
+async fn collaborator_permissions_refuse_an_installation_on_another_org() {
+    // Given an installation of acme-sso, which does not cover the public acme/public
+    let server = with_other_org_app().await;
+    let installation = GoGithub::enterprise(&server).with_token(OTHER_ORG_INSTALLATION);
+    let query = r#"query { repository(owner: "acme", name: "public") { collaborators(first: 1) { edges { permission node { login } } } } }"#;
+
+    // When it reads a collaborator permission through REST and GraphQL
+    let rest = assert_status(&installation, BOB_PERMISSION, 403).await;
+    let graphql = Graphql::new(installation)
+        .query(query, &json!({}))
+        .await
+        .json();
+
+    // Then REST refuses it, as rest-permissions.tsv marks the read public_read=no, and GraphQL
+    // refuses it the collaborators, which need push access
+    assert_eq!(
+        rest.header("x-accepted-github-permissions"),
+        "metadata=read"
+    );
+    assert!(
+        graphql["data"]["repository"]["collaborators"].is_null(),
+        "{graphql}"
+    );
+    assert_eq!(graphql["errors"][0]["type"], "FORBIDDEN", "{graphql}");
 }
 
 #[tokio::test]

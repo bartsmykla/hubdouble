@@ -349,7 +349,13 @@ impl Inner {
             Resolved::Org(org) => (Target::Org(org), None),
             Resolved::None => (Target::None, None),
         };
-        hubdouble_auth::authorize(tx, &actor, &r.entry.requirement, target)?;
+        hubdouble_auth::authorize_operation(
+            tx,
+            &actor,
+            &r.entry.requirement,
+            target,
+            r.entry.public_read,
+        )?;
         if let (Access::Write(_), Some(repo)) = (&access, repo)
             && repo.archived
             && !ARCHIVED_WRITES.contains(&r.entry.operation_id)
