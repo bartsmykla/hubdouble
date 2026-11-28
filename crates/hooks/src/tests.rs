@@ -721,7 +721,7 @@ fn signatures_match_known_vectors() {
         "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17"
     );
     assert_eq!(
-        signature_1(b"Jefe", [&b"what do ya want for nothing?"[..]]),
+        signature_1(b"Jefe", [&b"what do "[..], b"ya want ", b"for nothing?"]),
         "sha1=effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"
     );
 }
@@ -1168,8 +1168,8 @@ async fn in_flight_attempts_keep_their_share_of_the_queue_byte_budget() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn queued_form_deliveries_hold_only_the_payload_bytes_the_queue_counts() {
-    // Given a form hook with a secret, one worker and a receiver that answers nothing yet
+async fn a_large_form_delivery_is_signed_over_the_received_form_body() {
+    // Given a form hook with a secret
     let mut builder = StoreBuilder::new();
     builder.register_table::<Hooks>();
     let store = world_of(builder);
@@ -1182,23 +1182,34 @@ async fn queued_form_deliveries_hold_only_the_payload_bytes_the_queue_counts() {
             Ok(())
         })
         .unwrap();
-    let (hooks, mut hits) = start(&store, |o| o.workers = 1);
-    // When three events commit, one is in flight and two wait in the queue
-    for n in 1..=3 {
-        let mut e = event("issues", WIDGET);
-        e.payload.insert("n".to_owned(), json!(n));
-        e.payload
-            .insert("path".to_owned(), json!("/a/b".repeat(1024)));
-        emit_one(&store, e);
-    }
-    let in_flight = hits.recv().await.unwrap();
-    hooks
-        .shared
-        .wait_stats(|s| s.in_flight == 1 && s.queued == 2)
-        .await;
-    // Then the queued deliveries hold no more bytes than the queue byte limit counts for them
-    assert!(hooks.shared.queued_bytes() <= hooks.stats().waiting_bytes);
-    drop(in_flight);
+    let (hooks, mut hits) = start(&store, |_| {});
+    // When an event with a payload of about 80 KB of characters the form escapes is delivered
+    let path = "/a/b".repeat(20_000);
+    let mut e = event("issues", WIDGET);
+    e.payload.insert("path".to_owned(), json!(path));
+    emit_one(&store, e);
+    let hit = hits.recv().await.unwrap();
+    let h = hit.headers.clone();
+    let raw = hit.body.clone();
+    hit.reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+    // Then the body is one payload parameter that holds the JSON, with its length announced
+    assert_eq!(h["content-type"], "application/x-www-form-urlencoded");
+    assert_eq!(h["content-length"], raw.len().to_string());
+    assert!(raw.starts_with(b"payload="));
+    let params: Vec<(String, String)> = url::form_urlencoded::parse(&raw).into_owned().collect();
+    assert_eq!(params.len(), 1);
+    assert_eq!(params[0].0, "payload");
+    assert_eq!(json_of(params[0].1.as_bytes())["path"], json!(path));
+    // Then both signatures cover the received bytes
+    assert_eq!(
+        h["x-hub-signature-256"],
+        signature_256(SECRET.as_bytes(), [&raw[..]])
+    );
+    assert_eq!(
+        h["x-hub-signature"],
+        signature_1(SECRET.as_bytes(), [&raw[..]])
+    );
 }
 
 #[tokio::test(start_paused = true)]

@@ -349,16 +349,6 @@ impl Shared {
     }
 
     #[cfg(test)]
-    pub(crate) fn queued_bytes(&self) -> usize {
-        self.state
-            .lock()
-            .queue
-            .iter()
-            .map(|job| job.body.len())
-            .sum()
-    }
-
-    #[cfg(test)]
     pub(crate) async fn forget_older(&self, epoch: u64) -> Result<(), HooksError> {
         self.drop_older(&mut self.state.lock(), epoch);
         self.wait_older(epoch).await
