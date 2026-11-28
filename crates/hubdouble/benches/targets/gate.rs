@@ -116,7 +116,7 @@ fn section_9(rounds: &[Round], out: &mut String) -> usize {
     let documents = match inventory_documents() {
         Ok(names) => names,
         Err(e) => {
-            let _ = writeln!(out, "MISSING  section 9 {INVENTORY_TARGET}: {e}");
+            let _ = writeln!(out, "MISSING  target {INVENTORY_TARGET}: {e}");
             return 1;
         }
     };
@@ -155,7 +155,7 @@ fn section_9(rounds: &[Round], out: &mut String) -> usize {
             let scaling = |scaled| if scaled { "scaled" } else { "raw" };
             let _ = writeln!(
                 out,
-                "WRONG    section 9 {target}: {} reports target {} {}, the plan's is {} {}",
+                "WRONG    target {target}: {} reports target {} {}, the documented one is {} {}",
                 row.measure,
                 row.target(),
                 scaling(row.scaled),
@@ -183,7 +183,7 @@ fn section_9(rounds: &[Round], out: &mut String) -> usize {
             failed += 1;
             let _ = writeln!(
                 out,
-                "MISSING  section 9 {target}: no row {side} in rounds {}",
+                "MISSING  target {target}: no row {side} in rounds {}",
                 missing.join(", ")
             );
         }
@@ -544,7 +544,7 @@ pub(crate) fn compare(target: &Path, dir: Option<&Path>, cpu: Option<&str>) -> (
             }
             failed += section_9(&rounds, &mut out);
             failed += relative(&rounds, &mut out);
-            let _ = writeln!(out, "plan section 9 targets, median of the head rounds:");
+            let _ = writeln!(out, "performance targets, median of the head rounds:");
             failed += absolute(&rounds, cpu, &mut out);
         }
         Err(e) => {

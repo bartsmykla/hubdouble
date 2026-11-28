@@ -25,6 +25,7 @@ const TOKEN_PATH: &str = "app/installations/5001/access_tokens";
 const DELIVERY_PATH: &str = "app/hook/deliveries";
 const REPO_WRITE: Requirement = Requirement {
     any_of: &[Grant::write("issues")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };

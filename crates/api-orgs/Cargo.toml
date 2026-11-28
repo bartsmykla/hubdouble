@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-api-orgs"
-description = "T3: Orgs and teams"
+description = "Orgs and teams"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

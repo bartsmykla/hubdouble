@@ -1,0 +1,14 @@
+operation	grants	public_read	basis
+actions/oidc-discovery	-	yes	the OpenID discovery document of the Actions issuer, which GitHub serves without a token
+actions/oidc-jwks	-	yes	the key set of the Actions issuer, which GitHub serves without a token
+actions/oidc-token	-	no	the Actions runtime bearer authenticates the request, not a GitHub token
+oauth/access-token	-	no	the OAuth web and device flows, which take a client secret or device code, not a token
+oauth/authorize	-	no	the OAuth web flow page, which a browser opens without a token
+oauth/device-approve	-	no	the device flow page, which a browser submits without a token
+oauth/device-code	-	no	the device flow, which takes a client ID, not a token
+oauth/device-page	-	no	the device flow page, which a browser opens without a token
+oauth/sso	-	no	the SAML sign-in page of an organization, which a browser submits without a token
+oauth/sso-page	-	no	the SAML sign-in page of an organization, which a browser opens without a token
+orgs/check-public-membership-for-user-by-id	members=read	yes	orgs/check-public-membership-for-user, which GitHub redirects to by organization ID
+repos/get-by-id	metadata=read	yes	repos/get, which GitHub serves by repository ID
+repos/test-push-webhook-at-test-url	repository_hooks=read	no	repos/test-push-webhook, which GitHub also serves at the test_url of a hook

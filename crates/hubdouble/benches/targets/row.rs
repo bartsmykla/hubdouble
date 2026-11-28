@@ -39,8 +39,8 @@ pub(crate) fn inventory_documents() -> std::io::Result<Vec<String>> {
     Ok(names)
 }
 
-/// One target of plan section 9: the rows that measure it, and the goal, unit and scaling each
-/// of those rows must report, so the gate judges the plan's target and not the report's.
+/// One performance target: the rows that measure it, and the goal, unit and scaling each of
+/// those rows must report, so the gate judges the documented target and not the report's.
 pub(crate) struct Section9 {
     pub(crate) target: &'static str,
     pub(crate) prefix: &'static str,

@@ -115,9 +115,7 @@ async fn parents(client: &GoGithub, sha: &str) -> Vec<Value> {
 }
 
 async fn deliveries(server: &TestServer) -> Vec<Delivery> {
-    let drained = server.admin(Method::POST, "hooks/drain", None).await;
-    assert_eq!(drained.status, StatusCode::NO_CONTENT);
-    server.receiver.received().await
+    server.deliveries_in_queue_order().await
 }
 
 fn pull_hooks(all: &[Delivery], number: i64) -> Vec<(String, Value)> {

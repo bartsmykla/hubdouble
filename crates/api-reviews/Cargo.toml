@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-api-reviews"
-description = "T6: Reviews and threads"
+description = "Reviews and threads"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

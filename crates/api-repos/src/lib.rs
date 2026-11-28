@@ -2,6 +2,7 @@ mod activity;
 mod admin;
 mod codeowners;
 mod graphql;
+mod hooks;
 mod releases;
 mod repos;
 mod rules;
@@ -14,7 +15,7 @@ use hubdouble_store::{Accounts, Tx, TxMut};
 
 pub use admin::DeletedRepos;
 
-/// Registers what T10 owns: tables, REST operations, GraphQL fields, ref subscribers, seed kinds
+/// Registers what this crate owns: tables, REST operations, GraphQL fields, ref subscribers, seed kinds
 /// and admin routes.
 pub fn register(r: &mut Registrar<'_>) {
     activity::register(r);
@@ -22,18 +23,21 @@ pub fn register(r: &mut Registrar<'_>) {
     codeowners::register(r);
     rules::register(r);
     releases::register(r);
+    hooks::register(r);
     graphql::register(r);
     admin::register(r);
 }
 
 const METADATA: Requirement = Requirement {
     any_of: &[Grant::read("metadata")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
 
 const CONTENTS: Requirement = Requirement {
     any_of: &[Grant::read("contents")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
@@ -51,7 +55,7 @@ fn full_name(tx: &Tx, repo: &Repo) -> Result<String, ApiError> {
 fn emit(
     tx: &mut TxMut<'_>,
     name: &'static str,
-    action: &'static str,
+    action: impl Into<Option<&'static str>>,
     repo_id: i64,
     sender_id: i64,
     payload: serde_json::Map<String, serde_json::Value>,
@@ -60,7 +64,7 @@ fn emit(
         tx,
         Event {
             name,
-            action: Some(action),
+            action: action.into(),
             repo_id: Some(repo_id),
             org_id: None,
             sender_id,

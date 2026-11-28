@@ -75,6 +75,32 @@ pub struct Operation {
     pub subcategory: &'static str,
     /// The operation's page in GitHub's docs, which GitHub's errors give as `documentation_url`.
     pub docs: &'static str,
+    /// The token families GitHub's docs accept for the operation.
+    pub tokens: Tokens,
+    /// `false` when GitHub's docs say the operation does not serve public resources without its
+    /// permission (`public_read=no` in `docs/inventory/rest-permissions.tsv`); `true` otherwise.
+    pub public_read: bool,
+}
+
+/// Which token families an operation accepts, from the pinned `spec/github-apps/access.json`.
+/// An operation the docs do not describe accepts every family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tokens {
+    /// An App installation token (`ghs_`).
+    pub installation: bool,
+    /// A user access token of a GitHub App (`ghu_`).
+    pub user_to_server: bool,
+    /// A fine-grained personal access token.
+    pub fine_grained: bool,
+}
+
+impl Tokens {
+    /// Every family, for a route outside the `OpenAPI` bundle.
+    pub const ALL: Tokens = Tokens {
+        installation: true,
+        user_to_server: true,
+        fine_grained: true,
+    };
 }
 
 /// A node of the route segment tree. Index `0` is the root.

@@ -1,5 +1,6 @@
 mod blobs;
 mod counters;
+mod deletion;
 mod outbox;
 mod rows;
 mod store;
@@ -7,6 +8,7 @@ mod tables;
 
 pub use blobs::{Blob, Blobs};
 pub use counters::{Counters, Sequence};
+pub use deletion::{Deleted, DeletionSubscriber};
 pub use outbox::{Committed, OutboxEntry, OutboxUse};
 pub use rows::{Entity, Rows, Taken};
 pub use store::{Snapshot, Store, StoreBuilder, Table, TableMut, Tx, TxMut};

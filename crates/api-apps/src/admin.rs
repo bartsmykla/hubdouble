@@ -6,12 +6,14 @@ use hubdouble_admin::{
     Admin, AdminHandler, AdminRequest, AdminResponse, error_response, json_response, read_json,
 };
 use hubdouble_model::{
-    Access, AccountKind, ApiError, App, Installation, RepositorySelection, Timestamp, Token,
-    TokenKind, Webhook,
+    Access, Account, AccountKind, ApiError, App, Installation, RepositorySelection, Timestamp,
+    Token, TokenKind, Webhook,
 };
 use hubdouble_render::Urls;
 use hubdouble_rest::Params;
-use hubdouble_store::{Accounts, Apps, Installations, RepoRedirects, Repos, Tokens, Tx, TxMut};
+use hubdouble_store::{
+    Accounts, Apps, Deleted, Deliveries, Installations, RepoRedirects, Repos, Tokens, Tx, TxMut,
+};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -177,11 +179,16 @@ fn update_app(
 }
 
 fn delete_app(tx: &mut TxMut<'_>, params: &Params) -> Result<(), ApiError> {
-    let id = find_app(tx, params)?.id;
+    let app = find_app(tx, params)?;
+    let (id, bot_id) = (app.id, app.bot_id);
     if tx.table::<Installations>().children(id).next().is_some() {
         return Err(ApiError::conflict("Delete the App's installations first"));
     }
     revoke_tokens(tx, |token| token.app_id == Some(id))?;
+    if let Some(bot) = tx.table::<Accounts>().get(bot_id).cloned() {
+        tx.delete(&Deleted::Account(bot))?;
+    }
+    tx.table_mut::<Deliveries>().remove_children(id);
     tx.table_mut::<Apps>().remove(id);
     Ok(())
 }
@@ -331,6 +338,11 @@ fn rename_target(
         .by_login(login)
         .filter(|a| a.kind != AccountKind::Bot)
         .ok_or_else(ApiError::not_found)?;
+    if Account::is_ghost(account.id, &input.login) {
+        return Err(ApiError::unprocessable(
+            "The login is reserved for the ghost user",
+        ));
+    }
     let mut account = (**account).clone();
     if account.login != input.login {
         let old_login = std::mem::replace(&mut account.login, input.login);

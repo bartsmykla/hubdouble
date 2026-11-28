@@ -4,23 +4,27 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use bytes::Bytes;
-use hubdouble_model::{App, Clock, Delivery, DeliveryRequest, DeliveryResponse, Timestamp};
+use hubdouble_model::{Clock, Delivery, DeliveryRequest, DeliveryResponse, Timestamp};
 use hubdouble_store::{
-    Apps, Committed, Counters, Deliveries, OutboxUse, Sequence, Snapshot, Store,
+    Apps, Committed, Counters, Deliveries, OutboxEntry, OutboxUse, Sequence, Snapshot, Store, Tx,
 };
 use parking_lot::Mutex;
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::delivery::{Outcome, Pool, send, signature_1, signature_256};
-use crate::{HooksError, Notice, Options, QUEUE_BYTES, Stats};
+use crate::delivery::{Outcome, Pool, Wire, form_chunks, send, signature_1, signature_256};
+use crate::{
+    ContentType, Hooks, HooksError, LastResponse, LastResponses, Notice, Options, QUEUE_BYTES,
+    Stats,
+};
 
-const OVER_BUDGET: &str = "Queue full";
+pub(crate) const OVER_BUDGET: &str = "Queue full";
 
 pub(crate) struct Job {
     id: i64,
     epoch: u64,
+    log: i64,
     app_id: i64,
     installation_id: Option<i64>,
     repo_id: Option<i64>,
@@ -31,6 +35,7 @@ pub(crate) struct Job {
     url: String,
     headers: BTreeMap<String, String>,
     body: Bytes,
+    form: bool,
     over_budget: bool,
 }
 
@@ -40,7 +45,7 @@ impl Job {
             id: self.id,
             guid: self.guid,
             app_id: self.app_id,
-            hook_id: self.app_id,
+            hook_id: self.log,
             installation_id: self.installation_id,
             repo_id: self.repo_id,
             event: self.event,
@@ -63,9 +68,47 @@ impl Job {
     }
 }
 
+struct Target {
+    log: i64,
+    app_id: i64,
+    url: String,
+    secret: Option<String>,
+    form: bool,
+    kind: &'static str,
+    owner_id: i64,
+}
+
+impl Target {
+    fn of(tx: &Tx, entry: &OutboxEntry) -> Option<Target> {
+        if let Some(id) = entry.hook_id {
+            let hook = tx.try_table::<Hooks>()?.get(id).filter(|h| h.active)?;
+            return Some(Target {
+                log: id,
+                app_id: 0,
+                url: hook.url.clone(),
+                secret: hook.secret.clone(),
+                form: hook.content_type == ContentType::Form,
+                kind: hook.owner.target_type(),
+                owner_id: hook.owner.id(),
+            });
+        }
+        let app = tx.table::<Apps>().get(entry.app_id)?;
+        let hook = app.webhook.as_ref().filter(|w| w.active)?;
+        Some(Target {
+            log: app.id,
+            app_id: app.id,
+            url: hook.url.clone(),
+            secret: hook.secret.clone(),
+            form: false,
+            kind: "integration",
+            owner_id: app.id,
+        })
+    }
+}
+
 struct Assigned {
     id: i64,
-    app: Arc<App>,
+    target: Target,
     committed: Committed,
 }
 
@@ -74,6 +117,52 @@ struct AppLog {
     running: BTreeSet<i64>,
     ready: BTreeMap<i64, (u64, Delivery)>,
     logged: Option<VecDeque<i64>>,
+    dropped_answers: BTreeMap<i64, (u64, LastResponse)>,
+}
+
+impl AppLog {
+    fn gap(&self, id: i64) -> (i64, i64) {
+        let low = self
+            .running
+            .range(..id)
+            .next_back()
+            .copied()
+            .unwrap_or(i64::MIN);
+        let high = self.running.range(id..).next().copied().unwrap_or(i64::MAX);
+        (low, high)
+    }
+
+    fn remove_newest(&mut self, low: i64, high: i64) {
+        if let Some((&older, _)) = self.dropped_answers.range(low..high).next_back() {
+            self.dropped_answers.remove(&older);
+        }
+    }
+
+    fn end(&mut self, id: i64) {
+        if !self.running.remove(&id) {
+            return;
+        }
+        let (low, high) = self.gap(id);
+        if self.dropped_answers.range(id..high).next().is_some() {
+            self.remove_newest(low, id);
+        }
+    }
+
+    fn drop_answer(&mut self, id: i64, epoch: u64, answer: LastResponse) {
+        let (low, high) = self.gap(id);
+        if self.dropped_answers.range(id..high).next().is_none() {
+            self.remove_newest(low, high);
+            self.dropped_answers.insert(id, (epoch, answer));
+        }
+    }
+}
+
+fn answer_of(d: &Delivery) -> Option<LastResponse> {
+    (d.app_id == 0 && d.status != OVER_BUDGET).then(|| LastResponse {
+        hook_id: d.hook_id,
+        status_code: d.status_code,
+        status: d.status.clone(),
+    })
 }
 
 fn header_bytes(h: &BTreeMap<String, String>) -> usize {
@@ -114,6 +203,23 @@ impl Bodies {
             self.held -= bytes;
         }
     }
+
+    fn release_log(&mut self, log: i64) {
+        let held = &mut self.held;
+        self.kept.retain(|_, (app, bytes)| {
+            let keep = *app != log;
+            if !keep {
+                *held -= *bytes;
+            }
+            keep
+        });
+    }
+}
+
+fn owner_exists(tx: &Tx, log: i64) -> bool {
+    tx.try_table::<Hooks>()
+        .is_some_and(|h| h.get(log).is_some())
+        || tx.table::<Apps>().get(log).is_some()
 }
 
 #[derive(Default)]
@@ -202,39 +308,197 @@ impl Shared {
     }
 
     pub(crate) async fn reset(&self, snapshot: &Snapshot) -> Result<(), HooksError> {
-        let epoch = self.store.restore_epoch(snapshot);
-        self.forget_older(epoch).await
+        let epoch = {
+            let mut st = self.state.lock();
+            let epoch = self.store.restore_epoch(snapshot);
+            self.drop_older(&mut st, epoch);
+            self.forget_discarded_hooks(&mut st);
+            self.limit_restored_logs(&mut st);
+            epoch
+        };
+        self.wait_older(epoch).await
     }
 
-    pub(crate) async fn forget_older(&self, epoch: u64) -> Result<(), HooksError> {
-        {
-            let mut st = self.state.lock();
-            let (dropped, kept): (Vec<Job>, Vec<Job>) =
-                st.queue.drain(..).partition(|job| job.epoch < epoch);
-            st.queue.extend(kept);
-            self.space.add_permits(dropped.len());
-            for job in dropped {
-                self.release_job(&job);
-                self.finish(&mut st, job.app_id, job.id, None);
+    fn limit_restored_logs(&self, st: &mut State) {
+        let capacity = self.options.log_capacity.max(1);
+        let Ok(rows) = self.store.update(|tx| {
+            let mut per_log: HashMap<i64, usize> = HashMap::new();
+            let over: Vec<i64> = tx
+                .table::<Deliveries>()
+                .iter()
+                .rev()
+                .filter(|d| {
+                    let n = per_log.entry(d.hook_id).or_default();
+                    *n += 1;
+                    *n > capacity
+                })
+                .map(|d| d.id)
+                .collect();
+            tx.table_mut::<Deliveries>().remove_all(over);
+            Ok(tx
+                .table::<Deliveries>()
+                .iter()
+                .map(|d| (d.id, d.hook_id, body_bytes(d)))
+                .filter(|(_, _, bytes)| *bytes > 0)
+                .collect::<Vec<_>>())
+        }) else {
+            return;
+        };
+        let State { apps, bodies, .. } = &mut *st;
+        let unkept = bodies
+            .held
+            .saturating_sub(bodies.kept.values().map(|(_, b)| b).sum());
+        bodies
+            .kept
+            .retain(|id, (log, _)| apps.get(log).is_some_and(|l| l.ready.contains_key(id)));
+        bodies
+            .kept
+            .extend(rows.into_iter().map(|(id, log, bytes)| (id, (log, bytes))));
+        bodies.held = unkept + bodies.kept.values().map(|(_, b)| b).sum::<usize>();
+        for log in apps.values_mut() {
+            log.logged = None;
+        }
+        self.prune(st);
+    }
+
+    fn forget_discarded_hooks(&self, st: &mut State) {
+        let State {
+            apps: logs, bodies, ..
+        } = st;
+        let Ok(stale) = self.store.update(|tx| {
+            let hooks = tx.try_table::<Hooks>();
+            let apps = tx.table::<Apps>();
+            let doomed: Vec<i64> = tx
+                .table::<Deliveries>()
+                .iter()
+                .filter(|d| {
+                    if d.app_id == 0 {
+                        hooks.is_none_or(|h| h.get(d.hook_id).is_none())
+                    } else {
+                        apps.get(d.app_id).is_none()
+                    }
+                })
+                .map(|d| d.id)
+                .collect();
+            tx.table_mut::<Deliveries>().remove_all(doomed);
+            let hooks = tx.try_table::<Hooks>();
+            let discarded: Vec<i64> = tx
+                .try_table::<LastResponses>()
+                .into_iter()
+                .flat_map(LastResponses::iter)
+                .filter(|l| hooks.is_none_or(|h| h.get(l.hook_id).is_none()))
+                .map(|l| l.hook_id)
+                .collect();
+            if !discarded.is_empty() {
+                tx.table_mut::<LastResponses>().remove_all(discarded);
             }
-            let stale: Vec<(i64, i64)> = st
+            let rows = tx.table::<Deliveries>();
+            Ok(bodies
+                .kept
+                .iter()
+                .filter(|(id, (log, _))| {
+                    rows.get(**id).is_none()
+                        && !logs.get(log).is_some_and(|l| l.ready.contains_key(*id))
+                })
+                .map(|(id, _)| *id)
+                .collect::<Vec<i64>>())
+        }) else {
+            return;
+        };
+        for id in stale {
+            bodies.release(id);
+        }
+        for log in logs.values_mut() {
+            log.logged = None;
+        }
+        self.forget_gone(st);
+    }
+
+    fn forget_gone(&self, st: &mut State) {
+        let Ok(gone) = self.store.view(|tx| {
+            Ok(st
                 .apps
                 .iter()
-                .flat_map(|(app, log)| {
-                    log.ready
-                        .iter()
-                        .filter(|(_, (e, _))| *e < epoch)
-                        .map(|(id, _)| (*app, *id))
-                })
-                .collect();
-            for (app, id) in stale {
-                if let Some(log) = st.apps.get_mut(&app) {
-                    log.ready.remove(&id);
-                }
-                st.bodies.release(id);
+                .filter(|(log, _)| !owner_exists(tx, **log))
+                .map(|(log, _)| *log)
+                .collect::<Vec<i64>>())
+        }) else {
+            return;
+        };
+        for log in gone {
+            st.bodies.release_log(log);
+            let Some(l) = st.apps.get_mut(&log) else {
+                continue;
+            };
+            for id in std::mem::take(&mut l.ready).into_keys() {
                 st.unlogged.remove(&id);
             }
+            l.logged = None;
+            l.dropped_answers.clear();
+            if l.running.is_empty() {
+                st.apps.remove(&log);
+            }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unbudgeted_ready_bytes(&self) -> usize {
+        let st = self.state.lock();
+        st.apps
+            .values()
+            .flat_map(|l| l.ready.iter())
+            .filter(|(id, _)| !st.bodies.kept.contains_key(id))
+            .map(|(_, (_, d))| body_bytes(d))
+            .sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dropped_answers_and_running(&self, log: i64) -> (usize, usize) {
+        self.state
+            .lock()
+            .apps
+            .get(&log)
+            .map_or((0, 0), |l| (l.dropped_answers.len(), l.running.len()))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn forget_older(&self, epoch: u64) -> Result<(), HooksError> {
+        self.drop_older(&mut self.state.lock(), epoch);
+        self.wait_older(epoch).await
+    }
+
+    fn drop_older(&self, st: &mut State, epoch: u64) {
+        let (dropped, kept): (Vec<Job>, Vec<Job>) =
+            st.queue.drain(..).partition(|job| job.epoch < epoch);
+        st.queue.extend(kept);
+        self.space.add_permits(dropped.len());
+        for job in dropped {
+            self.release_job(&job);
+            self.finish(st, job.log, job.id, None);
+        }
+        let stale: Vec<(i64, i64)> = st
+            .apps
+            .iter()
+            .flat_map(|(app, log)| {
+                log.ready
+                    .iter()
+                    .filter(|(_, (e, _))| *e < epoch)
+                    .map(|(id, _)| (*app, *id))
+            })
+            .collect();
+        for (app, id) in stale {
+            if let Some(log) = st.apps.get_mut(&app) {
+                log.ready.remove(&id);
+            }
+            st.bodies.release(id);
+            st.unlogged.remove(&id);
+        }
+        for log in st.apps.values_mut() {
+            log.dropped_answers.retain(|_, (e, _)| *e >= epoch);
+        }
+    }
+
+    async fn wait_older(&self, epoch: u64) -> Result<(), HooksError> {
         self.notify();
         self.wait_until(|st| st.in_flight.range(..epoch).next().is_none())
             .await
@@ -281,20 +545,17 @@ impl Shared {
                 let epoch = self.store.epoch();
                 let mut out = Vec::with_capacity(batch.len());
                 for c in batch {
-                    let app = tx
-                        .table::<Apps>()
-                        .get(c.entry.app_id)
-                        .filter(|app| app.webhook.as_ref().is_some_and(|w| w.active))
-                        .filter(|_| c.epoch == epoch)
-                        .cloned();
-                    let Some(app) = app else {
+                    let target = (c.epoch == epoch)
+                        .then(|| Target::of(tx, &c.entry))
+                        .flatten();
+                    let Some(target) = target else {
                         self.release(&c);
                         continue;
                     };
                     let id = tx.table_mut::<Counters>().next(Sequence::Delivery);
                     out.push(Assigned {
                         id,
-                        app,
+                        target,
                         committed: c,
                     });
                 }
@@ -319,61 +580,79 @@ impl Shared {
         self.release_bytes(job.over_budget, job.body.len());
     }
 
-    fn job(a: Assigned) -> Option<Job> {
-        let Assigned { id, app, committed } = a;
+    fn job(a: Assigned) -> Job {
+        let Assigned {
+            id,
+            target,
+            committed,
+        } = a;
         let epoch = committed.epoch;
         let over_budget = committed.over_budget;
         let entry = committed.entry;
         let event = entry.event.into_owned();
         let action = entry.action.map(Cow::into_owned);
-        let hook = app.webhook.as_ref()?;
         let (guid, redelivery) = match entry.redelivery_of {
             Some(guid) => (guid, true),
             None => (uuid::Uuid::new_v4().to_string(), false),
         };
         let body = entry.payload;
-        let app_id = app.id.to_string();
+        let content_type = if target.form {
+            "application/x-www-form-urlencoded"
+        } else {
+            "application/json"
+        };
         let mut headers = BTreeMap::from([
             ("Accept".to_owned(), "*/*".to_owned()),
-            ("Content-Type".to_owned(), "application/json".to_owned()),
+            ("Content-Type".to_owned(), content_type.to_owned()),
             (
                 "User-Agent".to_owned(),
                 "GitHub-Hookshot/hubdouble".to_owned(),
             ),
             ("X-GitHub-Delivery".to_owned(), guid.clone()),
             ("X-GitHub-Event".to_owned(), event.clone()),
-            ("X-GitHub-Hook-ID".to_owned(), app_id.clone()),
-            ("X-GitHub-Hook-Installation-Target-ID".to_owned(), app_id),
+            ("X-GitHub-Hook-ID".to_owned(), target.log.to_string()),
+            (
+                "X-GitHub-Hook-Installation-Target-ID".to_owned(),
+                target.owner_id.to_string(),
+            ),
             (
                 "X-GitHub-Hook-Installation-Target-Type".to_owned(),
-                "integration".to_owned(),
+                target.kind.to_owned(),
             ),
         ]);
-        if let Some(secret) = hook.secret.as_deref().filter(|s| !s.is_empty()) {
-            headers.insert(
-                "X-Hub-Signature".to_owned(),
-                signature_1(secret.as_bytes(), &body),
-            );
-            headers.insert(
-                "X-Hub-Signature-256".to_owned(),
-                signature_256(secret.as_bytes(), &body),
-            );
+        if let Some(secret) = target.secret.as_deref().filter(|s| !s.is_empty()) {
+            let key = secret.as_bytes();
+            let (sha1, sha256) = if target.form {
+                (
+                    signature_1(key, form_chunks(&body)),
+                    signature_256(key, form_chunks(&body)),
+                )
+            } else {
+                (
+                    signature_1(key, [&body[..]]),
+                    signature_256(key, [&body[..]]),
+                )
+            };
+            headers.insert("X-Hub-Signature".to_owned(), sha1);
+            headers.insert("X-Hub-Signature-256".to_owned(), sha256);
         }
-        Some(Job {
+        Job {
             id,
             epoch,
-            app_id: app.id,
+            log: target.log,
+            app_id: target.app_id,
             installation_id: entry.installation_id,
             repo_id: entry.repo_id,
             event,
             action,
             guid,
             redelivery,
-            url: hook.url.clone(),
+            url: target.url,
             headers,
             body,
+            form: target.form,
             over_budget,
-        })
+        }
     }
 
     async fn enqueue(&self, batch: Vec<Committed>) -> Result<(), HooksError> {
@@ -384,7 +663,7 @@ impl Shared {
         if let Some(observe) = &self.options.observer {
             for a in &assigned {
                 observe(&Notice::Event {
-                    app_id: a.app.id,
+                    app_id: a.target.app_id,
                     delivery_id: a.id,
                     event: &a.committed.entry.event,
                     action: a.committed.entry.action.as_deref(),
@@ -392,37 +671,15 @@ impl Shared {
             }
         }
         self.last_id.store(last.id, Ordering::SeqCst);
-        let jobs: Vec<Result<Job, (i64, i64)>> = assigned
-            .into_iter()
-            .map(|a| {
-                let pair = (a.app.id, a.id);
-                let (over_budget, bytes) =
-                    (a.committed.over_budget, a.committed.entry.payload.len());
-                Shared::job(a).ok_or_else(|| {
-                    self.release_bytes(over_budget, bytes);
-                    pair
-                })
-            })
-            .collect();
+        let jobs: Vec<Job> = assigned.into_iter().map(Shared::job).collect();
         {
             let mut st = self.state.lock();
             for job in &jobs {
-                let (app, id) = match job {
-                    Ok(j) => (j.app_id, j.id),
-                    Err(pair) => *pair,
-                };
-                st.unlogged.insert(id);
-                st.apps.entry(app).or_default().running.insert(id);
+                st.unlogged.insert(job.id);
+                st.apps.entry(job.log).or_default().running.insert(job.id);
             }
         }
         for job in jobs {
-            let job = match job {
-                Ok(job) => job,
-                Err((app, id)) => {
-                    self.finish(&mut self.state.lock(), app, id, None);
-                    continue;
-                }
-            };
             if job.over_budget {
                 self.refuse(job);
                 continue;
@@ -441,7 +698,7 @@ impl Shared {
             } else {
                 self.space.add_permits(1);
                 self.release_job(&job);
-                self.finish(&mut st, job.app_id, job.id, None);
+                self.finish(&mut st, job.log, job.id, None);
             }
         }
         self.notify();
@@ -449,7 +706,7 @@ impl Shared {
     }
 
     fn refuse(&self, job: Job) {
-        let (app, id, epoch) = (job.app_id, job.id, job.epoch);
+        let (app, id, epoch) = (job.log, job.id, job.epoch);
         let bytes = job.body.len();
         let mut delivery = job.logged(self.clock.now(), 0.0, Outcome::failed(OVER_BUDGET));
         if bytes == 0 {
@@ -468,7 +725,7 @@ impl Shared {
         self.space.add_permits(1);
         if job.epoch != self.store.epoch() {
             self.release_job(&job);
-            self.finish(&mut st, job.app_id, job.id, None);
+            self.finish(&mut st, job.log, job.id, None);
             return None;
         }
         *st.in_flight.entry(job.epoch).or_default() += 1;
@@ -478,7 +735,7 @@ impl Shared {
     }
 
     async fn attempt(&self, job: Job) {
-        let (app, id, epoch) = (job.app_id, job.id, job.epoch);
+        let (app, id, epoch) = (job.log, job.id, job.epoch);
         let sent = job.body.len() + header_bytes(&job.headers);
         let delivered_at = self.clock.now();
         let started = Instant::now();
@@ -489,7 +746,7 @@ impl Shared {
                 &self.pool,
                 &job.url,
                 &job.headers,
-                job.body.clone(),
+                Wire::new(job.body.clone(), job.form),
                 self.options.response_bytes,
             ),
         )
@@ -499,7 +756,8 @@ impl Shared {
         let delivery = job.logged(delivered_at, started.elapsed().as_secs_f64(), outcome);
         let mut st = self.state.lock();
         st.bodies.held -= sent;
-        self.finish(&mut st, app, id, Some((epoch, delivery)));
+        let logged = (epoch == self.store.epoch()).then_some((epoch, delivery));
+        self.finish(&mut st, app, id, logged);
         if let Some(n) = st.in_flight.get_mut(&epoch) {
             *n -= 1;
             if *n == 0 {
@@ -510,7 +768,7 @@ impl Shared {
 
     fn finish(&self, st: &mut State, app: i64, id: i64, delivery: Option<(u64, Delivery)>) {
         let log = st.apps.entry(app).or_default();
-        log.running.remove(&id);
+        log.end(id);
         match delivery {
             Some(d) => {
                 st.bodies.hold(app, &d.1);
@@ -521,11 +779,15 @@ impl Shared {
             }
         }
         self.flush(st, app);
+        self.forget_gone(st);
         self.prune(st);
     }
 
     fn prune(&self, st: &mut State) {
         let limit = self.options.log_bytes;
+        if st.bodies.held > limit {
+            self.forget_gone(st);
+        }
         let mut logged = Vec::new();
         while st.bodies.held > limit {
             let Some((id, (app, bytes))) = st.bodies.kept.pop_first() else {
@@ -567,13 +829,18 @@ impl Shared {
         let floor = log.running.first().copied().unwrap_or(i64::MAX);
         let mut rest = log.ready.split_off(&floor);
         while rest.len() > capacity
-            && let Some((id, _)) = rest.pop_first()
+            && let Some((id, (e, d))) = rest.pop_first()
         {
+            if let Some(answer) = answer_of(&d) {
+                log.drop_answer(id, e, answer);
+            }
             bodies.release(id);
             unlogged.remove(&id);
         }
         let ready = std::mem::replace(&mut log.ready, rest);
-        if ready.is_empty() {
+        let kept = log.dropped_answers.split_off(&floor);
+        let dropped = std::mem::replace(&mut log.dropped_answers, kept);
+        if ready.is_empty() && dropped.is_empty() {
             return;
         }
         let logged = &mut log.logged;
@@ -581,6 +848,7 @@ impl Shared {
         let mut gone = Vec::new();
         let _ = self.store.update(|tx| {
             let epoch = self.store.epoch();
+            let owner_exists = owner_exists(tx, app);
             let logged = logged.get_or_insert_with(|| {
                 tx.table::<Deliveries>()
                     .children(app)
@@ -588,10 +856,14 @@ impl Shared {
                     .collect()
             });
             let mut table = tx.table_mut::<Deliveries>();
+            let mut answered = None;
             for (e, d) in ready.values() {
-                if *e == epoch && table.insert(d.clone()).is_ok() {
+                if *e == epoch && owner_exists && table.insert(d.clone()).is_ok() {
                     logged.push_back(d.id);
                     inserted.push(d);
+                    if let Some(answer) = answer_of(d) {
+                        answered = Some((d.id, answer));
+                    }
                 } else {
                     gone.push(d.id);
                 }
@@ -601,6 +873,18 @@ impl Shared {
                         gone.push(old);
                     }
                 }
+            }
+            if let Some((id, (_, answer))) =
+                dropped.into_iter().rev().find(|(_, (e, _))| *e == epoch)
+                && owner_exists
+                && answered.as_ref().is_none_or(|(newer, _)| *newer < id)
+            {
+                answered = Some((id, answer));
+            }
+            if let Some((_, answer)) = answered
+                && tx.try_table::<LastResponses>().is_some()
+            {
+                let _ = tx.table_mut::<LastResponses>().replace(answer);
             }
             Ok(())
         });

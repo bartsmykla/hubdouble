@@ -238,18 +238,18 @@ impl Admin {
         seed::given_ids(&body, &mut ids);
         let result = services.store.update(|tx| {
             let current = tx.table::<Counters>().current(Sequence::Id);
-            if let Some(&id) = ids.iter().find(|id| **id <= current) {
+            if let Some(&(field, id)) = ids.iter().find(|(_, id)| *id <= current) {
                 return Err(
                     ApiError::unprocessable("Validation Failed").with_error(FieldError {
                         resource: kind.to_owned(),
-                        field: "id".to_owned(),
+                        field: field.to_owned(),
                         code: "invalid".to_owned(),
                         message: Some(format!("{id} is taken or at or below the ID sequence")),
                         value: None,
                     }),
                 );
             }
-            if let Some(&max) = ids.iter().max() {
+            if let Some(max) = ids.iter().map(|&(_, id)| id).max() {
                 tx.table_mut::<Counters>().bump(Sequence::Id, max);
             }
             apply(

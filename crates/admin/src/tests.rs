@@ -273,6 +273,73 @@ fn the_seed_kinds_build_accounts_orgs_repos_apps_installations_and_tokens() {
 }
 
 #[test]
+fn no_account_takes_the_id_or_login_of_the_ghost_user() {
+    for taken in [
+        json!({"kind": "user", "login": "ghost"}),
+        json!({"kind": "user", "login": "Ghost"}),
+        json!({"kind": "user", "id": 10137, "login": "casper"}),
+        json!({"kind": "org", "id": 10137, "login": "spooks"}),
+    ] {
+        // Given
+        let w = world();
+        // When
+        let e = w.seed(vec![taken.clone()]).unwrap_err();
+        // Then
+        assert_eq!(e.status, 422, "{taken}");
+    }
+
+    // Given
+    let w = world();
+    // When
+    w.seed(vec![
+        json!({"kind": "user", "id": 10136, "login": "alice"}),
+        json!({"kind": "user", "login": "bob"}),
+    ])
+    .unwrap();
+    // Then
+    w.store
+        .view(|tx| {
+            assert_eq!(tx.table::<Accounts>().by_login("bob").unwrap().id, 10138);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn an_app_takes_only_a_positive_id() {
+    let org = json!({"kind": "org", "id": 962_416, "login": "acme"});
+    for id in [0, -1] {
+        // Given
+        let w = world();
+        // When
+        let e = w
+            .seed(vec![
+                org.clone(),
+                json!({"kind": "app", "id": id, "slug": "ci", "owner": "acme", "public_key": KEY}),
+            ])
+            .unwrap_err();
+        // Then
+        assert_eq!(e.status, 422, "{id}");
+    }
+
+    // Given
+    let w = world();
+    // When
+    w.seed(vec![
+        org,
+        json!({"kind": "app", "id": 1, "slug": "ci", "owner": "acme", "public_key": KEY}),
+    ])
+    .unwrap();
+    // Then
+    w.store
+        .view(|tx| {
+            assert!(tx.table::<Apps>().get(1).is_some());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn a_failing_entry_changes_nothing_and_names_its_position() {
     // Given
     let w = world();

@@ -140,10 +140,10 @@ pub fn review_dismissed(
     record_at(tx, issue, actor, kind, at)
 }
 
-/// An issue event of a [`StateKind`] that T5 records for a pull request, from its own writes,
-/// from branch pushes, deletions and restores, and a `reopened` one from any path. T7 records
-/// the other closes itself, and its
-/// `GET .../issues/{n}/events` lists these rows with its own.
+/// An issue event of a [`StateKind`] that this crate records for a pull request, from its own
+/// writes, from branch pushes, deletions and restores, and a `reopened` one from any path.
+/// `hubdouble-api-issues` records the other closes itself, and its `GET .../issues/{n}/events`
+/// lists these rows with its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateEvent {
     pub id: i64,

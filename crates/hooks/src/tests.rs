@@ -7,22 +7,23 @@ use bytes::Bytes;
 use http::Uri;
 use http_body_util::{BodyExt, Full};
 use hubdouble_model::{
-    Access, Account, AccountKind, App, Config, Event, Installation, ManualClock, Repo,
+    Access, Account, AccountKind, App, Config, Delivery, Event, Installation, ManualClock, Repo,
     RepositorySelection, Timestamp, Visibility, Webhook, node_id,
 };
 use hubdouble_store::{
     Accounts, Apps, Counters, Deliveries, Installations, Repos, Sequence, Store, StoreBuilder,
 };
-use hyper::body::Incoming;
+use hyper::body::{Body as _, Incoming};
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::delivery::{signature_1, signature_256};
+use crate::delivery::{Wire, signature_1, signature_256};
 use crate::{
-    ConnectFuture, Connector, Handle, HooksError, Io, Notice, Options, emit, ping, redeliver,
+    ConnectFuture, Connector, ContentType, Handle, Hook, HookOwner, Hooks, HooksError, Io,
+    LastResponses, Notice, Options, emit, ping, redeliver,
 };
 
 const ORG: i64 = 10;
@@ -217,7 +218,11 @@ fn installation(id: i64, app_id: i64, repos: Option<Vec<i64>>) -> Installation {
 }
 
 fn world() -> Store {
-    let store = StoreBuilder::new().build_with(Arc::new(config()));
+    world_of(StoreBuilder::new())
+}
+
+fn world_of(builder: StoreBuilder) -> Store {
+    let store = builder.build_with(Arc::new(config()));
     store
         .update_quiet(|tx| {
             let mut accounts = tx.table_mut::<Accounts>();
@@ -317,6 +322,190 @@ fn recipients_follow_installation_coverage_and_subscription() {
         got.sort_unstable();
         assert_eq!(got, want, "{name} on {repo_id}");
     }
+}
+
+#[test]
+fn a_team_event_on_a_fork_reaches_the_teams_organization_and_not_the_forks_owner() {
+    // Given App A installed on the team's organization for another repository, App B installed
+    // on a second organization, each with members read, and a team hook on each organization
+    const GLOBEX: i64 = 12;
+    const USER_FORK: i64 = 22;
+    const GLOBEX_FORK: i64 = 23;
+    const ACME_HOOK: i64 = 300;
+    const GLOBEX_HOOK: i64 = 301;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Accounts>().insert(account(
+                GLOBEX,
+                "globex",
+                AccountKind::Organization,
+            ))?;
+            for (id, owner_id) in [(USER_FORK, USER), (GLOBEX_FORK, GLOBEX)] {
+                tx.table_mut::<Repos>().insert(Repo {
+                    owner_id,
+                    fork_of: Some(WIDGET),
+                    ..repo(id, "widget")
+                })?;
+            }
+            tx.table_mut::<Apps>()
+                .replace(app(APP_A, "alpha", &["team"]))?;
+            tx.table_mut::<Apps>()
+                .replace(app(APP_B, "beta", &["team"]))?;
+            let mut a = installation(INSTALL_A, APP_A, Some(vec![OTHER]));
+            a.permissions.insert("members".to_owned(), Access::Read);
+            let mut b = installation(INSTALL_B, APP_B, None);
+            b.account_id = GLOBEX;
+            b.permissions.insert("members".to_owned(), Access::Read);
+            tx.table_mut::<Installations>().replace(a)?;
+            tx.table_mut::<Installations>().replace(b)?;
+            for (id, org) in [(ACME_HOOK, ORG), (GLOBEX_HOOK, GLOBEX)] {
+                tx.table_mut::<Hooks>().insert(Hook {
+                    id,
+                    owner: HookOwner::Org(org),
+                    url: format!("http://hook.test/{id}"),
+                    content_type: ContentType::Json,
+                    secret: None,
+                    insecure_ssl: false,
+                    events: vec!["team".to_owned()],
+                    active: true,
+                    created_at: Timestamp::SEED,
+                    updated_at: Timestamp::SEED,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    for fork in [USER_FORK, GLOBEX_FORK] {
+        // When a team of acme is added to a fork that another account owns
+        emit_one(
+            &store,
+            Event {
+                action: Some("added_to_repository"),
+                org_id: Some(ORG),
+                ..event("team", fork)
+            },
+        );
+        // Then only acme's installation and acme's hook get the event
+        let mut got: Vec<(i64, Option<i64>, Option<i64>)> = store
+            .take_outbox()
+            .iter()
+            .map(|c| (c.entry.app_id, c.entry.hook_id, c.entry.installation_id))
+            .collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            [(0, Some(ACME_HOOK), None), (APP_A, None, Some(INSTALL_A))],
+            "fork {fork}"
+        );
+    }
+}
+
+fn hook_row(id: i64, owner: HookOwner, event: &str) -> Hook {
+    Hook {
+        id,
+        owner,
+        url: format!("http://hook.test/{id}"),
+        content_type: ContentType::Json,
+        secret: None,
+        insecure_ssl: false,
+        events: vec![event.to_owned()],
+        active: true,
+        created_at: Timestamp::SEED,
+        updated_at: Timestamp::SEED,
+    }
+}
+
+#[test]
+fn a_wildcard_hook_gets_no_event_that_github_sends_only_to_apps() {
+    // Given a repository hook and an organization hook that subscribe to every event
+    const REPO_HOOK: i64 = 320;
+    const ORG_HOOK: i64 = 321;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>()
+                .insert(hook_row(REPO_HOOK, HookOwner::Repo(WIDGET), "*"))?;
+            tx.table_mut::<Hooks>()
+                .insert(hook_row(ORG_HOOK, HookOwner::Org(ORG), "*"))?;
+            Ok(())
+        })
+        .unwrap();
+    let mut got = BTreeMap::new();
+    for name in ["push", "workflow_dispatch"] {
+        // When the repository emits a webhook event and an App-only event
+        emit_one(&store, event(name, WIDGET));
+        let mut hooks: Vec<i64> = store
+            .take_outbox()
+            .iter()
+            .filter_map(|c| c.entry.hook_id)
+            .collect();
+        hooks.sort_unstable();
+        got.insert(name, hooks);
+    }
+
+    // Then both hooks get push and neither gets workflow_dispatch
+    assert_eq!(got["push"], [REPO_HOOK, ORG_HOOK]);
+    assert_eq!(got["workflow_dispatch"], Vec::<i64>::new());
+}
+
+#[test]
+fn repository_deleted_reaches_organization_hooks_and_no_app_or_repository_hook() {
+    // Given an App installed on every repository, a repository hook and an organization hook,
+    // each subscribed to repository
+    const REPO_HOOK: i64 = 310;
+    const ORG_HOOK: i64 = 311;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Apps>()
+                .replace(app(APP_A, "alpha", &["repository"]))?;
+            tx.table_mut::<Installations>()
+                .replace(installation(INSTALL_A, APP_A, None))?;
+            tx.table_mut::<Hooks>().insert(hook_row(
+                REPO_HOOK,
+                HookOwner::Repo(WIDGET),
+                "repository",
+            ))?;
+            tx.table_mut::<Hooks>().insert(hook_row(
+                ORG_HOOK,
+                HookOwner::Org(ORG),
+                "repository",
+            ))?;
+            Ok(())
+        })
+        .unwrap();
+    let mut got = BTreeMap::new();
+    for action in ["edited", "deleted"] {
+        // When the repository is edited, then deleted, while every hook still exists
+        emit_one(
+            &store,
+            Event {
+                action: Some(action),
+                ..event("repository", WIDGET)
+            },
+        );
+        let mut sent: Vec<(i64, Option<i64>)> = store
+            .take_outbox()
+            .iter()
+            .map(|c| (c.entry.app_id, c.entry.hook_id))
+            .collect();
+        sent.sort_unstable();
+        got.insert(action, sent);
+    }
+
+    // Then every recipient gets edited, and only the organization hook gets deleted
+    assert_eq!(
+        got["edited"],
+        [(0, Some(REPO_HOOK)), (0, Some(ORG_HOOK)), (APP_A, None)]
+    );
+    assert_eq!(got["deleted"], [(0, Some(ORG_HOOK))]);
 }
 
 #[test]
@@ -528,13 +717,35 @@ fn installation_event_reaches_only_its_app_with_the_data_before_the_change() {
 #[test]
 fn signatures_match_known_vectors() {
     assert_eq!(
-        signature_256(b"It's a Secret to Everybody", b"Hello, World!"),
+        signature_256(b"It's a Secret to Everybody", [&b"Hello, "[..], b"World!"]),
         "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17"
     );
     assert_eq!(
-        signature_1(b"Jefe", b"what do ya want for nothing?"),
+        signature_1(b"Jefe", [&b"what do "[..], b"ya want ", b"for nothing?"]),
         "sha1=effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"
     );
+}
+
+#[tokio::test]
+async fn a_form_body_goes_out_in_pieces_far_smaller_than_the_whole_form() {
+    // Given a 1 MiB payload of slashes, which the form encodes to three times its size
+    let json = Bytes::from(vec![b'/'; 1 << 20]);
+    let mut wire = Wire::new(json, true);
+    let announced = wire.size_hint().exact();
+    // When the body is read frame by frame
+    let mut sent = Vec::new();
+    let mut largest = 0;
+    while let Some(frame) = wire.frame().await {
+        let data = frame.unwrap().into_data().unwrap();
+        largest = largest.max(data.len());
+        sent.extend_from_slice(&data);
+    }
+    // Then no frame holds more than 64 KiB and the frames make the announced form body
+    assert!(largest <= 64 * 1024, "largest frame {largest}");
+    let mut expected = b"payload=".to_vec();
+    expected.extend(b"%2F".repeat(1 << 20));
+    assert_eq!(sent, expected);
+    assert_eq!(announced, Some(expected.len() as u64));
 }
 
 #[tokio::test(start_paused = true)]
@@ -571,9 +782,12 @@ async fn delivers_signed_with_githubs_headers_and_logs_the_attempt() {
     assert!(h["user-agent"].starts_with("GitHub-Hookshot/"));
     assert_eq!(
         h["x-hub-signature-256"],
-        signature_256(SECRET.as_bytes(), &raw)
+        signature_256(SECRET.as_bytes(), [&raw[..]])
     );
-    assert_eq!(h["x-hub-signature"], signature_1(SECRET.as_bytes(), &raw));
+    assert_eq!(
+        h["x-hub-signature"],
+        signature_1(SECRET.as_bytes(), [&raw[..]])
+    );
     // Then the payload has its context with the configured origins
     assert_eq!(body["action"], json!("created"));
     assert_eq!(body["comment"]["id"], json!(7));
@@ -784,6 +998,52 @@ async fn the_log_shows_an_attempt_only_after_every_lower_id_finished() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_attempt_that_ends_after_its_hook_or_app_is_deleted_is_not_logged() {
+    // Given a repository hook and an App that both get a push
+    const HOOK: i64 = 300;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>().insert(Hook {
+                id: HOOK,
+                owner: HookOwner::Repo(WIDGET),
+                url: "http://hook.test/a".to_owned(),
+                content_type: ContentType::Json,
+                secret: None,
+                insecure_ssl: false,
+                events: vec!["push".to_owned()],
+                active: true,
+                created_at: Timestamp::SEED,
+                updated_at: Timestamp::SEED,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    let (hooks, mut hits) = start(&store, |o| o.workers = 2);
+    emit_one(&store, event("push", WIDGET));
+    let held = [hits.recv().await.unwrap(), hits.recv().await.unwrap()];
+
+    // When both are deleted while their attempts are in flight
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>().remove(HOOK);
+            tx.table_mut::<Apps>().remove(APP_A);
+            Ok(())
+        })
+        .unwrap();
+    for hit in held {
+        hit.reply.send(200).unwrap();
+    }
+    hooks.drain().await.unwrap();
+
+    // Then neither attempt is logged
+    assert_eq!(logged_ids(&store, HOOK), Vec::<i64>::new());
+    assert_eq!(logged_ids(&store, APP_A), Vec::<i64>::new());
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_attempt_times_out_after_ten_seconds() {
     let store = world();
     let (hooks, mut hits) = start(&store, |_| {});
@@ -908,6 +1168,355 @@ async fn in_flight_attempts_keep_their_share_of_the_queue_byte_budget() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_large_form_delivery_is_signed_over_the_received_form_body() {
+    // Given a form hook with a secret
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            let mut hook = hook_row(ISSUES_HOOK, HookOwner::Repo(WIDGET), "issues");
+            hook.content_type = ContentType::Form;
+            hook.secret = Some(SECRET.to_owned());
+            tx.table_mut::<Hooks>().insert(hook)?;
+            Ok(())
+        })
+        .unwrap();
+    let (hooks, mut hits) = start(&store, |_| {});
+    // When an event with a payload of about 80 KB of characters the form escapes is delivered
+    let path = "/a/b".repeat(20_000);
+    let mut e = event("issues", WIDGET);
+    e.payload.insert("path".to_owned(), json!(path));
+    emit_one(&store, e);
+    let hit = hits.recv().await.unwrap();
+    let h = hit.headers.clone();
+    let raw = hit.body.clone();
+    hit.reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+    // Then the body is one payload parameter that holds the JSON, with its length announced
+    assert_eq!(h["content-type"], "application/x-www-form-urlencoded");
+    assert_eq!(h["content-length"], raw.len().to_string());
+    assert!(raw.starts_with(b"payload="));
+    let params: Vec<(String, String)> = url::form_urlencoded::parse(&raw).into_owned().collect();
+    assert_eq!(params.len(), 1);
+    assert_eq!(params[0].0, "payload");
+    assert_eq!(json_of(params[0].1.as_bytes())["path"], json!(path));
+    // Then both signatures cover the received bytes
+    assert_eq!(
+        h["x-hub-signature-256"],
+        signature_256(SECRET.as_bytes(), [&raw[..]])
+    );
+    assert_eq!(
+        h["x-hub-signature"],
+        signature_1(SECRET.as_bytes(), [&raw[..]])
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hooks_last_response_skips_a_queue_full_record_that_was_never_sent() {
+    let sizing = world_with_issues_hook();
+    emit_one(&sizing, event("issues", WIDGET));
+    let one = sizing.take_outbox()[0].entry.payload.len();
+    // Given a queue byte limit of one payload and a hook attempt in flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| o.queue_bytes = one);
+    emit_one(&store, event("issues", WIDGET));
+    let in_flight = hits.recv().await.unwrap();
+    // When a second event is refused as Queue full and the attempt then answers 200
+    emit_one(&store, event("issues", WIDGET));
+    in_flight.reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+    let statuses: Vec<i64> = store
+        .view(|tx| {
+            Ok(tx
+                .table::<Deliveries>()
+                .children(ISSUES_HOOK)
+                .map(|d| d.status_code)
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(statuses, [200, 0]);
+    // Then the hook's last response is the answered attempt
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 200, "status": "active", "message": "OK"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hook_stays_active_after_a_queue_full_record_evicts_its_only_answered_attempt() {
+    let sizing = world_with_issues_hook();
+    emit_one(&sizing, event("issues", WIDGET));
+    let one = sizing.take_outbox()[0].entry.payload.len();
+    // Given a log capacity of one, a queue byte limit of one payload and a hook attempt in flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.queue_bytes = one;
+        o.log_capacity = 1;
+    });
+    emit_one(&store, event("issues", WIDGET));
+    let in_flight = hits.recv().await.unwrap();
+    // When a second event is refused as Queue full and the attempt then answers 200
+    emit_one(&store, event("issues", WIDGET));
+    in_flight.reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+    let statuses: Vec<i64> = store
+        .view(|tx| {
+            Ok(tx
+                .table::<Deliveries>()
+                .children(ISSUES_HOOK)
+                .map(|d| d.status_code)
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(statuses, [0]);
+    // Then the hook's last response is still the answered attempt
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 200, "status": "active", "message": "OK"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hooks_last_response_is_its_newest_sent_attempt_after_the_log_drops_it() {
+    let numbered = |n: i64| {
+        let mut e = event("issues", WIDGET);
+        e.payload.insert("n".to_owned(), json!(n));
+        e
+    };
+    let sizing = world_with_issues_hook();
+    emit_one(&sizing, numbered(1));
+    let one = sizing.take_outbox()[0].entry.payload.len();
+    // Given a log capacity of one, a queue byte limit of two payloads and two hook attempts in
+    // flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 2;
+        o.queue_bytes = 2 * one;
+        o.log_capacity = 1;
+    });
+    let mut by_n = BTreeMap::new();
+    for n in 1..=2 {
+        emit_one(&store, numbered(n));
+        let hit = hits.recv().await.unwrap();
+        by_n.insert(hit.json()["n"].as_i64().unwrap(), hit);
+    }
+    // When a third event is refused as Queue full, the second attempt answers 200 and the first
+    // then answers 404
+    emit_one(&store, numbered(3));
+    hooks.shared.wait_stats(|s| s.unlogged == 3).await;
+    by_n.remove(&2).unwrap().reply.send(200).unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 1 && s.unlogged == 2)
+        .await;
+    by_n.remove(&1).unwrap().reply.send(404).unwrap();
+    hooks.drain().await.unwrap();
+    let statuses: Vec<i64> = store
+        .view(|tx| {
+            Ok(tx
+                .table::<Deliveries>()
+                .children(ISSUES_HOOK)
+                .map(|d| d.status_code)
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(statuses, [0]);
+    // Then the hook's last response is the second attempt
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 200, "status": "active", "message": "OK"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hooks_last_response_is_its_newest_dropped_answer_before_a_running_attempt() {
+    // Given a log capacity of one and five hook attempts in flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 5;
+        o.log_capacity = 1;
+    });
+    let mut attempts = Vec::new();
+    for _ in 0..5 {
+        emit_one(&store, event("issues", WIDGET));
+        attempts.push(hits.recv().await.unwrap());
+    }
+    let [one, two, _three, four, five]: [Hit; 5] = attempts.try_into().ok().unwrap();
+    // When the second attempt answers 200, the fourth and the fifth answer so the log drops the
+    // second and the fourth, and the first then answers 404 while the third still runs
+    two.reply.send(200).unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 4 && s.unlogged == 5)
+        .await;
+    four.reply.send(500).unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 3 && s.unlogged == 4)
+        .await;
+    five.reply.send(200).unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 2 && s.unlogged == 3)
+        .await;
+    one.reply.send(404).unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 1 && s.unlogged == 2)
+        .await;
+    // Then the hook's last response is the second attempt
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 200, "status": "active", "message": "OK"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hook_keeps_at_most_one_dropped_answer_per_gap_between_running_attempts() {
+    // Given a log capacity of one and seven hook attempts in flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 7;
+        o.log_capacity = 1;
+    });
+    let mut attempts = BTreeMap::new();
+    for n in 1..=7 {
+        emit_one(&store, event("issues", WIDGET));
+        attempts.insert(n, hits.recv().await.unwrap());
+    }
+    // When the second, fourth, sixth, third, seventh and fifth attempts answer in turn while the
+    // first still runs, so the gaps around the third and the fifth join over older dropped answers
+    for (answered, n) in (1..).zip([2, 4, 6, 3, 7, 5]) {
+        attempts.remove(&n).unwrap().reply.send(200).unwrap();
+        let dropped = answered - 1;
+        hooks
+            .shared
+            .wait_stats(|s| s.in_flight == 7 - answered && s.unlogged == 7 - dropped)
+            .await;
+        // Then the hook keeps no more dropped answers than there are gaps between running attempts
+        let (kept, running) = hooks.shared.dropped_answers_and_running(ISSUES_HOOK);
+        assert!(
+            kept <= running + 1,
+            "{kept} dropped answers, {running} running"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_older_answer_the_log_drops_into_a_gap_keeps_the_newer_dropped_answer_there() {
+    // Given a log capacity of one and six hook attempts in flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 6;
+        o.log_capacity = 1;
+    });
+    let mut attempts = BTreeMap::new();
+    for n in 1..=6 {
+        emit_one(&store, event("issues", WIDGET));
+        attempts.insert(n, hits.recv().await.unwrap());
+    }
+    // When the second answers 500, the fourth 200 so the log drops the second, the sixth 201 so
+    // the log drops the fourth, the third 404 so the log drops it, and the first then answers 503
+    // while the fifth still runs
+    for (answered, (n, code)) in (1..).zip([(2, 500), (4, 200), (6, 201), (3, 404), (1, 503)]) {
+        attempts.remove(&n).unwrap().reply.send(code).unwrap();
+        let dropped = if answered < 5 { answered - 1 } else { 4 };
+        hooks
+            .shared
+            .wait_stats(|s| s.in_flight == 6 - answered && s.unlogged == 6 - dropped)
+            .await;
+    }
+    // Then the hook's last response is the fourth attempt
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 200, "status": "active", "message": "OK"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hooks_newer_logged_answer_beats_an_older_answer_the_log_dropped() {
+    // Given a log capacity of one and three hook attempts in flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 3;
+        o.log_capacity = 1;
+    });
+    let mut attempts = Vec::new();
+    for _ in 0..3 {
+        emit_one(&store, event("issues", WIDGET));
+        attempts.push(hits.recv().await.unwrap());
+    }
+    let [one, two, three]: [Hit; 3] = attempts.try_into().ok().unwrap();
+    // When the second attempt answers 200, the third answers 404 so the log drops the second, and
+    // the first then answers 500
+    two.reply.send(200).unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 2 && s.unlogged == 3)
+        .await;
+    three.reply.send(404).unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 1 && s.unlogged == 2)
+        .await;
+    one.reply.send(500).unwrap();
+    hooks.drain().await.unwrap();
+    // Then the hook's last response is the third attempt
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 404, "status": "misconfigured", "message": "Invalid HTTP Response: 404"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_seeded_hook_keeps_its_last_response_over_a_reset_that_keeps_its_log() {
+    // Given a seeded hook whose attempt after the snapshot answered 200
+    let store = world_with_issues_hook();
+    let snapshot = store.snapshot();
+    let (hooks, hits) = start(&store, |_| {});
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("issues", WIDGET));
+    hooks.drain().await.unwrap();
+    // When a reset restores the snapshot
+    hooks.reset(&snapshot).await.unwrap();
+    // Then the hook keeps its log and its last response is that attempt
+    assert_eq!(logged_ids(&store, ISSUES_HOOK).len(), 1);
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 200, "status": "active", "message": "OK"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn past_the_log_byte_budget_the_oldest_deliveries_lose_their_bodies() {
     let numbered = |n: i64| {
         let mut e = event("push", WIDGET);
@@ -1014,6 +1623,576 @@ async fn reset_stops_queued_and_in_flight_attempts_of_the_old_epoch() {
     hooks.drain().await.unwrap();
     assert!(bodies.recv().await.is_some());
     assert_eq!(logged_ids(&store, APP_A), vec![4]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reset_drops_the_log_of_a_hook_made_after_the_seed_and_keeps_the_app_log() {
+    // Given an App delivery, and a delivery to a repository hook made after the seed
+    const HOOK: i64 = 300;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    let snapshot = store.snapshot();
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>()
+                .insert(hook_row(HOOK, HookOwner::Repo(WIDGET), "issues"))?;
+            Ok(())
+        })
+        .unwrap();
+    let (hooks, hits) = start(&store, |_| {});
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    let app_log = logged_ids(&store, APP_A);
+    let app_bytes = hooks.stats().log_bytes;
+    emit_one(&store, event("issues", WIDGET));
+    hooks.drain().await.unwrap();
+    assert_eq!(logged_ids(&store, HOOK).len(), 1);
+    assert!(hooks.stats().log_bytes > app_bytes);
+
+    // When reset discards the hook
+    hooks.reset(&snapshot).await.unwrap();
+
+    // Then the hook's deliveries and their bodies are gone and the App keeps its log
+    assert_eq!(logged_ids(&store, HOOK), Vec::<i64>::new());
+    assert_eq!(logged_ids(&store, APP_A), app_log);
+    assert_eq!(hooks.stats().log_bytes, app_bytes);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reset_drops_the_log_of_an_app_made_after_the_seed() {
+    // Given a delivery to an App made and installed after the seed
+    const APP: i64 = 400;
+    const INSTALL: i64 = 401;
+    let store = world();
+    let snapshot = store.snapshot();
+    let (hooks, hits) = start(&store, |_| {});
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    let seeded_log = logged_ids(&store, APP_A);
+    let seeded_bytes = hooks.stats().log_bytes;
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Apps>()
+                .insert(app(APP, "late", &["release"]))?;
+            tx.table_mut::<Installations>()
+                .insert(installation(INSTALL, APP, None))?;
+            Ok(())
+        })
+        .unwrap();
+    emit_one(&store, event("release", WIDGET));
+    hooks.drain().await.unwrap();
+    assert_eq!(logged_ids(&store, APP).len(), 1);
+    assert!(hooks.stats().log_bytes > seeded_bytes);
+
+    // When reset discards the App
+    hooks.reset(&snapshot).await.unwrap();
+
+    // Then its deliveries are gone and the seeded App keeps its log and its bytes alone
+    assert_eq!(logged_ids(&store, APP), Vec::<i64>::new());
+    assert_eq!(logged_ids(&store, APP_A), seeded_log);
+    assert_eq!(hooks.stats().log_bytes, seeded_bytes);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reset_that_ends_while_a_discarded_hooks_attempts_run_leaves_none_unlogged() {
+    // Given an App attempt in flight that holds a first reset open
+    const HOOK: i64 = 300;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    let snapshot = store.snapshot();
+    let (hooks, mut hits) = start(&store, |o| o.workers = 3);
+    emit_one(&store, event("push", WIDGET));
+    let held = hits.recv().await.unwrap();
+    let first = hooks.reset(&snapshot);
+    tokio::pin!(first);
+    tokio::select! {
+        biased;
+        _ = &mut first => panic!("the first reset returned before the attempt in flight ended"),
+        () = std::future::ready(()) => {}
+    }
+    // Given a hook made after the first reset, with two attempts in flight
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>()
+                .insert(hook_row(HOOK, HookOwner::Repo(WIDGET), "issues"))?;
+            Ok(())
+        })
+        .unwrap();
+    for n in 1..=2 {
+        let mut e = event("issues", WIDGET);
+        e.payload.insert("n".to_owned(), json!(n));
+        emit_one(&store, e);
+    }
+    let mut by_n = BTreeMap::new();
+    for _ in 0..2 {
+        let hit = hits.recv().await.unwrap();
+        by_n.insert(hit.json()["n"].as_i64().unwrap(), hit);
+    }
+    // Given a second reset that discards the hook
+    let second = hooks.reset(&snapshot);
+    tokio::pin!(second);
+    tokio::select! {
+        biased;
+        _ = &mut second => panic!("the second reset returned before the attempts in flight ended"),
+        () = std::future::ready(()) => {}
+    }
+    // Given the higher hook delivery ends first and waits behind the lower one
+    by_n.remove(&2).unwrap().reply.send(200).unwrap();
+    hooks.shared.wait_stats(|s| s.in_flight == 2).await;
+
+    // When the first reset ends, and then the lower hook delivery and the second reset end
+    held.reply.send(200).unwrap();
+    first.await.unwrap();
+    by_n.remove(&1).unwrap().reply.send(200).unwrap();
+    second.await.unwrap();
+
+    // Then no delivery waits to be logged, and a drain returns
+    assert_eq!(hooks.stats().unlogged, 0);
+    hooks.drain().await.unwrap();
+    assert_eq!(logged_ids(&store, HOOK), Vec::<i64>::new());
+}
+
+#[tokio::test(start_paused = true)]
+async fn deleting_a_hook_or_an_app_frees_its_share_of_the_log_byte_budget() {
+    // Given logged deliveries of two Apps and a repository hook
+    const HOOK: i64 = 300;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>()
+                .insert(hook_row(HOOK, HookOwner::Repo(WIDGET), "issues"))?;
+            Ok(())
+        })
+        .unwrap();
+    let (hooks, hits) = start(&store, |_| {});
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", OTHER));
+    emit_one(&store, event("issues", WIDGET));
+    hooks.drain().await.unwrap();
+    assert_eq!(logged_ids(&store, APP_B).len(), 1);
+    assert_eq!(logged_ids(&store, HOOK).len(), 1);
+
+    // When the hook and App B are deleted with their deliveries, and App A gets one more
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Deliveries>().remove_children(HOOK);
+            tx.table_mut::<Hooks>().remove(HOOK);
+            tx.table_mut::<Deliveries>().remove_children(APP_B);
+            tx.table_mut::<Apps>().remove(APP_B);
+            Ok(())
+        })
+        .unwrap();
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+
+    // Then the budget holds only the requests and responses of App A's deliveries
+    let headers =
+        |h: &BTreeMap<String, String>| -> usize { h.iter().map(|(k, v)| k.len() + v.len()).sum() };
+    let app_a: usize = store
+        .view(|tx| {
+            Ok(tx
+                .table::<Deliveries>()
+                .children(APP_A)
+                .map(|d| {
+                    d.request.payload.len()
+                        + headers(&d.request.headers)
+                        + d.response.payload.as_ref().map_or(0, String::len)
+                        + headers(&d.response.headers)
+                })
+                .sum())
+        })
+        .unwrap();
+    assert_eq!(logged_ids(&store, APP_A).len(), 2);
+    assert_eq!(hooks.stats().log_bytes, app_a);
+}
+
+const ISSUES_HOOK: i64 = 300;
+
+fn world_with_issues_hook() -> Store {
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    builder.register_table::<LastResponses>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>().insert(hook_row(
+                ISSUES_HOOK,
+                HookOwner::Repo(WIDGET),
+                "issues",
+            ))?;
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+async fn log_bytes_of_an_app_delivery_beside_one_more() -> usize {
+    let headers =
+        |h: &BTreeMap<String, String>| -> usize { h.iter().map(|(k, v)| k.len() + v.len()).sum() };
+    let store = world_with_issues_hook();
+    let (hooks, hits) = start(&store, |_| {});
+    let _bodies = answer_all(hits);
+    for name in ["push", "issues", "push"] {
+        emit_one(&store, event(name, WIDGET));
+        hooks.drain().await.unwrap();
+    }
+    let bytes: Vec<usize> = store
+        .view(|tx| {
+            Ok((1..=3)
+                .map(|id| {
+                    let d = tx.table::<Deliveries>().get(id).unwrap();
+                    d.request.payload.len()
+                        + headers(&d.request.headers)
+                        + d.response.payload.as_ref().map_or(0, String::len)
+                        + headers(&d.response.headers)
+                })
+                .collect())
+        })
+        .unwrap();
+    (bytes[0] + bytes[1]).max(bytes[0] + bytes[2])
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_attempt_frees_a_deleted_hooks_log_bytes_before_it_strips_an_older_app_body() {
+    let limit = log_bytes_of_an_app_delivery_beside_one_more().await;
+
+    // Given a log budget of two deliveries, an App delivery and a newer hook delivery logged
+    let store = world_with_issues_hook();
+    let (hooks, hits) = start(&store, |o| o.log_bytes = limit);
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    emit_one(&store, event("issues", WIDGET));
+    hooks.drain().await.unwrap();
+    assert_eq!(logged_ids(&store, ISSUES_HOOK), vec![2]);
+
+    // When the hook is deleted with its deliveries and the App gets one more
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Deliveries>().remove_children(ISSUES_HOOK);
+            tx.table_mut::<Hooks>().remove(ISSUES_HOOK);
+            Ok(())
+        })
+        .unwrap();
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+
+    // Then the App's older delivery keeps its request and response
+    assert_eq!(logged_ids(&store, APP_A), vec![1, 3]);
+    let first = store
+        .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
+        .unwrap()
+        .unwrap();
+    assert!(!first.request.payload.is_empty());
+    assert!(first.response.payload.is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reset_that_brings_back_a_deleted_seeded_hook_frees_its_deleted_deliveries_log_bytes() {
+    let limit = log_bytes_of_an_app_delivery_beside_one_more().await;
+
+    // Given a log budget of two deliveries, an App delivery and a newer delivery of a seeded hook
+    let store = world_with_issues_hook();
+    let snapshot = store.snapshot();
+    let (hooks, hits) = start(&store, |o| o.log_bytes = limit);
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    emit_one(&store, event("issues", WIDGET));
+    hooks.drain().await.unwrap();
+
+    // When the hook is deleted with its deliveries, a reset brings it back, and the App gets one more
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Deliveries>().remove_children(ISSUES_HOOK);
+            tx.table_mut::<Hooks>().remove(ISSUES_HOOK);
+            Ok(())
+        })
+        .unwrap();
+    hooks.reset(&snapshot).await.unwrap();
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+
+    // Then the App keeps its log with its older delivery's request and response, and the hook has none
+    assert_eq!(logged_ids(&store, APP_A), vec![1, 3]);
+    assert_eq!(logged_ids(&store, ISSUES_HOOK), Vec::<i64>::new());
+    let first = store
+        .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
+        .unwrap()
+        .unwrap();
+    assert!(!first.request.payload.is_empty());
+    assert!(first.response.payload.is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reset_keeps_an_apps_log_within_its_capacity_when_the_snapshot_holds_an_evicted_delivery()
+{
+    // Given a log capacity of one and a snapshot taken while the App's first delivery is logged
+    let store = world();
+    let (hooks, hits) = start(&store, |o| o.log_capacity = 1);
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    let snapshot = store.snapshot();
+    // When a newer delivery evicts it and a reset restores the snapshot
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    assert_eq!(logged_ids(&store, APP_A), vec![2]);
+    hooks.reset(&snapshot).await.unwrap();
+    // Then the log holds only the newer delivery and the log bytes count its body
+    assert_eq!(logged_ids(&store, APP_A), vec![2]);
+    let kept = store
+        .view(|tx| {
+            let d = tx.table::<Deliveries>().get(2).unwrap();
+            let headers = |h: &BTreeMap<String, String>| -> usize {
+                h.iter().map(|(k, v)| k.len() + v.len()).sum()
+            };
+            Ok(d.request.payload.len()
+                + headers(&d.request.headers)
+                + d.response.payload.as_ref().map_or(0, String::len)
+                + headers(&d.response.headers))
+        })
+        .unwrap();
+    assert_eq!(hooks.stats().log_bytes, kept);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reset_strips_the_oldest_restored_body_past_the_log_byte_budget() {
+    let limit = log_bytes_of_an_app_delivery_beside_one_more().await;
+
+    // Given a log budget of two deliveries, and a snapshot that holds an App delivery and a newer
+    // delivery of a seeded hook
+    let store = world_with_issues_hook();
+    let (hooks, hits) = start(&store, |o| o.log_bytes = limit);
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    emit_one(&store, event("issues", WIDGET));
+    hooks.drain().await.unwrap();
+    let snapshot = store.snapshot();
+
+    // When the hook is deleted with its deliveries, the App gets one more, and a reset brings
+    // the hook back with its delivery
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Deliveries>().remove_children(ISSUES_HOOK);
+            tx.table_mut::<Hooks>().remove(ISSUES_HOOK);
+            Ok(())
+        })
+        .unwrap();
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    hooks.reset(&snapshot).await.unwrap();
+
+    // Then the oldest delivery loses its body and the newer ones keep theirs
+    assert_eq!(logged_ids(&store, APP_A), vec![1, 3]);
+    assert_eq!(logged_ids(&store, ISSUES_HOOK), vec![2]);
+    let bodies: Vec<(bool, bool)> = store
+        .view(|tx| {
+            Ok((1..=3)
+                .map(|id| {
+                    let d = tx.table::<Deliveries>().get(id).unwrap();
+                    (!d.request.payload.is_empty(), d.response.payload.is_some())
+                })
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(bodies, [(false, false), (true, true), (true, true)]);
+    assert!(hooks.stats().log_bytes <= limit);
+}
+
+async fn app_request_app_and_hook_log_bytes() -> (usize, usize, usize) {
+    let headers =
+        |h: &BTreeMap<String, String>| -> usize { h.iter().map(|(k, v)| k.len() + v.len()).sum() };
+    let store = world_with_issues_hook();
+    let (hooks, hits) = start(&store, |_| {});
+    let _bodies = answer_all(hits);
+    for name in ["push", "issues"] {
+        emit_one(&store, event(name, WIDGET));
+        hooks.drain().await.unwrap();
+    }
+    store
+        .view(|tx| {
+            let rows = tx.table::<Deliveries>();
+            let (app, hook) = (rows.get(1).unwrap(), rows.get(2).unwrap());
+            let request = |d: &Delivery| d.request.payload.len() + headers(&d.request.headers);
+            let full = |d: &Delivery| {
+                request(d)
+                    + d.response.payload.as_ref().map_or(0, String::len)
+                    + headers(&d.response.headers)
+            };
+            Ok((request(app), full(app), full(hook)))
+        })
+        .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_attempt_started_during_a_reset_does_not_count_a_restored_hooks_deleted_deliveries() {
+    let (request, app, hook) = app_request_app_and_hook_log_bytes().await;
+
+    // Given a log budget of an App delivery, a hook delivery and one request, or of an App
+    // delivery and two requests
+    let store = world_with_issues_hook();
+    let snapshot = store.snapshot();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.log_bytes = app + request + hook.max(request);
+        o.workers = 2;
+    });
+    for name in ["push", "issues"] {
+        emit_one(&store, event(name, WIDGET));
+        hits.recv().await.unwrap().reply.send(200).unwrap();
+        hooks.drain().await.unwrap();
+    }
+    assert_eq!(logged_ids(&store, ISSUES_HOOK), vec![2]);
+    // Given an App attempt in flight, and then the seeded hook deleted with its deliveries
+    emit_one(&store, event("push", WIDGET));
+    let in_flight = hits.recv().await.unwrap();
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Deliveries>().remove_children(ISSUES_HOOK);
+            tx.table_mut::<Hooks>().remove(ISSUES_HOOK);
+            Ok(())
+        })
+        .unwrap();
+
+    // When a reset brings the hook back and a new App attempt starts before the reset returns
+    let reset = hooks.reset(&snapshot);
+    tokio::pin!(reset);
+    tokio::select! {
+        biased;
+        _ = &mut reset => panic!("the reset returned before the attempt in flight ended"),
+        () = std::future::ready(()) => {}
+    }
+    emit_one(&store, event("push", WIDGET));
+    let started = hits.recv().await.unwrap();
+    in_flight.reply.send(200).unwrap();
+    reset.await.unwrap();
+    started.reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+
+    // Then the App's older delivery keeps its request and response
+    assert_eq!(logged_ids(&store, APP_A), vec![1, 4]);
+    let first = store
+        .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
+        .unwrap()
+        .unwrap();
+    assert!(!first.request.payload.is_empty());
+    assert!(first.response.payload.is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn old_attempts_that_end_in_reverse_order_during_a_reset_keep_the_kept_bodies() {
+    let numbered = |n: i64| {
+        let mut e = event("push", WIDGET);
+        e.payload.insert("n".to_owned(), json!(n));
+        e
+    };
+    let headers =
+        |h: &BTreeMap<String, String>| -> usize { h.iter().map(|(k, v)| k.len() + v.len()).sum() };
+    let sizing = world();
+    let (sized, hits) = start(&sizing, |_| {});
+    let _sized_bodies = answer_all(hits);
+    emit_one(&sizing, numbered(1));
+    sized.drain().await.unwrap();
+    let d = sizing
+        .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
+        .unwrap()
+        .unwrap();
+    let request = d.request.payload.len() + headers(&d.request.headers);
+    let full =
+        request + d.response.payload.as_ref().map_or(0, String::len) + headers(&d.response.headers);
+
+    // Given a log budget of one delivery and two requests, and a seeded App's delivery logged
+    // before the snapshot
+    let store = world();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 2;
+        o.log_bytes = full + 2 * request;
+    });
+    emit_one(&store, numbered(1));
+    hits.recv().await.unwrap().reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+    let snapshot = store.snapshot();
+    // Given two more attempts of the App in flight
+    for n in 2..=3 {
+        emit_one(&store, numbered(n));
+    }
+    let mut by_n = BTreeMap::new();
+    for _ in 0..2 {
+        let hit = hits.recv().await.unwrap();
+        by_n.insert(hit.json()["n"].as_i64().unwrap(), hit);
+    }
+
+    // When a reset runs and the higher attempt ends before the lower one
+    let reset = hooks.reset(&snapshot);
+    tokio::pin!(reset);
+    tokio::select! {
+        biased;
+        _ = &mut reset => panic!("the reset returned before the attempts in flight ended"),
+        () = std::future::ready(()) => {}
+    }
+    by_n.remove(&3).unwrap().reply.send(200).unwrap();
+    hooks.shared.wait_stats(|s| s.in_flight == 1).await;
+    by_n.remove(&2).unwrap().reply.send(200).unwrap();
+    reset.await.unwrap();
+    hooks.drain().await.unwrap();
+
+    // Then the delivery kept from before the reset keeps its request and response
+    assert_eq!(logged_ids(&store, APP_A), vec![1]);
+    let first = store
+        .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
+        .unwrap()
+        .unwrap();
+    assert!(!first.request.payload.is_empty());
+    assert!(first.response.payload.is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn deleting_a_hook_frees_its_finished_deliveries_that_wait_behind_a_slower_one() {
+    // Given two hook attempts in flight, and the higher one finished behind the lower one
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| o.workers = 2);
+    for n in 1..=2 {
+        let mut e = event("issues", WIDGET);
+        e.payload.insert("n".to_owned(), json!(n));
+        emit_one(&store, e);
+    }
+    let mut by_n = BTreeMap::new();
+    for _ in 0..2 {
+        let hit = hits.recv().await.unwrap();
+        by_n.insert(hit.json()["n"].as_i64().unwrap(), hit);
+    }
+    by_n.remove(&2).unwrap().reply.send(200).unwrap();
+    hooks.shared.wait_stats(|s| s.in_flight == 1).await;
+
+    // When the hook is deleted with its deliveries and an App attempt then ends
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Deliveries>().remove_children(ISSUES_HOOK);
+            tx.table_mut::<Hooks>().remove(ISSUES_HOOK);
+            Ok(())
+        })
+        .unwrap();
+    emit_one(&store, event("push", WIDGET));
+    hits.recv().await.unwrap().reply.send(200).unwrap();
+    hooks.shared.wait_stats(|s| s.in_flight == 1).await;
+
+    // Then no finished hook delivery holds its body outside the log byte budget
+    assert_eq!(hooks.shared.unbudgeted_ready_bytes(), 0);
+    // Then a drain returns once the slower attempt ends, and only the App delivery holds bytes
+    by_n.remove(&1).unwrap().reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+    assert_eq!(hooks.stats().unlogged, 0);
+    assert_eq!(logged_ids(&store, ISSUES_HOOK), Vec::<i64>::new());
+    assert_eq!(logged_ids(&store, APP_A), vec![3]);
+    let (_, app, _) = app_request_app_and_hook_log_bytes().await;
+    assert_eq!(hooks.stats().log_bytes, app);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1279,4 +2458,50 @@ async fn ping_describes_the_apps_hook() {
         .unwrap()
         .unwrap();
     assert_eq!((d.event.as_str(), d.app_id), ("ping", APP_B));
+}
+
+#[test]
+fn a_hook_may_subscribe_to_the_spec_events_that_repositories_or_organizations_receive() {
+    // Given
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../spec/openapi/api.github.com.json"
+    );
+    let spec: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let not_for_repositories_or_organizations = [
+        "deployment_protection_rule",
+        "deployment_review",
+        "github_app_authorization",
+        "installation",
+        "installation_repositories",
+        "installation_target",
+        "marketplace_purchase",
+        "merge_group",
+        "ping",
+        "repository_dispatch",
+        "security_advisory",
+        "sponsorship",
+        "workflow_dispatch",
+    ];
+    let mut want: Vec<String> = spec["x-webhooks"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|w| {
+            w["post"]["x-github"]["subcategory"]
+                .as_str()
+                .unwrap()
+                .replace('-', "_")
+        })
+        .filter(|e| !not_for_repositories_or_organizations.contains(&e.as_str()))
+        .chain(["*".to_owned()])
+        .collect();
+    want.sort_unstable();
+    want.dedup();
+
+    // Then
+    assert_eq!(crate::EVENTS.to_vec(), want);
+    assert!(crate::is_event("custom_property_values"));
+    assert!(!crate::is_event("custom-property-values"));
+    assert!(!crate::is_event("pushes"));
 }

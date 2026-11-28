@@ -31,6 +31,7 @@ pub const WORKFLOW_RUN: &str = "WFR";
 pub const WORKFLOW_JOB: &str = "WFJ";
 pub const RULESET: &str = "RRS";
 pub const MEMBERSHIP: &str = "OM";
+pub const ENVIRONMENT: &str = "EN";
 
 /// One element of a node ID payload.
 #[derive(Debug, Clone, PartialEq, Eq)]

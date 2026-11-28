@@ -15,6 +15,7 @@ use crate::shared::{ISSUES_READ, READ, full_name};
 
 const PULLS_READ: Requirement = Requirement {
     any_of: &[Grant::read("pull_requests")],
+    all_of: &[],
     ..ISSUES_READ
 };
 
@@ -242,20 +243,16 @@ fn order_issues(ctx: &Ctx<'_>, issues: &mut [&Arc<Issue>], order: &IssueOrder) {
     }
 }
 
-fn comment_author(ctx: &Ctx<'_>, obj: &Obj, _: &Args) -> Result<Resolved, GqlError> {
-    let c = obj.get::<IssueComment>()?;
-    Ok(ctx
-        .tx
-        .table::<Accounts>()
-        .get(c.user_id)
-        .map_or(Resolved::Null, |a| Resolved::Object {
-            type_name: match a.kind {
-                AccountKind::User => "User",
-                AccountKind::Bot => "Bot",
-                AccountKind::Organization => "Organization",
-            },
-            value: Arc::<hubdouble_model::Account>::clone(a),
-        }))
+fn author(ctx: &Ctx<'_>, user_id: i64) -> Resolved {
+    let a = ctx.tx.table::<Accounts>().author(user_id);
+    Resolved::Object {
+        type_name: match a.kind {
+            AccountKind::User => "User",
+            AccountKind::Bot => "Bot",
+            AccountKind::Organization => "Organization",
+        },
+        value: Arc::<hubdouble_model::Account>::clone(a),
+    }
 }
 
 fn repository_issue(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
@@ -325,7 +322,12 @@ pub(crate) fn register(gql: &mut Registry) {
     gql.field("IssueComment", "lastEditedAt", |_, o, _| {
         leaf(&o.get::<IssueComment>()?.last_edited_at)
     });
-    gql.field("IssueComment", "author", comment_author);
+    gql.field("IssueComment", "author", |cx, o, _| {
+        Ok(author(cx, o.get::<IssueComment>()?.user_id))
+    });
+    gql.field("Issue", "author", |cx, o, _| {
+        Ok(author(cx, o.get::<Issue>()?.user_id))
+    });
     gql.field("IssueComment", "issue", |cx, o, _| {
         let issue = issue_of_comment(cx, o.get::<IssueComment>()?)?;
         let requirement = if issue.pull.is_some() {

@@ -14,24 +14,28 @@ use serde_json::{Map, Value};
 
 pub(crate) const READ: Requirement = Requirement {
     any_of: &[Grant::read("issues"), Grant::read("pull_requests")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
 
 pub(crate) const WRITE: Requirement = Requirement {
     any_of: &[Grant::write("issues"), Grant::write("pull_requests")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
 
 pub(crate) const ISSUES_READ: Requirement = Requirement {
     any_of: &[Grant::read("issues")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
 
 pub(crate) const ISSUES_WRITE: Requirement = Requirement {
     any_of: &[Grant::write("issues")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
@@ -80,6 +84,10 @@ pub(crate) fn user(tx: &Tx, urls: &Urls, id: i64) -> Option<r::SimpleUser> {
         .map(|a| r::SimpleUser::new(urls, a))
 }
 
+pub(crate) fn author(tx: &Tx, urls: &Urls, id: i64) -> r::SimpleUser {
+    r::SimpleUser::new(urls, tx.table::<Accounts>().author(id))
+}
+
 pub(crate) use hubdouble_api_pulls::association;
 
 pub(crate) fn integration(tx: &Tx, urls: &Urls, app_id: Option<i64>) -> Option<r::Integration> {
@@ -122,12 +130,12 @@ pub fn issue_view(tx: &Tx, urls: &Urls, repo: &Repo, full: &str, i: &Issue) -> r
         urls,
         i,
         full,
-        user(tx, urls, i.user_id),
+        Some(author(tx, urls, i.user_id)),
         labels_of(tx, urls, full, &i.label_ids),
         assignees,
     );
     v.comments = count(tx.table::<IssueComments>().children(i.id).count());
-    v.closed_by = i.closed_by.and_then(|id| user(tx, urls, id));
+    v.closed_by = i.closed_by.map(|id| author(tx, urls, id));
     v.author_association = association(tx, repo, i.user_id);
     v.performed_via_github_app = integration(
         tx,
@@ -159,7 +167,7 @@ pub fn comment_view(
         full,
         issue.number,
         issue.pull.is_some(),
-        user(tx, urls, c.user_id),
+        Some(author(tx, urls, c.user_id)),
     );
     v.author_association = association(tx, repo, c.user_id);
     v.performed_via_github_app = integration(tx, urls, c.via_app_id);
@@ -195,14 +203,14 @@ pub(crate) fn pull_view(
 ) -> Option<r::PullRequest> {
     let p = i.pull.as_ref()?;
     let accounts = tx.table::<Accounts>();
-    let author = accounts.get(i.user_id)?;
+    let opener = accounts.author(i.user_id);
     let mut v = r::PullRequest::new(
         urls,
         i,
         full,
-        Some(r::SimpleUser::new(urls, author)),
-        branch(tx, urls, &p.head, author),
-        branch(tx, urls, &p.base, author),
+        Some(r::SimpleUser::new(urls, opener)),
+        branch(tx, urls, &p.head, opener),
+        branch(tx, urls, &p.base, opener),
     )?;
     v.labels = labels_of(tx, urls, full, &i.label_ids);
     v.assignees = i
@@ -224,7 +232,7 @@ pub(crate) fn pull_view(
             Some(r::TeamSimple::new(urls, t, accounts.get(t.org_id)?))
         })
         .collect();
-    v.merged_by = p.merged_by.and_then(|id| user(tx, urls, id));
+    v.merged_by = p.merged_by.map(|id| author(tx, urls, id));
     v.comments = count(tx.table::<IssueComments>().children(i.id).count());
     v.author_association = association(tx, repo, i.user_id);
     v.mergeable_state = hubdouble_api_pulls::mergeable_state(tx, i);

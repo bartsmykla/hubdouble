@@ -312,6 +312,14 @@ impl Inner {
             hubdouble_auth::authenticate(tx, services.clock.as_ref(), r.headers)?
         };
         who.of(&actor);
+        if r.entry.requirement.scope != hubdouble_model::Scope::App {
+            hubdouble_auth::accepts_token(
+                &actor,
+                r.entry.tokens.installation,
+                r.entry.tokens.user_to_server,
+            )
+            .map_err(|e| e.with_docs(r.entry.documentation_url))?;
+        }
         let served: &[&str] = if r.entry.operation_id == "repos/get-release-asset" {
             &["application/octet-stream"]
         } else {
@@ -341,7 +349,13 @@ impl Inner {
             Resolved::Org(org) => (Target::Org(org), None),
             Resolved::None => (Target::None, None),
         };
-        hubdouble_auth::authorize(tx, &actor, &r.entry.requirement, target)?;
+        hubdouble_auth::authorize_operation(
+            tx,
+            &actor,
+            &r.entry.requirement,
+            target,
+            r.entry.public_read,
+        )?;
         if let (Access::Write(_), Some(repo)) = (&access, repo)
             && repo.archived
             && !ARCHIVED_WRITES.contains(&r.entry.operation_id)

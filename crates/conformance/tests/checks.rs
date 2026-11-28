@@ -730,7 +730,7 @@ async fn a_suite_whose_runs_are_all_skipped_concludes_skipped() {
         }
         suites.push((head, suite));
     }
-    let all = drain(&server).await;
+    let all = server.deliveries_in_queue_order().await;
     // Then the suite concludes skipped only when every run is skipped, as live GitHub answers
     for ((head, suite), (_, _, want)) in suites.iter().zip(cases) {
         let listed = checked(
@@ -878,7 +878,7 @@ async fn statuses_list_and_combine_as_the_client_reads_them() {
         200,
         "repos/get-combined-status-for-ref",
     );
-    let all = drain(&server).await;
+    let all = server.deliveries_in_queue_order().await;
     // Then
     assert_eq!(first["state"], "pending");
     assert_eq!(first["context"], "agent/run");
@@ -993,6 +993,28 @@ async fn status_check_rollup_reports_the_worst_latest_context() {
     assert_eq!(success, json!({"state": "SUCCESS"}));
     assert_eq!(pending, json!({"state": "PENDING"}));
     assert_eq!(failure, json!({"state": "FAILURE"}));
+}
+
+#[tokio::test]
+async fn an_anonymous_caller_reads_a_check_run_of_a_public_repository() {
+    // Given a check run on the public acme/public
+    let server = start(vec![]).await;
+    let head = sha(&server, "main");
+    let created = checked(
+        &app_client(&server)
+            .post(RUNS, &json!({"name": "build", "head_sha": head}))
+            .await,
+        201,
+        "checks/create",
+    );
+
+    // When a caller without a token reads it
+    let read = GoGithub::enterprise(&server)
+        .get(&format!("{RUNS}/{}", created["id"]))
+        .await;
+
+    // Then GitHub serves it, as rest-permissions.tsv marks checks/get public_read=yes
+    assert_eq!(checked(&read, 200, "checks/get")["id"], created["id"]);
 }
 
 #[tokio::test]

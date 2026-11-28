@@ -1,3 +1,4 @@
+mod archive;
 mod contract;
 mod diff;
 mod encode;
@@ -10,6 +11,7 @@ mod refs;
 mod sign;
 mod tree;
 
+pub use archive::{Archive, ArchiveFormat, archive_commit};
 pub use contract::*;
 pub use tree::{MAX_TREE_DEPTH, check_tree_depth};
 

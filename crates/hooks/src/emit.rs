@@ -1,15 +1,16 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use hubdouble_model::{Access, AccountKind, App, Event, Installation, RepositorySelection};
+use hubdouble_model::{Access, AccountKind, App, Event, Installation, Repo, RepositorySelection};
 use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
 use hubdouble_store::{Accounts, Apps, Deliveries, Installations, OutboxEntry, Repos, Tx, TxMut};
 use serde::ser::SerializeMap as _;
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
+use crate::hook::ORGANIZATION_EVENTS;
 use crate::push::PushRepository;
-use crate::{HooksError, Injection};
+use crate::{HookOwner, Hooks, HooksError, Injection, LatestPush, LatestPushes};
 
 const ALWAYS_DELIVERED: [&str; 4] = [
     "installation",
@@ -51,7 +52,7 @@ fn needs(event: &str, action: Option<&str>) -> Option<Need> {
     };
     Some(match event {
         _ if ALWAYS_DELIVERED.contains(&event) => Need::Nothing,
-        "repository" | "label" => Need::Nothing,
+        "repository" | "label" | "public" => Need::Nothing,
         "push" | "create" | "delete" | "release" | "workflow_dispatch" => {
             Need::Permission("contents", Access::Read)
         }
@@ -85,7 +86,26 @@ fn covers(i: &Installation, repo_id: i64) -> bool {
     i.repository_selection == RepositorySelection::All || i.repo_ids.contains(&repo_id)
 }
 
+fn scope<'t>(tx: &'t Tx, e: &Event) -> Option<(Option<&'t Arc<Repo>>, i64)> {
+    let repo = match e.repo_id {
+        Some(id) => Some(tx.table::<Repos>().get(id)?),
+        None => None,
+    };
+    let repo = repo.filter(|_| !ORGANIZATION_EVENTS.contains(&e.name));
+    let account = repo.map(|r| r.owner_id).or(e.org_id)?;
+    Some((repo, account))
+}
+
+/// GitHub's `repository` `deleted` event goes to organization hooks only: "GitHub Apps and
+/// repository webhooks will not receive this event."
+fn organization_hooks_only(e: &Event) -> bool {
+    e.name == "repository" && e.action == Some("deleted")
+}
+
 pub(crate) fn recipients(tx: &Tx, e: &Event) -> Vec<(i64, Option<Arc<Installation>>)> {
+    if organization_hooks_only(e) {
+        return Vec::new();
+    }
     let apps = tx.table::<Apps>();
     let wants = |app_id: i64| {
         apps.get(app_id)
@@ -113,11 +133,7 @@ pub(crate) fn recipients(tx: &Tx, e: &Event) -> Vec<(i64, Option<Arc<Installatio
             Vec::new()
         };
     }
-    let repo = e.repo_id.and_then(|id| tx.table::<Repos>().get(id));
-    if e.repo_id.is_some() && repo.is_none() {
-        return Vec::new();
-    }
-    let Some(account) = repo.map(|r| r.owner_id).or(e.org_id) else {
+    let Some((repo, account)) = scope(tx, e) else {
         return Vec::new();
     };
     tx.table::<Installations>()
@@ -130,6 +146,35 @@ pub(crate) fn recipients(tx: &Tx, e: &Event) -> Vec<(i64, Option<Arc<Installatio
                 && wants(i.app_id)
         })
         .map(|i| (i.app_id, Some(i.clone())))
+        .collect()
+}
+
+fn hooks_get(e: &Event) -> bool {
+    e.app_id.is_none()
+        && e.installation_id.is_none()
+        && !ALWAYS_DELIVERED.contains(&e.name)
+        && crate::hook::is_event(e.name)
+        && match e.name {
+            "check_suite" => e.action == Some("completed"),
+            "check_run" => matches!(e.action, Some("created" | "completed")),
+            _ => true,
+        }
+}
+
+pub(crate) fn hook_recipients(tx: &Tx, e: &Event) -> Vec<i64> {
+    let Some(hooks) = tx.try_table::<Hooks>().filter(|_| hooks_get(e)) else {
+        return Vec::new();
+    };
+    let Some((repo, account)) = scope(tx, e) else {
+        return Vec::new();
+    };
+    repo.filter(|_| !organization_hooks_only(e))
+        .map(|r| HookOwner::Repo(r.id))
+        .into_iter()
+        .chain([HookOwner::Org(account)])
+        .flat_map(|owner| hooks.children(owner.id()).filter(move |h| h.owner == owner))
+        .filter(|h| h.active && h.subscribes(e.name))
+        .map(|h| h.id)
         .collect()
 }
 
@@ -222,9 +267,12 @@ fn rendered(tx: &Tx, e: &Subjects, p: &Map<String, Value>) -> Vec<(&'static str,
         ));
     }
     if absent("sender")
-        && let Some(sender) = e.sender.and_then(|id| accounts.get(id))
+        && let Some(sender) = e.sender
     {
-        out.push(("sender", Rendered::Sender(SimpleUser::new(&urls, sender))));
+        out.push((
+            "sender",
+            Rendered::Sender(SimpleUser::new(&urls, accounts.author(sender))),
+        ));
     }
     out
 }
@@ -278,14 +326,26 @@ fn webhook_form(p: &mut Map<String, Value>) {
 }
 
 pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
+    crate::activity::record(tx, &e);
     let recipients = recipients(tx, &e);
-    if recipients.is_empty() {
+    let hooks = hook_recipients(tx, &e);
+    let latest = e
+        .repo_id
+        .filter(|_| e.name == "push" && tx.try_table::<LatestPushes>().is_some());
+    if recipients.is_empty() && hooks.is_empty() && latest.is_none() {
         return;
     }
     let mut payload = std::mem::take(&mut e.payload);
     webhook_form(&mut payload);
     if let Some(action) = e.action.filter(|_| !payload.contains_key("action")) {
         payload.insert("action".to_owned(), Value::from(action));
+    }
+    if let Some(repo_id) = latest {
+        let _ = tx.table_mut::<LatestPushes>().replace(LatestPush {
+            repo_id,
+            sender_id: e.sender_id,
+            payload: payload.clone(),
+        });
     }
     let subjects = Subjects {
         repo: e.repo_id,
@@ -299,6 +359,7 @@ pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
         let body = payload_body(&mut buffer, &payload, &rendered, installation.as_deref());
         tx.push_outbox(OutboxEntry {
             app_id,
+            hook_id: None,
             installation_id: installation.map(|i| i.id),
             repo_id: e.repo_id,
             event: e.name.into(),
@@ -307,6 +368,79 @@ pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
             redelivery_of: None,
         });
     }
+    for hook_id in hooks {
+        let body = payload_body(&mut buffer, &payload, &rendered, None);
+        tx.push_outbox(OutboxEntry {
+            app_id: 0,
+            hook_id: Some(hook_id),
+            installation_id: None,
+            repo_id: e.repo_id,
+            event: e.name.into(),
+            action: e.action.map(Into::into),
+            payload: body,
+            redelivery_of: None,
+        });
+    }
+}
+
+pub(crate) fn deliver_to_hook(
+    tx: &mut TxMut<'_>,
+    hook_id: i64,
+    event: &'static str,
+    sender_id: Option<i64>,
+    payload: &Map<String, Value>,
+) -> Result<(), HooksError> {
+    let hook = tx
+        .try_table::<Hooks>()
+        .and_then(|hooks| hooks.get(hook_id))
+        .cloned()
+        .ok_or(HooksError::UnknownHook(hook_id))?;
+    let (repo, org) = match hook.owner {
+        HookOwner::Repo(id) => (Some(id), None),
+        HookOwner::Org(id) => (None, Some(id)),
+    };
+    let subjects = Subjects {
+        repo,
+        org,
+        sender: sender_id,
+        push: event == "push",
+    };
+    let rendered = rendered(tx, &subjects, payload);
+    let body = payload_body(&mut Vec::new(), payload, &rendered, None);
+    tx.push_outbox(OutboxEntry {
+        app_id: 0,
+        hook_id: Some(hook_id),
+        installation_id: None,
+        repo_id: repo,
+        event: event.into(),
+        action: payload
+            .get("action")
+            .and_then(Value::as_str)
+            .map(|a| a.to_owned().into()),
+        payload: body,
+        redelivery_of: None,
+    });
+    Ok(())
+}
+
+pub(crate) fn ping_hook(
+    tx: &mut TxMut<'_>,
+    hook_id: i64,
+    sender_id: Option<i64>,
+) -> Result<(), HooksError> {
+    let mut hook = tx
+        .try_table::<Hooks>()
+        .and_then(|hooks| hooks.get(hook_id))
+        .and_then(|hook| hook.render(tx))
+        .ok_or(HooksError::UnknownHook(hook_id))?;
+    if let Some(last) = hook.get_mut("last_response") {
+        *last = crate::hook::unused_response();
+    }
+    let mut payload = Map::new();
+    payload.insert("zen".to_owned(), Value::from(ZEN));
+    payload.insert("hook_id".to_owned(), Value::from(hook_id));
+    payload.insert("hook".to_owned(), hook);
+    deliver_to_hook(tx, hook_id, "ping", sender_id, &payload)
 }
 
 pub(crate) fn inject(tx: &mut TxMut<'_>, i: Injection) -> Result<(), HooksError> {
@@ -345,6 +479,7 @@ pub(crate) fn inject(tx: &mut TxMut<'_>, i: Injection) -> Result<(), HooksError>
     );
     tx.push_outbox(OutboxEntry {
         app_id: i.app_id,
+        hook_id: None,
         installation_id: i.installation_id,
         repo_id: i.repo_id,
         event: i.event.into(),
@@ -387,6 +522,7 @@ pub(crate) fn ping(tx: &mut TxMut<'_>, app_id: i64) {
     });
     tx.push_outbox(OutboxEntry {
         app_id,
+        hook_id: None,
         installation_id: None,
         repo_id: None,
         event: "ping".into(),
@@ -406,17 +542,18 @@ fn body(buffer: &mut Vec<u8>, payload: &impl Serialize) -> Bytes {
 
 pub(crate) fn redeliver(
     tx: &mut TxMut<'_>,
-    app_id: i64,
+    hook_id: i64,
     delivery_id: i64,
 ) -> Result<(), HooksError> {
     let d = tx
         .table::<Deliveries>()
         .get(delivery_id)
-        .filter(|d| d.app_id == app_id && !d.request.payload.is_empty())
+        .filter(|d| d.hook_id == hook_id && !d.request.payload.is_empty())
         .cloned()
         .ok_or(HooksError::UnknownDelivery(delivery_id))?;
     tx.push_outbox(OutboxEntry {
-        app_id,
+        app_id: d.app_id,
+        hook_id: (d.app_id != d.hook_id).then_some(d.hook_id),
         installation_id: d.installation_id,
         repo_id: d.repo_id,
         event: d.event.clone().into(),

@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
-use hubdouble_auth::Actor;
-use hubdouble_model::{MembershipState, OrgRole, Repo, RepoRole, Team, TeamPrivacy, TeamRole};
-use hubdouble_store::{Memberships, Teams, Tx};
+use hubdouble_auth::{Actor, Target};
+use hubdouble_model::{
+    Access, Account, MembershipState, OrgRole, Repo, RepoRole, Team, TeamPrivacy, TeamRole,
+    TokenKind,
+};
+use hubdouble_store::{Installations, Memberships, Teams, Tx};
 
 pub fn org_role(tx: &Tx, org_id: i64, user_id: i64) -> Option<OrgRole> {
     tx.table::<Memberships>()
@@ -49,8 +52,23 @@ impl TeamViewer {
     #[must_use]
     pub fn new(tx: &Tx, actor: &Actor, org_id: i64) -> Self {
         match actor {
-            Actor::Installation { installation, .. } if installation.account_id == org_id => {
+            Actor::Installation {
+                installation,
+                token,
+                ..
+            } if installation.account_id == org_id
+                && reads(installation.permissions.get("members"))
+                && (token.permissions.is_empty() || reads(token.permissions.get("members"))) =>
+            {
                 Self::Admin
+            }
+            Actor::User { token, .. }
+                if token.kind == TokenKind::User
+                    && token
+                        .app_id
+                        .is_some_and(|app| !reads_members(tx, app, org_id)) =>
+            {
+                Self::Outside
             }
             Actor::User { user, .. } => match org_role(tx, org_id, user.id) {
                 Some(OrgRole::Admin) => Self::Admin,
@@ -58,6 +76,17 @@ impl TeamViewer {
                 None => Self::Outside,
             },
             _ => Self::Outside,
+        }
+    }
+
+    /// A viewer for a caller that has not passed the org's team read check: `Outside` unless the
+    /// caller may list the org's teams, SSO and token scopes included.
+    #[must_use]
+    pub fn authorized(tx: &Tx, actor: &Actor, org: &Arc<Account>) -> Self {
+        match hubdouble_auth::authorize_operation(tx, actor, &crate::TEAMS, Target::Org(org), false)
+        {
+            Ok(()) => Self::new(tx, actor, org.id),
+            Err(_) => Self::Outside,
         }
     }
 
@@ -73,12 +102,23 @@ impl TeamViewer {
     }
 }
 
+fn reads_members(tx: &Tx, app_id: i64, org_id: i64) -> bool {
+    tx.table::<Installations>()
+        .of(app_id, org_id)
+        .filter(|i| i.suspended_at.is_none())
+        .is_some_and(|i| reads(i.permissions.get("members")))
+}
+
+fn reads(access: Option<&Access>) -> bool {
+    access.is_some_and(|access| *access >= Access::Read)
+}
+
 pub fn pushes(tx: &Tx, actor: &Actor, repo: &Repo) -> bool {
     match actor {
         Actor::User { user, .. } => {
             hubdouble_auth::repo_role(tx, user.id, repo) >= Some(RepoRole::Write)
         }
-        Actor::Installation { .. } => true,
+        Actor::Installation { .. } => hubdouble_auth::installation_covers(actor, repo),
         Actor::Anonymous | Actor::App { .. } => false,
     }
 }

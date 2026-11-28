@@ -24,12 +24,11 @@ pub(crate) fn run(
     };
     let mut view = hubdouble_render::WorkflowRun::new(urls, run, repository, head_repository);
     let accounts = tx.table::<Accounts>();
-    view.actor = accounts
-        .get(run.actor_id)
-        .map(|account| SimpleUser::new(urls, account));
-    view.triggering_actor = accounts
-        .get(run.triggering_actor_id)
-        .map(|account| SimpleUser::new(urls, account));
+    view.actor = Some(SimpleUser::new(urls, accounts.author(run.actor_id)));
+    view.triggering_actor = Some(SimpleUser::new(
+        urls,
+        accounts.author(run.triggering_actor_id),
+    ));
     view.run_started_at = Some(run.run_started_at.unwrap_or(run.created_at));
     view.head_commit = commit(tx, git, run);
     if !exclude_pulls {

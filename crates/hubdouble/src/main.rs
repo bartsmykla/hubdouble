@@ -12,8 +12,7 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static ALLOCATOR: MiMalloc = MiMalloc;
 
-const USAGE: &str =
-    "usage: hubdouble [serve]\n       hubdouble coverage [--inventory <rest-routes.txt>]\n";
+const USAGE: &str = "usage: hubdouble [serve]\n       hubdouble coverage [--missing] [--inventory <rest-routes.txt>]\n";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -70,6 +69,10 @@ async fn shutdown_signal() {
 }
 
 fn coverage(args: &[String]) -> Result<bool, String> {
+    let (missing_list, args) = match args {
+        [flag, rest @ ..] if flag == "--missing" => (true, rest),
+        _ => (false, args),
+    };
     let inventory = match args {
         [] => None,
         [flag, path] if flag == "--inventory" => Some(path),
@@ -78,6 +81,9 @@ fn coverage(args: &[String]) -> Result<bool, String> {
     let registries = Registries::new(hubdouble_api::register_all);
     let rest = &registries.rest;
     let mut report = table_report(rest);
+    if missing_list {
+        report.push_str(&missing_report(rest));
+    }
     let mut complete = true;
     if let Some(path) = inventory {
         let text = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
@@ -113,6 +119,25 @@ fn table_report(rest: &Registry) -> String {
         let _ = writeln!(out, "  {category}: {done}/{all}");
     }
     let _ = writeln!(out, "extra routes: {extras}");
+    out
+}
+
+fn missing_report(rest: &Registry) -> String {
+    let mut by_category: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for op in rest.operations().filter(|op| !op.extra && !op.registered) {
+        by_category
+            .entry(op.category)
+            .or_default()
+            .push(op.operation_id);
+    }
+    let mut out = String::from("missing:\n");
+    for (category, mut ids) in by_category {
+        ids.sort_unstable();
+        let _ = writeln!(out, "  {category}:");
+        for id in ids {
+            let _ = writeln!(out, "    {id}");
+        }
+    }
     out
 }
 
@@ -196,6 +221,38 @@ mod tests {
 
         // Then
         assert_eq!(missing, 0, "{report}");
+    }
+
+    #[test]
+    fn the_committed_coverage_report_is_current() {
+        // Given the report that `hubdouble coverage --missing` prints for this build
+        let rest = Registries::new(hubdouble_api::register_all).rest;
+        let report = table_report(&rest) + &missing_report(&rest);
+
+        // When it is compared with docs/coverage.txt, which CI's ratchet reads from both sides
+        let committed = include_str!("../../../docs/coverage.txt");
+
+        // Then they are the same, so the committed list of missing operations is never stale
+        assert_eq!(committed, report, "run `mise run gen`");
+    }
+
+    #[test]
+    fn a_missing_operation_is_listed_under_its_category() {
+        // Given a registry with nothing registered
+        let rest = Registry::new();
+
+        // When the missing operations are listed
+        let report = missing_report(&rest);
+
+        // Then every unregistered operation of the pinned bundle appears under its category
+        assert!(
+            report.contains("\n  rate-limit:\n    rate-limit/get\n"),
+            "{report}"
+        );
+        assert_eq!(
+            report.lines().filter(|l| l.starts_with("    ")).count(),
+            1281
+        );
     }
 
     #[test]

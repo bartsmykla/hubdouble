@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use hubdouble_auth::{REFRESH_TOKEN_TTL, USER_TOKEN_TTL};
 use hubdouble_model::{Account, AccountKind, ApiError, Timestamp, Token, TokenKind};
-use hubdouble_store::{Accounts, Counters, Entity, Rows, StoreBuilder, Tokens, Tx, TxMut};
+use hubdouble_store::{Accounts, Counters, Deleted, Entity, Rows, StoreBuilder, Tokens, Tx, TxMut};
 use rand::{RngCore, rngs::OsRng};
 
 pub(crate) const DEVICE_CODE_TTL: i64 = 900;
@@ -90,7 +90,23 @@ pub(crate) type DefaultUsers = Rows<DefaultUser>;
 pub(crate) fn register_tables(b: &mut StoreBuilder) {
     b.register_table::<DeviceCodes>();
     b.register_table::<SpentCodes>();
-    b.register_table::<DefaultUsers>();
+    b.register_table::<DefaultUsers>().on_delete(forget);
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a deletion subscriber returns a Result"
+)]
+fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    if let Deleted::Account(account) = deleted {
+        let id = account.id;
+        tx.table_mut::<DefaultUsers>()
+            .remove_where(|d| d.user_id == id);
+        let app = account.app_id;
+        tx.table_mut::<DeviceCodes>()
+            .remove_where(|c| c.decision == Some(Decision::Approved(id)) || Some(c.app_id) == app);
+    }
+    Ok(())
 }
 
 pub(crate) fn set_default_user(tx: &mut TxMut<'_>, user_id: i64) -> Result<(), ApiError> {

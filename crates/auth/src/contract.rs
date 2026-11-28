@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use http::HeaderMap;
-use hubdouble_model::{Account, ApiError, App, Clock, Installation, Repo, Requirement, Token};
+use hubdouble_model::{
+    Account, ApiError, App, Clock, Installation, Repo, Requirement, Token, TokenKind,
+};
 use hubdouble_store::Tx;
 
 /// Who a request acts as, resolved once per request from its `Authorization` header.
@@ -115,7 +117,68 @@ pub fn authorize(
     req: &Requirement,
     target: Target<'_>,
 ) -> Result<(), ApiError> {
-    crate::check::authorize(tx, actor, req, target, &tx.config().base_url)
+    crate::check::authorize(tx, actor, req, target, &tx.config().base_url, true)
+}
+
+/// [`authorize`] for a REST operation whose `public_read` flag GitHub's permission table gives.
+/// With `public_read` false, a read of public data passes only with the grant: an anonymous
+/// caller, an installation that does not cover the target and a user token of an App not
+/// installed on it are refused, as they are for any other read.
+///
+/// # Errors
+///
+/// As [`authorize`].
+pub fn authorize_operation(
+    tx: &Tx,
+    actor: &Actor,
+    req: &Requirement,
+    target: Target<'_>,
+    public_read: bool,
+) -> Result<(), ApiError> {
+    crate::check::authorize(tx, actor, req, target, &tx.config().base_url, public_read)
+}
+
+/// Whether the actor is an installation that covers the repository, through its account, its
+/// repository selection and the token's own repository list, and is not suspended.
+#[must_use]
+pub fn installation_covers(actor: &Actor, repo: &Repo) -> bool {
+    match actor {
+        Actor::Installation {
+            token,
+            installation,
+            ..
+        } => crate::check::covers(installation, Some(token), repo),
+        _ => false,
+    }
+}
+
+/// Refuses a token of a family that GitHub's docs do not list for the operation: an installation
+/// token where `installation` is false, and a GitHub App user token where `user_to_server` is
+/// false. Classic and `OAuth` App tokens and every other actor pass.
+///
+/// # Errors
+///
+/// `403` `Resource not accessible by integration`, which GitHub answers to a token family that
+/// the operation does not accept.
+pub fn accepts_token(
+    actor: &Actor,
+    installation: bool,
+    user_to_server: bool,
+) -> Result<(), ApiError> {
+    let accepted = match actor {
+        Actor::Installation { .. } => installation,
+        Actor::User { token, .. } if token.kind == TokenKind::User && token.app_id.is_some() => {
+            user_to_server
+        }
+        _ => true,
+    };
+    if accepted {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(
+            "Resource not accessible by integration",
+        ))
+    }
 }
 
 /// Whether the actor can see the repository, for GraphQL's per-object check. A public

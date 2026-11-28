@@ -7,7 +7,7 @@ use hubdouble_model::{
     Timestamp, node_id,
 };
 use hubdouble_rest::Params;
-use hubdouble_store::{Repos, Teams, Tx, TxMut};
+use hubdouble_store::{Deleted, Repos, Teams, Tx, TxMut};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
 
@@ -266,32 +266,28 @@ fn edit(tx: &mut TxMut<'_>, params: &Params, now: Timestamp, body: Value) -> Res
     Ok(())
 }
 
-fn delete(
-    tx: &mut TxMut<'_>,
-    params: &Params,
-    now: Timestamp,
-    body: Value,
-) -> Result<(), ApiError> {
+fn delete(tx: &mut TxMut<'_>, params: &Params, _: Timestamp, body: Value) -> Result<(), ApiError> {
     let input: Sender = decode(body)?;
     let (org, team) = lookup(tx, params)?;
     let source = events::Source {
         org: &org,
         sender: sender(tx, &org, input.sender.as_deref())?,
     };
-    let children: Vec<_> = tx
-        .table::<Teams>()
-        .children(org.id)
-        .filter(|child| child.parent_id == Some(team.id))
-        .cloned()
-        .collect();
-    for child in children {
-        let mut updated = (*child).clone();
-        updated.parent_id = None;
-        updated.updated_at = now;
-        tx.table_mut::<Teams>().replace(updated)?;
+    let mut gone = vec![team];
+    let mut next = 0;
+    while let Some(parent) = gone.get(next).map(|t| t.id) {
+        gone.extend(
+            tx.table::<Teams>()
+                .children(org.id)
+                .filter(|t| t.parent_id == Some(parent))
+                .cloned(),
+        );
+        next += 1;
     }
-    tx.table_mut::<Teams>().remove(team.id);
-    events::team(tx, &source, "deleted", &team, None, None);
+    for team in &gone {
+        events::team(tx, &source, "deleted", team, None, None);
+    }
+    tx.delete(&Deleted::Team(gone[0].clone()))?;
     Ok(())
 }
 

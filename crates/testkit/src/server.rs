@@ -8,7 +8,7 @@ use hubdouble_admin::Registrar;
 use hubdouble_git::GitBuilder;
 use hubdouble_model::{Config, ManualClock, Timestamp};
 use hubdouble_server::{Registries, Server};
-use hubdouble_store::StoreBuilder;
+use hubdouble_store::{Deliveries, StoreBuilder};
 use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -16,7 +16,7 @@ use tokio::sync::oneshot;
 use crate::client::{Answer, send};
 use crate::coverage::Recorder;
 use crate::fixture;
-use crate::receiver::Receiver;
+use crate::receiver::{Delivery, Receiver};
 
 /// The admin token every test server uses.
 pub const ADMIN_TOKEN: &str = "hubdouble-test-admin";
@@ -31,7 +31,7 @@ pub struct Builder {
 }
 
 impl Builder {
-    /// Replaces the phase 0 frame (`hubdouble_admin::register`) with `f`, which then registers
+    /// Replaces the admin frame (`hubdouble_admin::register`) with `f`, which then registers
     /// the admin frame itself, as `hubdouble_api::register_all` does for the whole server.
     #[must_use]
     pub fn frame(mut self, f: fn(&mut Registrar<'_>)) -> Builder {
@@ -47,7 +47,7 @@ impl Builder {
         self
     }
 
-    /// Adds a registration after the phase 0 frame: the track under test or a stand-in from
+    /// Adds a registration after the admin frame: the API crate under test or a stand-in from
     /// [`crate::standins`]. They run in the order added.
     #[must_use]
     pub fn register(mut self, f: fn(&mut Registrar<'_>)) -> Builder {
@@ -223,6 +223,32 @@ impl TestServer {
             request = request.json(body);
         }
         send(request).await
+    }
+
+    /// Drains the webhook queue and returns every delivery received, in the order the deliveries
+    /// were queued. Parallel workers deliver in any order, and GitHub promises no arrival order.
+    ///
+    /// # Panics
+    ///
+    /// When the drain fails, or a delivery is not in the delivery log.
+    pub async fn deliveries_in_queue_order(&self) -> Vec<Delivery> {
+        let drained = self.admin(Method::POST, "hooks/drain", None).await;
+        assert_eq!(drained.status, http::StatusCode::NO_CONTENT);
+        let mut received = self.receiver.received().await;
+        let queued: HashMap<String, i64> = self
+            .server
+            .services()
+            .store
+            .view(|tx| {
+                Ok(tx
+                    .table::<Deliveries>()
+                    .iter()
+                    .map(|d| (d.guid.clone(), d.id))
+                    .collect())
+            })
+            .unwrap_or_else(|e| panic!("read the delivery log: {e:?}"));
+        received.sort_by_key(|d| queued[d.header("x-github-delivery")]);
+        received
     }
 }
 

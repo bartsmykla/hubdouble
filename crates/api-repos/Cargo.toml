@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-api-repos"
-description = "T10: Repositories, rules and releases"
+description = "Repositories, rules and releases"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,6 +14,7 @@ http.workspace = true
 http-body-util.workspace = true
 hubdouble-admin.workspace = true
 hubdouble-api-actions.workspace = true
+hubdouble-api-apps.workspace = true
 hubdouble-api-gitdata.workspace = true
 hubdouble-auth.workspace = true
 hubdouble-git.workspace = true

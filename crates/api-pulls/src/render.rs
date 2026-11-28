@@ -34,11 +34,10 @@ pub(crate) fn pull(
     full: &str,
 ) -> Result<PullRequest, ApiError> {
     let p = state::pull(issue)?;
-    let base = branch(tx, urls, &p.base, issue.user_id)?;
-    let head = branch(tx, urls, &p.head, issue.user_id)?;
-    let Some(mut answer) =
-        PullRequest::new(urls, issue, full, user(tx, urls, issue.user_id), head, base)
-    else {
+    let base = branch(tx, urls, &p.base, issue.user_id);
+    let head = branch(tx, urls, &p.head, issue.user_id);
+    let author = SimpleUser::new(urls, tx.table::<Accounts>().author(issue.user_id));
+    let Some(mut answer) = PullRequest::new(urls, issue, full, Some(author), head, base) else {
         return Err(ApiError::not_found());
     };
     answer.labels = issue
@@ -68,7 +67,9 @@ pub(crate) fn pull(
                 .map(|org| TeamSimple::new(urls, team, org))
         })
         .collect();
-    answer.merged_by = p.merged_by.and_then(|id| user(tx, urls, id));
+    answer.merged_by = p
+        .merged_by
+        .map(|id| SimpleUser::new(urls, tx.table::<Accounts>().author(id)));
     answer.comments = count(tx.table::<IssueComments>().children(issue.id).count());
     answer.review_comments = count(tx.table::<ReviewComments>().children(issue.id).count());
     if let Some(repo) = tx.table::<Repos>().get(issue.repo_id) {
@@ -78,18 +79,17 @@ pub(crate) fn pull(
     Ok(answer)
 }
 
-fn branch(tx: &Tx, urls: &Urls, reference: &PullRef, author: i64) -> Result<PullBranch, ApiError> {
+fn branch(tx: &Tx, urls: &Urls, reference: &PullRef, author: i64) -> PullBranch {
     let repo = reference.repo_id.and_then(|id| tx.table::<Repos>().get(id));
     let owner = tx
         .table::<Accounts>()
-        .get(repo.map_or(author, |repo| repo.owner_id))
-        .ok_or_else(ApiError::not_found)?;
-    Ok(PullBranch::new(
+        .author(repo.map_or(author, |repo| repo.owner_id));
+    PullBranch::new(
         urls,
         reference,
         owner,
         repo.map(|r| Repository::new(urls, r, owner)),
-    ))
+    )
 }
 
 pub(crate) fn detail(

@@ -20,23 +20,26 @@ pub use refs::{denied_workflow, workflow_refusal};
 
 pub(crate) const READ_CONTENTS: Requirement = Requirement {
     any_of: &[Grant::read("contents")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
 
 pub(crate) const WRITE_CONTENTS: Requirement = Requirement {
     any_of: &[Grant::write("contents")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
 
 pub(crate) const WRITE_WORKFLOWS: Requirement = Requirement {
     any_of: &[Grant::write("workflows")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &["workflow"],
 };
 
-/// Registers what T4 owns: the git data, contents, commits, compare, merge and branch
+/// Registers what this crate owns: the git data, contents, commits, compare, merge and branch
 /// operations, and the GraphQL git fields and mutations.
 pub fn register(r: &mut Registrar<'_>) {
     let rest = &mut *r.rest;

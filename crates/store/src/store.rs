@@ -5,11 +5,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
-use hubdouble_model::{ApiError, Config};
+use hubdouble_model::{ApiError, Clock, Config, SystemClock, Timestamp};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 
 use crate::counters::Counters;
+use crate::deletion::{Deleted, DeletionSubscriber};
 use crate::outbox::{Committed, OutboxEntry, OutboxUse};
 
 /// A table the store holds. Each registered type is one table; the store keeps them in a
@@ -45,9 +46,21 @@ type Undo = Box<dyn FnOnce(&mut Tx) + Send>;
 pub struct Tx {
     tables: HashMap<TypeId, Box<dyn AnyTable>>,
     config: Arc<Config>,
+    deletions: Arc<[DeletionSubscriber]>,
+    clock: Arc<dyn Clock>,
 }
 
 impl Tx {
+    pub(crate) fn deletion_subscribers(&self) -> Arc<[DeletionSubscriber]> {
+        Arc::clone(&self.deletions)
+    }
+
+    /// The time of the store's clock, for rows that a transaction stamps without a request.
+    #[must_use]
+    pub fn now(&self) -> Timestamp {
+        self.clock.now()
+    }
+
     #[must_use]
     pub fn config(&self) -> &Config {
         &self.config
@@ -116,6 +129,23 @@ impl TxMut<'_> {
     /// Buffers a webhook delivery; it reaches the outbox only when the transaction commits.
     pub fn push_outbox(&mut self, entry: OutboxEntry) {
         self.work.outbox.push(entry);
+    }
+
+    /// Deletes a repository, a team or an account with every row that names it, in this
+    /// transaction. An account's repositories, an organization's teams, the bot accounts of an
+    /// account's Apps, a team's child teams and a private repository's private forks are
+    /// deleted first, each as a deletion of its own. Then every [`DeletionSubscriber`] runs, in
+    /// registration order, and last the store drops its own rows: the entity, the rows in a
+    /// deleted repository, and the references other rows hold, such as a team's repository
+    /// list, an assignee, a requested reviewer or the head repository of a pull request from a
+    /// deleted fork, which becomes `None`. The other forks of a deleted repository move to its
+    /// parent; those of a deleted root move to [`crate::Repos::heir`], which becomes the root.
+    ///
+    /// # Errors
+    ///
+    /// What a subscriber returns.
+    pub fn delete(&mut self, deleted: &Deleted) -> Result<(), ApiError> {
+        crate::deletion::delete(self, deleted)
     }
 
     /// A shorter-lived handle on the same transaction, for a context that holds a `TxMut` by value.
@@ -197,10 +227,10 @@ impl Outbox {
     }
 
     fn refuse(&mut self, c: Committed, limit: OutboxUse) {
-        let (seq, app) = (c.seq, c.entry.app_id);
+        let (seq, target) = (c.seq, c.entry.hook_id.unwrap_or(c.entry.app_id));
         self.refused_bytes += c.entry.payload.len();
         self.push(c);
-        let held = self.refused.entry(app).or_default();
+        let held = self.refused.entry(target).or_default();
         held.push_back(seq);
         if held.len() > limit.refused_per_app
             && let Some(old) = held.pop_front()
@@ -409,8 +439,9 @@ impl Store {
     /// [`Committed::over_budget`] set. Over-budget entries keep at most `limit.refused_bytes`
     /// payload bytes until they are released with [`Store::release_refused`], taken or not;
     /// past it the oldest of them still in the outbox lose their payload. At most
-    /// `limit.refused_per_app` over-budget entries of one App wait in the outbox; past it the
-    /// oldest of them is dropped and gives back its share.
+    /// `limit.refused_per_app` over-budget entries of one App webhook or one repository or
+    /// organization webhook wait in the outbox; past it the oldest of them is dropped and gives
+    /// back its share.
     /// Without a call there is no bound.
     pub fn limit_outbox(&self, limit: OutboxUse) {
         *self.inner.limit.lock() = limit;
@@ -463,6 +494,8 @@ impl Store {
 /// Registers every table before start; no table is added after [`StoreBuilder::build`].
 pub struct StoreBuilder {
     tables: HashMap<TypeId, Box<dyn AnyTable>>,
+    deletions: Vec<DeletionSubscriber>,
+    clock: Arc<dyn Clock>,
 }
 
 impl Default for StoreBuilder {
@@ -477,6 +510,8 @@ impl StoreBuilder {
     pub fn new() -> StoreBuilder {
         let mut b = StoreBuilder {
             tables: HashMap::new(),
+            deletions: Vec::new(),
+            clock: Arc::new(SystemClock),
         };
         crate::tables::register_frozen(&mut b);
         b
@@ -497,6 +532,19 @@ impl StoreBuilder {
         self
     }
 
+    /// Adds a subscriber that [`TxMut::delete`] runs: the crate that registers a table keyed by
+    /// a repository, team or account removes its rows of the deleted entity there.
+    pub fn on_delete(&mut self, f: DeletionSubscriber) -> &mut StoreBuilder {
+        self.deletions.push(f);
+        self
+    }
+
+    /// The clock of [`Tx::now`]; the system clock by default.
+    pub fn clock(&mut self, clock: Arc<dyn Clock>) -> &mut StoreBuilder {
+        self.clock = clock;
+        self
+    }
+
     /// As [`StoreBuilder::build_with`] with [`Config::default`], for tests.
     #[must_use]
     pub fn build(self) -> Store {
@@ -511,6 +559,8 @@ impl StoreBuilder {
                     tx: Tx {
                         tables: self.tables,
                         config,
+                        deletions: self.deletions.into(),
+                        clock: self.clock,
                     },
                     next_seq: 0,
                 }),

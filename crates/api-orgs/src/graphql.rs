@@ -75,7 +75,8 @@ fn authorize_teams(ctx: &Ctx<'_>, org_id: i64) -> Result<(), GqlError> {
         .table::<Accounts>()
         .get(org_id)
         .ok_or_else(not_found)?;
-    auth::authorize(ctx.tx, ctx.actor, &MEMBERS, AuthTarget::Org(org)).map_err(GqlError::from)
+    auth::authorize_operation(ctx.tx, ctx.actor, &MEMBERS, AuthTarget::Org(org), false)
+        .map_err(GqlError::from)
 }
 
 fn org_teams(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlError> {
@@ -150,7 +151,7 @@ fn collaborators(ctx: &Ctx<'_>, obj: &Obj, args: &Args) -> Result<Resolved, GqlE
         .table::<Repos>()
         .get(obj.get::<Repo>()?.id)
         .ok_or_else(not_found)?;
-    auth::authorize(ctx.tx, ctx.actor, &METADATA, AuthTarget::Repo(repo))?;
+    auth::authorize_operation(ctx.tx, ctx.actor, &METADATA, AuthTarget::Repo(repo), false)?;
     if !hierarchy::pushes(ctx.tx, ctx.actor, repo) {
         return Err(GqlError::new(
             ErrorType::Forbidden,

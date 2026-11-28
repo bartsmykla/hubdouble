@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use hubdouble_model::{Repo, RepositoryPropertyValues, RulesetRepository};
-use hubdouble_store::{Table, Tx, TxMut};
+use hubdouble_model::{ApiError, Repo, RepositoryPropertyValues, RulesetRepository};
+use hubdouble_store::{Deleted, Table, Tx, TxMut};
 
 #[derive(Clone, Default)]
 pub(crate) struct RepositoryProperties(pub(crate) HashMap<i64, RepositoryPropertyValues>);
@@ -16,6 +16,17 @@ pub fn ruleset_repository<'a>(tx: &'a Tx, repo: &'a Repo) -> RulesetRepository<'
             .try_table::<RepositoryProperties>()
             .and_then(|properties| properties.0.get(&repo.id)),
     }
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a deletion subscriber returns a Result"
+)]
+pub(crate) fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    if let Deleted::Repo(repo) = deleted {
+        clear_repository_properties(tx, repo.id);
+    }
+    Ok(())
 }
 
 pub fn clear_repository_properties(tx: &mut TxMut<'_>, repo_id: i64) {

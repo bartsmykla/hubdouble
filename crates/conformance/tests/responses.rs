@@ -913,8 +913,7 @@ async fn an_issue_locks_with_each_reason_and_unlocks_as_github_does() {
         .await;
     let refused = carol.call(Method::PUT, &lock).await;
     let events = alice.get(&format!("{issue}/events")).await.json();
-    server.admin(Method::POST, "hooks/drain", None).await;
-    let received = server.receiver.received().await;
+    let received = server.deliveries_in_queue_order().await;
 
     // And a wrong reason or a reader changes nothing, and each change is an event and a webhook
     assert_eq!(bad.status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -962,8 +961,7 @@ async fn a_pull_request_locks_through_its_issue_and_sends_pull_request() {
         .await;
     let read = alice.get(&format!("{REPO}/pulls/1")).await.json();
     let unlocked = alice.call(Method::DELETE, &lock).await;
-    server.admin(Method::POST, "hooks/drain", None).await;
-    let received = server.receiver.received().await;
+    let received = server.deliveries_in_queue_order().await;
 
     // Then the pull request shows the lock, and pull_request carries each change
     assert_eq!(locked.status, StatusCode::NO_CONTENT);

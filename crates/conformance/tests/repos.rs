@@ -3,11 +3,14 @@ use std::sync::Arc;
 use http::header::{ACCEPT, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
 use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
-use hubdouble_model::{Access, Clock, Issue, IssueState, Pull, PullRef, Token, TokenKind, node_id};
+use hubdouble_hooks::{ContentType, Hook, HookOwner, Hooks};
+use hubdouble_model::{
+    Access, Clock, Issue, IssueState, Pull, PullRef, Timestamp, Token, TokenKind, node_id,
+};
 use hubdouble_store::{Issues, Releases, Tokens};
 use hubdouble_testkit::fixture::{
-    ALICE_ID, ALICE_TOKEN, APP_ID, APP_PUBLIC_KEY, BOB_TOKEN, CAROL_TOKEN, INSTALLATION_ID,
-    PUBLIC_REPO_ID, WEBHOOK_SECRET, WEBHOOK_URL_ENV,
+    ALICE_ID, ALICE_TOKEN, APP_ID, APP_PUBLIC_KEY, BOB_TOKEN, CAROL_TOKEN, INSTALLATION_ID, ORG_ID,
+    PRIVATE_REPO_ID, PUBLIC_REPO_ID, WEBHOOK_SECRET, WEBHOOK_URL_ENV,
 };
 use hubdouble_testkit::{Answer, Delivery, GoGithub, Graphql, TestServer, validate};
 use serde_json::{Value, json};
@@ -1081,6 +1084,87 @@ async fn a_transfer_from_an_organization_names_it_as_the_previous_owner() {
 }
 
 #[tokio::test]
+async fn making_a_private_repository_public_delivers_the_public_event() {
+    // Given an App with metadata read that subscribes to public
+    let server = start(vec![
+        json!({"kind": "app", "id": 4002, "slug": "watcher", "owner": "acme",
+               "public_key": APP_PUBLIC_KEY,
+               "webhook": {"url": format!("{{{{env \"{WEBHOOK_URL_ENV}\"}}}}"),
+                           "secret": WEBHOOK_SECRET},
+               "permissions": {"metadata": "read"},
+               "events": ["public"]}),
+        json!({"kind": "installation", "id": 5002, "app": "watcher", "account": "acme",
+               "repository_selection": "all"}),
+    ])
+    .await;
+    // Given a repository hook and an organization hook that subscribe to public
+    let url = server.receiver.url().to_owned();
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            for owner in [HookOwner::Repo(PRIVATE_REPO_ID), HookOwner::Org(ORG_ID)] {
+                let id = tx.next_id();
+                tx.table_mut::<Hooks>().insert(Hook {
+                    id,
+                    owner,
+                    url: url.clone(),
+                    content_type: ContentType::Json,
+                    secret: None,
+                    insecure_ssl: false,
+                    events: vec!["public".to_owned()],
+                    active: true,
+                    created_at: Timestamp::SEED,
+                    updated_at: Timestamp::SEED,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("insert the hooks: {e:?}"));
+    // When the private repository is made public
+    let public = server
+        .admin(
+            Method::PATCH,
+            "repos/acme/private",
+            Some(&json!({"private": false, "sender": "alice"})),
+        )
+        .await;
+    assert_eq!(public.status, StatusCode::OK, "{:?}", public.body);
+    // Then the App and each hook get one public event
+    let got = deliveries(&server, 3).await;
+    let mut targets: Vec<(&str, &str)> = got
+        .iter()
+        .map(|d| {
+            (
+                d.header("x-github-hook-installation-target-type"),
+                d.header("x-github-event"),
+            )
+        })
+        .collect();
+    targets.sort_unstable();
+    assert_eq!(
+        targets,
+        [
+            ("integration", "public"),
+            ("organization", "public"),
+            ("repository", "public"),
+        ]
+    );
+    // Then the App's event has no action and shows the public repository
+    let event = got
+        .iter()
+        .find(|d| d.header("x-github-hook-installation-target-type") == "integration")
+        .unwrap_or_else(|| panic!("no App delivery"))
+        .json();
+    assert_eq!(event.get("action"), None);
+    assert_eq!(event["repository"]["full_name"], json!("acme/private"));
+    assert_eq!(event["repository"]["private"], json!(false));
+    assert_eq!(event["sender"]["login"], json!("alice"));
+    assert_eq!(event["installation"]["id"], json!(5002));
+}
+
+#[tokio::test]
 async fn repository_admin_writes_deliver_their_repository_actions() {
     // Given
     let server = start(watcher().to_vec()).await;
@@ -1115,7 +1199,7 @@ async fn repository_admin_writes_deliver_their_repository_actions() {
         .admin(Method::DELETE, "repos/acme/prompts", Some(&json!({})))
         .await;
     let gone = alice(&server).get("repos/acme/prompts").await;
-    let got = deliveries(&server, 7).await;
+    let got = deliveries(&server, 6).await;
     // Then
     assert!(create.status.is_success(), "{:?}", create.body);
     let created = delivered(&got, "repository", "created");
@@ -1143,5 +1227,9 @@ async fn repository_admin_writes_deliver_their_repository_actions() {
         delivered(&got, "repository", "publicized")["repository"]["private"],
         false
     );
-    delivered(&got, "repository", "deleted");
+    assert!(
+        !got.iter()
+            .any(|d| d.header("x-github-event") == "repository" && d.json()["action"] == "deleted"),
+        "GitHub Apps do not receive repository deleted"
+    );
 }

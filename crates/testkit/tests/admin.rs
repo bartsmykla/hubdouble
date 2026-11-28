@@ -79,6 +79,37 @@ async fn a_kind_posted_after_the_seed_takes_a_free_id_and_a_used_id_fails() {
 }
 
 #[tokio::test]
+async fn a_given_bot_id_is_never_handed_out_again() {
+    // Given an App whose bot takes an ID two past the last one handed out
+    let server = TestServer::builder().fixture().start().await;
+    let created = server
+        .admin(Method::POST, "user", Some(&json!({"login": "dave"})))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let dave = server.admin(Method::GET, "user/dave", None).await.json();
+    let bot_id = dave["id"].as_i64().unwrap() + 2;
+    let app = server
+        .admin(
+            Method::POST,
+            "app",
+            Some(
+                &json!({"slug": "late-app", "owner": "alice", "bot_id": bot_id,
+                         "public_key": fixture::APP_PUBLIC_KEY}),
+            ),
+        )
+        .await;
+    assert_eq!(app.status, StatusCode::CREATED);
+    // When a user is created without an ID
+    let erin = server
+        .admin(Method::POST, "user", Some(&json!({"login": "erin"})))
+        .await;
+    // Then it gets an ID past the bot's
+    assert_eq!(erin.status, StatusCode::CREATED);
+    let erin = server.admin(Method::GET, "user/erin", None).await.json();
+    assert!(erin["id"].as_i64().unwrap() > bot_id, "{erin}");
+}
+
+#[tokio::test]
 async fn the_log_names_each_request_and_reset_makes_old_cursors_gone() {
     // Given
     let server = TestServer::builder().fixture().start().await;

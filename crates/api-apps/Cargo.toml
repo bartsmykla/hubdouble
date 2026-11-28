@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-api-apps"
-description = "T1: Apps and installations"
+description = "Apps and installations"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

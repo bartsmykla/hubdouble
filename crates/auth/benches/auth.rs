@@ -18,6 +18,7 @@ use hubdouble_store::Repos;
 
 const CREATE_COMMENT: Requirement = Requirement {
     any_of: &[Grant::write("issues"), Grant::write("pull_requests")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &["repo", "public_repo"],
 };

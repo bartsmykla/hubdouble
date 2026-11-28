@@ -312,4 +312,34 @@ impl<E: Entity> TableMut<'_, Rows<E>> {
         });
         Some(old)
     }
+
+    /// Removes every row for which `doomed` holds.
+    pub fn remove_where(&mut self, mut doomed: impl FnMut(&E) -> bool) {
+        let ids: Vec<i64> = self
+            .table
+            .iter()
+            .filter(|e| doomed(e))
+            .map(|e| e.id())
+            .collect();
+        self.remove_all(ids);
+    }
+
+    /// Removes every row of one repository.
+    pub fn remove_in_repo(&mut self, repo_id: i64) {
+        let ids: Vec<i64> = self.table.in_repo(repo_id).map(|e| e.id()).collect();
+        self.remove_all(ids);
+    }
+
+    /// Removes every row whose [`Entity::parent_id`] is `parent_id`.
+    pub fn remove_children(&mut self, parent_id: i64) {
+        let ids: Vec<i64> = self.table.children(parent_id).map(|e| e.id()).collect();
+        self.remove_all(ids);
+    }
+
+    /// Removes the rows with these IDs; an unknown ID is skipped.
+    pub fn remove_all(&mut self, ids: impl IntoIterator<Item = i64>) {
+        for id in ids {
+            self.remove(id);
+        }
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-api-gitdata"
-description = "T4: Git data and contents"
+description = "Git data and contents"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

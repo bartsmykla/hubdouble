@@ -2,10 +2,14 @@ use std::borrow::Cow;
 
 use bytes::Bytes;
 
-/// One webhook delivery to one App, rendered inside the transaction that caused it.
+/// One webhook delivery to one App or one repository or organization webhook, rendered inside
+/// the transaction that caused it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutboxEntry {
+    /// The App, `0` for a repository or organization webhook.
     pub app_id: i64,
+    /// The repository or organization webhook; `None` for the App's own webhook.
+    pub hook_id: Option<i64>,
     pub installation_id: Option<i64>,
     pub repo_id: Option<i64>,
     pub event: Cow<'static, str>,

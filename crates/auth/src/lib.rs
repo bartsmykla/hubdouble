@@ -18,5 +18,5 @@ pub use credential::{
 };
 pub use error::AuthError;
 pub use narrow::{MAX_TOKEN_REPOSITORIES, NarrowRequest, Narrowed, narrow};
-pub use requirement::{APP_PERMISSIONS, check_requirement};
+pub use requirement::{APP_PERMISSIONS, PUBLIC_READ_PERMISSIONS, check_requirement};
 pub use sso::{SsoSession, SsoSessions, has_sso, record_sso, register_tables};

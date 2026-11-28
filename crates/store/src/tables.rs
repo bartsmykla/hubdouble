@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use hubdouble_model::{
-    Account, App, CheckRun, CheckSuite, Delivery, Installation, Issue, IssueComment, Label,
-    Membership, Pull, Reaction, Release, ReleaseAsset, Repo, Review, ReviewComment, ReviewThread,
-    Ruleset, Status, Team, Token, WorkflowJob, WorkflowRun,
+    Account, App, CheckRun, CheckSuite, Delivery, Environment, Installation, Issue, IssueComment,
+    Label, Membership, Pull, Reaction, Release, ReleaseAsset, Repo, Review, ReviewComment,
+    ReviewThread, Ruleset, Status, Team, Timestamp, Token, WorkflowJob, WorkflowRun,
 };
 
 use crate::blobs::Blobs;
@@ -26,6 +26,7 @@ pub type ReviewComments = Rows<ReviewComment>;
 pub type ReviewThreads = Rows<ReviewThread>;
 pub type Reactions = Rows<Reaction>;
 pub type Labels = Rows<Label>;
+pub type Environments = Rows<Environment>;
 pub type CheckSuites = Rows<CheckSuite>;
 pub type CheckRuns = Rows<CheckRun>;
 pub type Statuses = Rows<Status>;
@@ -35,6 +36,7 @@ pub type WorkflowRuns = Rows<WorkflowRun>;
 pub type WorkflowJobs = Rows<WorkflowJob>;
 pub type Rulesets = Rows<Ruleset>;
 pub type Deliveries = Rows<Delivery>;
+pub type ActivityEvents = Rows<ActivityEvent>;
 
 pub(crate) fn register_frozen(b: &mut StoreBuilder) {
     b.register_table::<Counters>()
@@ -53,6 +55,7 @@ pub(crate) fn register_frozen(b: &mut StoreBuilder) {
         .register_table::<ReviewThreads>()
         .register_table::<Reactions>()
         .register_table::<Labels>()
+        .register_table::<Environments>()
         .register_table::<CheckSuites>()
         .register_table::<CheckRuns>()
         .register_table::<Statuses>()
@@ -62,6 +65,7 @@ pub(crate) fn register_frozen(b: &mut StoreBuilder) {
         .register_table::<WorkflowJobs>()
         .register_table::<Rulesets>()
         .register_table::<Deliveries>()
+        .register_table::<ActivityEvents>()
         .register_table::<RepoRedirects>();
 }
 
@@ -88,6 +92,11 @@ impl RepoRedirects {
     /// Drops the redirect of `owner/name`, as a repository now has that name.
     pub fn claim(&mut self, owner: &str, name: &str) {
         self.names.remove(&full_name(owner, name));
+    }
+
+    /// Drops every redirect to a deleted repository.
+    pub fn forget(&mut self, repo_id: i64) {
+        self.names.retain(|_, id| *id != repo_id);
     }
 }
 
@@ -117,7 +126,15 @@ impl Rows<Account> {
     pub fn by_login(&self, login: &str) -> Option<&Arc<Account>> {
         self.by_key(&login.to_ascii_lowercase())
     }
+
+    /// The author with this ID, or GitHub's [`Account::ghost`] when the account was deleted.
+    #[must_use]
+    pub fn author(&self, id: i64) -> &Arc<Account> {
+        self.get(id).unwrap_or(&GHOST)
+    }
 }
+
+static GHOST: LazyLock<Arc<Account>> = LazyLock::new(|| Arc::new(Account::ghost()));
 
 impl Entity for Membership {
     fn id(&self) -> i64 {
@@ -180,6 +197,15 @@ impl Rows<Repo> {
     #[must_use]
     pub fn by_name(&self, owner_id: i64, name: &str) -> Option<&Arc<Repo>> {
         self.by_key(&pair(owner_id, name))
+    }
+
+    /// The fork of `repo_id` that becomes the network's new upstream when `repo_id` is a
+    /// deleted root: the oldest public fork, else the oldest fork.
+    #[must_use]
+    pub fn heir(&self, repo_id: i64) -> Option<&Arc<Repo>> {
+        self.iter()
+            .filter(|r| r.fork_of == Some(repo_id))
+            .min_by_key(|r| (r.is_private(), r.created_at, r.id))
     }
 }
 
@@ -364,6 +390,29 @@ impl Entity for Label {
     }
 }
 
+impl Entity for Environment {
+    fn id(&self) -> i64 {
+        self.id
+    }
+    fn node_id(&self) -> Option<&str> {
+        Some(&self.node_id)
+    }
+    fn repo_id(&self) -> Option<i64> {
+        Some(self.repo_id)
+    }
+    fn keys(&self) -> Vec<String> {
+        vec![pair(self.repo_id, &self.name)]
+    }
+}
+
+impl Rows<Environment> {
+    /// Case-insensitive, as GitHub matches environment names.
+    #[must_use]
+    pub fn by_name(&self, repo_id: i64, name: &str) -> Option<&Arc<Environment>> {
+        self.by_key(&pair(repo_id, name))
+    }
+}
+
 impl Rows<Label> {
     /// Case-insensitive, as GitHub matches label names.
     #[must_use]
@@ -417,9 +466,44 @@ impl Entity for Delivery {
         self.repo_id
     }
     fn parent_id(&self) -> Option<i64> {
-        Some(self.app_id)
+        Some(self.hook_id)
     }
     fn keep_on_reset(&self) -> bool {
         true
+    }
+}
+
+/// One entry of GitHub's events API: what an actor did in a repository, as the feeds list it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActivityEvent {
+    pub id: i64,
+    /// GitHub's event type, such as `PushEvent`.
+    pub kind: &'static str,
+    pub actor_id: i64,
+    pub repo_id: i64,
+    /// The repository's `owner/name` when the event happened; a later rename keeps it.
+    pub repo_name: String,
+    /// The organization that owned the repository, if one did.
+    pub org_id: Option<i64>,
+    pub payload: serde_json::Value,
+    /// Whether the repository was public when the event happened.
+    pub public: bool,
+    pub created_at: Timestamp,
+}
+
+impl ActivityEvent {
+    /// How long GitHub's feeds list an event after it happened.
+    pub const RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
+}
+
+impl Entity for ActivityEvent {
+    fn id(&self) -> i64 {
+        self.id
+    }
+    fn repo_id(&self) -> Option<i64> {
+        Some(self.repo_id)
+    }
+    fn parent_id(&self) -> Option<i64> {
+        Some(self.actor_id)
     }
 }

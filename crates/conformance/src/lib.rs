@@ -1,5 +1,5 @@
-//! The response variants of plan section 4.8 that the inventory gate requires a checked answer
-//! for. `tests/inventory.rs` reads plan section 4.8 and fails when a status, media type, header
+//! The response variants of the inventory call table that the inventory gate requires a checked
+//! answer for. `tests/inventory.rs` reads that table and fails when a status, media type, header
 //! or body option it names is in neither [`VARIANTS`] nor [`ANSWER_FIELDS`].
 
 const GO_GITHUB: &str = "accept=application/vnd.github.v3+json";
@@ -9,7 +9,7 @@ const GO_GITHUB: &str = "accept=application/vnd.github.v3+json";
 /// facts` writes them) and none of the facts written with a leading `!`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Variant {
-    /// The plan section 4.8 `Call` cell the variant comes from, as the plan writes it.
+    /// The `Call` cell of the call table the variant comes from, as the table writes it.
     pub plan: &'static str,
     /// The route as `docs/inventory/rest-routes.txt` writes it.
     pub route: &'static str,
@@ -62,7 +62,7 @@ const DISPATCH_ROUTE: &str =
 const ACTIONS: &[&str] = &["body.actions", "!body.actions=empty"];
 const ANNOTATIONS: &[&str] = &["body.output.annotations", "!body.output.annotations=empty"];
 
-/// Every response variant plan section 4.8 names, one row per variant.
+/// Every response variant the call table names, one row per variant.
 pub const VARIANTS: &[Variant] = &[
     v(
         JOB_LOGS,
@@ -202,7 +202,7 @@ pub const VARIANTS: &[Variant] = &[
     ),
 ];
 
-/// Words a plan section 4.8 row puts in backticks that name a member or header of an answer,
+/// Words a call table row puts in backticks that name a member or header of an answer,
 /// a member of a request body item, or a message, rather than a variant: the `OpenAPI` check
 /// and the track's own tests hold them, so the gate does not.
 pub const ANSWER_FIELDS: &[(&str, &[&str])] = &[

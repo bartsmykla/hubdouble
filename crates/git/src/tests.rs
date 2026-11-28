@@ -8,8 +8,9 @@ use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
 use serde_json::{Value, json};
 
 use crate::{
-    Commit, EntryMode, FileChange, FileStatus, Git, GitBuilder, GitError, ObjectData, ObjectId,
-    ObjectKind, ReadJobs, RefChange, RefSubscriber, Signature, SignatureState, Tag, TreeEntry,
+    Archive, ArchiveFormat, Commit, EntryMode, FileChange, FileStatus, Git, GitBuilder, GitError,
+    ObjectData, ObjectId, ObjectKind, ReadJobs, RefChange, RefSubscriber, Signature,
+    SignatureState, Tag, TreeEntry, archive_commit,
 };
 
 const ORG: i64 = 1;
@@ -1373,4 +1374,229 @@ fn read_jobs_run_once_per_subject_and_only_for_the_request_that_asked() {
     // Then each request ran its own jobs once per subject and generation, with the generation its read saw, and the failed request's job never ran
     let ran = fx.store.view(|tx| Ok(tx.table::<Ran>().0.clone()));
     assert_eq!(ran, Ok(vec![(7, 1), (3, 1), (7, 1), (7, 2)]));
+}
+
+fn archived(fx: &Fx, id: ObjectId, format: ArchiveFormat) -> Vec<u8> {
+    fx.store
+        .view(|tx| {
+            Ok(archive_commit(
+                &fx.git,
+                tx,
+                REPO,
+                id,
+                "octo-org-r-abc1234",
+                format,
+            )?)
+        })
+        .unwrap()
+}
+
+fn archive_fixture() -> (Fx, ObjectId) {
+    let fx = fixture();
+    let mode = |path: &str, text: &str, mode| FileChange::Write {
+        path: path.to_owned(),
+        data: text.as_bytes().into(),
+        mode,
+    };
+    let head = fx.commit(
+        "main",
+        &[
+            write("README.md", "hello\n"),
+            write("docs/deep/guide.md", &"words ".repeat(200)),
+            mode("bin/run", "#!/bin/sh\n", EntryMode::Executable),
+            mode("link", "README.md", EntryMode::Symlink),
+        ],
+        "first",
+    );
+    (fx, head)
+}
+
+/// Each entry of a zip file as (name, mode, content), read by the layout of PKWARE's APPNOTE,
+/// and the archive comment.
+fn read_zip(bytes: &[u8]) -> (Vec<(String, u32, Vec<u8>)>, String) {
+    let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+    let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let end = (0..bytes.len() - 21)
+        .rev()
+        .find(|at| u32_at(*at) == 0x0605_4b50)
+        .unwrap();
+    let comment_len = usize::from(u16_at(end + 20));
+    let comment = String::from_utf8(bytes[end + 22..end + 22 + comment_len].to_vec()).unwrap();
+    let mut at = u32_at(end + 16) as usize;
+    let mut entries = Vec::new();
+    for _ in 0..u16_at(end + 10) {
+        assert_eq!(u32_at(at), 0x0201_4b50);
+        let (method, crc) = (u16_at(at + 10), u32_at(at + 16));
+        let (stored, size) = (u32_at(at + 20) as usize, u32_at(at + 24) as usize);
+        let name_len = usize::from(u16_at(at + 28));
+        let skip = name_len + usize::from(u16_at(at + 30)) + usize::from(u16_at(at + 32));
+        let mode = u32_at(at + 38) >> 16;
+        let local = u32_at(at + 42) as usize;
+        let name = String::from_utf8(bytes[at + 46..at + 46 + name_len].to_vec()).unwrap();
+        assert_eq!(u32_at(local), 0x0403_4b50);
+        let data_at =
+            local + 30 + usize::from(u16_at(local + 26)) + usize::from(u16_at(local + 28));
+        let raw = &bytes[data_at..data_at + stored];
+        let content = match method {
+            0 => raw.to_vec(),
+            8 => {
+                let mut out = Vec::new();
+                std::io::Read::read_to_end(&mut flate2::read::DeflateDecoder::new(raw), &mut out)
+                    .unwrap();
+                out
+            }
+            other => panic!("method {other}"),
+        };
+        assert_eq!(content.len(), size, "{name}");
+        let mut sum = flate2::Crc::new();
+        sum.update(&content);
+        assert_eq!(sum.sum(), crc, "{name}");
+        entries.push((name, mode, content));
+        at += 46 + skip;
+    }
+    (entries, comment)
+}
+
+#[test]
+fn a_tarball_holds_the_tree_under_the_prefix_as_git_archive_writes_it() {
+    // Given a commit with a file, a nested file, an executable and a symlink
+    let (fx, head) = archive_fixture();
+
+    // When its tarball is written and read back
+    let bytes = archived(&fx, head, ArchiveFormat::TarGz);
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
+    let mut entries = Vec::new();
+    for entry in tar.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let h = entry.header().clone();
+        let path = entry.path().unwrap().to_string_lossy().into_owned();
+        let mut content = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut content).unwrap();
+        let link = entry
+            .link_name()
+            .unwrap()
+            .map(|l| l.to_string_lossy().into_owned());
+        entries.push((
+            path,
+            h.entry_type(),
+            h.mode().unwrap(),
+            h.mtime().unwrap(),
+            content,
+            link,
+        ));
+    }
+
+    // Then the pax global header carries the commit ID, and each entry its mode, time and content
+    let (global, rest) = entries.split_first().unwrap();
+    assert_eq!(global.1, tar::EntryType::XGlobalHeader);
+    assert_eq!(global.4, format!("52 comment={head}\n").into_bytes());
+    let seed = u64::try_from(Timestamp::SEED.unix()).unwrap();
+    assert!(rest.iter().all(|e| e.3 == seed));
+    let p = |s: &str| format!("octo-org-r-abc1234/{s}");
+    let summary: Vec<_> = rest
+        .iter()
+        .map(|(path, kind, mode, _, content, link)| {
+            (path.clone(), *kind, *mode, content.len(), link.clone())
+        })
+        .collect();
+    let dir = tar::EntryType::Directory;
+    let file = tar::EntryType::Regular;
+    assert_eq!(
+        summary,
+        [
+            (p(""), dir, 0o775, 0, None),
+            (p("README.md"), file, 0o664, 6, None),
+            (p("bin/"), dir, 0o775, 0, None),
+            (p("bin/run"), file, 0o775, 10, None),
+            (p("docs/"), dir, 0o775, 0, None),
+            (p("docs/deep/"), dir, 0o775, 0, None),
+            (p("docs/deep/guide.md"), file, 0o664, 1200, None),
+            (
+                p("link"),
+                tar::EntryType::Symlink,
+                0o777,
+                0,
+                Some("README.md".to_owned())
+            ),
+        ]
+    );
+    assert_eq!(rest[1].4, b"hello\n");
+}
+
+#[test]
+fn a_zipball_holds_the_same_tree_with_unix_modes_and_the_commit_as_comment() {
+    // Given the same commit
+    let (fx, head) = archive_fixture();
+
+    // When its zipball is written and read back
+    let (entries, comment) = read_zip(&archived(&fx, head, ArchiveFormat::Zip));
+
+    // Then the comment is the commit ID, and each entry keeps its mode and content
+    assert_eq!(comment, head.to_string());
+    let p = |s: &str| format!("octo-org-r-abc1234/{s}");
+    let summary: Vec<_> = entries
+        .iter()
+        .map(|(name, mode, content)| (name.clone(), *mode, content.len()))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (p(""), 0o040_775, 0),
+            (p("README.md"), 0o100_664, 6),
+            (p("bin/"), 0o040_775, 0),
+            (p("bin/run"), 0o100_775, 10),
+            (p("docs/"), 0o040_775, 0),
+            (p("docs/deep/"), 0o040_775, 0),
+            (p("docs/deep/guide.md"), 0o100_664, 1200),
+            (p("link"), 0o120_777, 9),
+        ]
+    );
+    assert_eq!(entries[7].2, b"README.md");
+    assert_eq!(entries[6].2, "words ".repeat(200).into_bytes());
+}
+
+#[test]
+fn an_archive_of_an_object_that_is_not_a_commit_fails() {
+    // Given the ID of a blob and an ID the repository lacks
+    let (fx, _) = archive_fixture();
+    let blob = fx
+        .store
+        .view(|tx| Ok(fx.git.write_blob(tx, REPO, b"hello\n")?))
+        .unwrap();
+
+    // Then neither archives
+    for (id, want) in [
+        (blob, GitError::WrongKind),
+        (oid(&"1".repeat(40)), GitError::NotFound),
+    ] {
+        let got = fx.store.view(|tx| {
+            Ok(archive_commit(
+                &fx.git,
+                tx,
+                REPO,
+                id,
+                "p",
+                ArchiveFormat::TarGz,
+            ))
+        });
+        assert_eq!(got.unwrap().err(), Some(want));
+    }
+}
+
+#[test]
+fn a_zip_entry_time_is_the_dos_time_of_the_archive_time() {
+    // Given an archive at 2026-01-01T13:45:30Z
+    let mut zip = Archive::new(ArchiveFormat::Zip, Timestamp(1_767_275_130), None).unwrap();
+    zip.file("a", b"x", false).unwrap();
+    let bytes = zip.finish().unwrap();
+
+    // Then the local header has DOS time 13:45:30 and date 2026-01-01
+    let time = u16::from_le_bytes([bytes[10], bytes[11]]);
+    let date = u16::from_le_bytes([bytes[12], bytes[13]]);
+    assert_eq!(
+        (time >> 11, time >> 5 & 0x3f, (time & 0x1f) * 2),
+        (13, 45, 30)
+    );
+    assert_eq!((date >> 9) + 1980, 2026);
+    assert_eq!((date >> 5 & 0xf, date & 0x1f), (1, 1));
 }

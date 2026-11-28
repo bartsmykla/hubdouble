@@ -8,7 +8,7 @@ use hubdouble_store::Reactions;
 use serde::Deserialize;
 
 use crate::comments::comment_and_issue;
-use crate::shared::{invalid, user, who};
+use crate::shared::{author, invalid, who};
 
 fn content(text: Option<&str>) -> Result<Option<ReactionContent>, ApiError> {
     text.map(|t| {
@@ -33,7 +33,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .collect();
     let urls = ctx.urls();
     ctx.page(&reactions, |r| {
-        r::Reaction::new(r, user(tx, urls, r.user_id))
+        r::Reaction::new(r, Some(author(tx, urls, r.user_id)))
     })
 }
 
@@ -78,6 +78,6 @@ pub(crate) fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         })?;
         (reaction, StatusCode::CREATED)
     };
-    let view = r::Reaction::new(&reaction, user(tx, &urls, reaction.user_id));
+    let view = r::Reaction::new(&reaction, Some(author(tx, &urls, reaction.user_id)));
     Ok(Reply::json(&view)?.status(status))
 }

@@ -66,6 +66,28 @@ pub const APP_PERMISSIONS: &[&str] = &[
     "workflows",
 ];
 
+/// The App permissions whose reads GitHub serves as public data: the permissions of the
+/// repository and org reads that `docs/inventory/rest-permissions.tsv` marks `public_read`. A
+/// read whose grants are all of these passes for an anonymous caller, for an installation that
+/// does not cover the target and for a user token of an App not installed on it, unless the
+/// operation's own `public_read` flag is false ([`crate::authorize_operation`]). Every other
+/// read needs that access.
+pub const PUBLIC_READ_PERMISSIONS: &[&str] = &[
+    "actions",
+    "attestations",
+    "checks",
+    "contents",
+    "deployments",
+    "issues",
+    "members",
+    "metadata",
+    "organization_projects",
+    "pages",
+    "pull_requests",
+    "repository_advisories",
+    "statuses",
+];
+
 /// Checks that a registered operation's requirement can deny access: a repository or org
 /// requirement names at least one permission and its path names the target the choke point
 /// checks, a public requirement names none, and every permission is a GitHub App permission.
@@ -79,6 +101,7 @@ pub fn check_requirement(path: &str, req: &Requirement) -> Result<(), AuthError>
     if let Some(g) = req
         .any_of
         .iter()
+        .chain(req.all_of)
         .find(|g| !APP_PERMISSIONS.contains(&g.permission))
     {
         return Err(AuthError::UnknownPermission(g.permission));
@@ -88,13 +111,15 @@ pub fn check_requirement(path: &str, req: &Requirement) -> Result<(), AuthError>
             path.contains("{owner}") && path.contains("{repo}") || path.contains("{repository_id}")
         }
         Scope::Org => path.contains("{org}"),
-        Scope::Public if !req.any_of.is_empty() => return Err(AuthError::PublicWithGrant),
+        Scope::Public if !req.any_of.is_empty() || !req.all_of.is_empty() => {
+            return Err(AuthError::PublicWithGrant);
+        }
         Scope::Public | Scope::App | Scope::User | Scope::Installation => return Ok(()),
     };
     if !names_target {
         return Err(AuthError::NoTarget);
     }
-    if req.any_of.is_empty() {
+    if req.any_of.is_empty() && req.all_of.is_empty() {
         return Err(AuthError::NoGrant);
     }
     Ok(())

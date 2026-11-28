@@ -18,6 +18,7 @@ use crate::{APP, app};
 const INSTALLATION: Requirement = Requirement {
     scope: Scope::Installation,
     any_of: &[],
+    all_of: &[],
     scopes: &[],
 };
 

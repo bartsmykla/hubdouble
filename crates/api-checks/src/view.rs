@@ -241,6 +241,12 @@ impl<'a> View<'a> {
     }
 
     pub fn status(&self, status: &Status) -> render::Status {
-        render::Status::new(self.urls, status, &self.name, self.user(status.creator_id))
+        let creator = self.tx.table::<Accounts>().author(status.creator_id);
+        render::Status::new(
+            self.urls,
+            status,
+            &self.name,
+            Some(SimpleUser::new(self.urls, creator)),
+        )
     }
 }

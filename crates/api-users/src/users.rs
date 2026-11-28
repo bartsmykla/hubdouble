@@ -11,6 +11,7 @@ use serde::Serialize;
 const SIGNED_IN: Requirement = Requirement {
     scope: Scope::User,
     any_of: &[],
+    all_of: &[],
     scopes: &[],
 };
 
@@ -122,7 +123,10 @@ fn builtin(tx: &Tx, matches: impl Fn(&Account) -> bool) -> Option<Account> {
     let owner = actions::owner();
     let accounts = tx.table::<Accounts>();
     let free = accounts.by_login(&owner.login).is_none() && accounts.get(owner.id).is_none();
-    (free && matches(&owner)).then_some(owner)
+    if free && matches(&owner) {
+        return Some(owner);
+    }
+    Some(Account::ghost()).filter(matches)
 }
 
 fn reply(

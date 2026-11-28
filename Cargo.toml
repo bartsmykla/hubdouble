@@ -15,15 +15,26 @@ publish = false
 hubdouble-admin = { path = "crates/admin" }
 hubdouble-api = { path = "crates/api" }
 hubdouble-api-actions = { path = "crates/api-actions" }
+hubdouble-api-activity = { path = "crates/api-activity" }
 hubdouble-api-apps = { path = "crates/api-apps" }
+hubdouble-api-billing = { path = "crates/api-billing" }
 hubdouble-api-checks = { path = "crates/api-checks" }
+hubdouble-api-codespaces = { path = "crates/api-codespaces" }
+hubdouble-api-copilot = { path = "crates/api-copilot" }
+hubdouble-api-deployments = { path = "crates/api-deployments" }
+hubdouble-api-gists = { path = "crates/api-gists" }
 hubdouble-api-gitdata = { path = "crates/api-gitdata" }
 hubdouble-api-issues = { path = "crates/api-issues" }
+hubdouble-api-meta = { path = "crates/api-meta" }
+hubdouble-api-migrations = { path = "crates/api-migrations" }
 hubdouble-api-orgs = { path = "crates/api-orgs" }
+hubdouble-api-packages = { path = "crates/api-packages" }
+hubdouble-api-projects = { path = "crates/api-projects" }
 hubdouble-api-pulls = { path = "crates/api-pulls" }
 hubdouble-api-repos = { path = "crates/api-repos" }
 hubdouble-api-reviews = { path = "crates/api-reviews" }
 hubdouble-api-search = { path = "crates/api-search" }
+hubdouble-api-security = { path = "crates/api-security" }
 hubdouble-api-users = { path = "crates/api-users" }
 hubdouble-auth = { path = "crates/auth" }
 hubdouble-git = { path = "crates/git" }
@@ -41,6 +52,7 @@ apollo-compiler = "=1.33.1"
 base64 = "=0.23.1"
 bytes = "=1.12.2"
 criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+crypto_box = { version = "=0.9.1", default-features = false, features = ["alloc", "rand_core", "salsa20", "seal"] }
 fancy-regex = "=0.20.2"
 flate2 = { version = "=1.1.11", default-features = false, features = ["zlib"] }
 foldhash = { version = "=0.2.0", default-features = false }
@@ -74,6 +86,7 @@ serde-saphyr = "=2.2.0"
 serde_json = { version = "=1.0.154", features = ["raw_value", "unbounded_depth"] }
 sha1 = "=0.11.0"
 sha2 = "=0.11.1"
+tar = { version = "=0.4.46", default-features = false }
 tempfile = "=3.27.0"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }

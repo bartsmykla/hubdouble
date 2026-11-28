@@ -455,7 +455,7 @@ fn reactions(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         .collect();
     let view = view::rest_view(ctx)?;
     ctx.page(&rows, |r| {
-        hubdouble_render::Reaction::new(r, view.user(r.user_id))
+        hubdouble_render::Reaction::new(r, Some(view.author(r.user_id)))
     })
 }
 
@@ -497,6 +497,7 @@ fn react(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             .map_err(|e| ApiError::internal(e.to_string()))?;
         (reaction, StatusCode::CREATED)
     };
-    let response = hubdouble_render::Reaction::new(&reaction, view::rest_view(ctx)?.user(sender));
+    let response =
+        hubdouble_render::Reaction::new(&reaction, Some(view::rest_view(ctx)?.author(sender)));
     Ok(Reply::json(&response)?.status(status))
 }

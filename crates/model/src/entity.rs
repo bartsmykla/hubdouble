@@ -134,6 +134,46 @@ pub struct Account {
     pub updated_at: Timestamp,
 }
 
+const GHOST_ID: i64 = 10137;
+
+impl Account {
+    /// GitHub's `ghost` user, which stands in for the author of content whose account was
+    /// deleted. No row of the `Accounts` table holds it.
+    #[must_use]
+    pub fn ghost() -> Account {
+        Account {
+            id: GHOST_ID,
+            node_id: "MDQ6VXNlcjEwMTM3".into(),
+            login: "ghost".into(),
+            kind: AccountKind::User,
+            name: Some("Deleted user".into()),
+            email: None,
+            company: None,
+            blog: None,
+            location: Some("Nothing to see here, move along.".into()),
+            bio: Some(
+                "Hi, I'm @ghost! I take the place of user accounts that have been deleted.\n:ghost:\n"
+                    .into(),
+            ),
+            twitter_username: None,
+            description: None,
+            site_admin: false,
+            verified_email: false,
+            sso_enforced: false,
+            app_id: None,
+            created_at: Timestamp(1_210_659_265),
+            updated_at: Timestamp(1_523_380_953),
+        }
+    }
+
+    /// Whether `id` or `login` belongs to [`Account::ghost`], which no seeded or created
+    /// account may take.
+    #[must_use]
+    pub fn is_ghost(id: i64, login: &str) -> bool {
+        id == GHOST_ID || login.eq_ignore_ascii_case("ghost")
+    }
+}
+
 /// A user's membership of an organization.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -465,6 +505,18 @@ pub struct Reaction {
     pub user_id: i64,
     pub content: ReactionContent,
     pub created_at: Timestamp,
+}
+
+/// A deployment environment of a repository.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Environment {
+    pub id: i64,
+    pub node_id: String,
+    pub repo_id: i64,
+    pub name: String,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

@@ -3,13 +3,13 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use bytes::Bytes;
 use hubdouble_model::{
-    Account, AccountKind, ApiError, Delivery, DeliveryRequest, DeliveryResponse, Repo, Timestamp,
-    Visibility, node_id,
+    Account, AccountKind, ApiError, Delivery, DeliveryRequest, DeliveryResponse, Environment, Repo,
+    Timestamp, Visibility, node_id,
 };
 
 use crate::{
-    Accounts, Blob, Blobs, Committed, Counters, Deliveries, OutboxEntry, OutboxUse, Repos,
-    Sequence, Store, StoreBuilder, Table, TxMut,
+    Accounts, Blob, Blobs, Committed, Counters, Deleted, DeletionSubscriber, Deliveries,
+    Environments, OutboxEntry, OutboxUse, Repos, Sequence, Store, StoreBuilder, Table, TxMut,
 };
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -104,6 +104,7 @@ fn delivery(id: i64) -> Delivery {
 fn entry(event: &'static str) -> OutboxEntry {
     OutboxEntry {
         app_id: 1,
+        hook_id: None,
         installation_id: None,
         repo_id: None,
         event: event.into(),
@@ -428,6 +429,43 @@ fn an_app_keeps_only_its_newest_over_budget_entries_within_the_refused_count() {
 }
 
 #[test]
+fn each_repository_hook_keeps_its_own_newest_over_budget_entries_within_the_refused_count() {
+    // Given an outbox with no room, which keeps two over-budget entries per delivery target
+    let s = store();
+    s.limit_outbox(OutboxUse {
+        refused_bytes: usize::MAX,
+        refused_per_app: 2,
+        ..OutboxUse::default()
+    });
+    let commit = |hook_id: i64, n: usize| {
+        s.update(|tx| {
+            tx.push_outbox(OutboxEntry {
+                app_id: 0,
+                hook_id: Some(hook_id),
+                payload: Bytes::from(vec![b'1'; n]),
+                ..entry("push")
+            });
+            Ok(())
+        })
+        .unwrap();
+    };
+
+    // When hook 7 commits an entry of 5 bytes and then hook 8 commits entries of 1, 2 and 3 bytes
+    commit(7, 5);
+    commit(8, 1);
+    commit(8, 2);
+    commit(8, 3);
+
+    // Then hook 7 keeps its entry and hook 8 keeps its two newest
+    let kept: Vec<_> = s
+        .take_outbox()
+        .iter()
+        .map(|c| (c.entry.hook_id, c.entry.payload.len()))
+        .collect();
+    assert_eq!(kept, [(Some(7), 5), (Some(8), 2), (Some(8), 3)]);
+}
+
+#[test]
 fn restore_releases_what_the_dropped_outbox_entries_held() {
     // Given committed entries that hold a share of the outbox limits
     let s = store();
@@ -499,4 +537,172 @@ fn an_index_key_held_by_another_row_is_refused() {
 
     assert_eq!(taken.unwrap_err().status, 422);
     assert_eq!(seen(&s).logins, ["Octo"]);
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a deletion subscriber returns a Result"
+)]
+fn note_deletion(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    let name = match deleted {
+        Deleted::Repo(r) => format!("repo {}", r.id),
+        Deleted::Team(t) => format!("team {}", t.id),
+        Deleted::Account(a) => format!("account {}", a.id),
+        Deleted::Environment(e) => format!("environment {}", e.id),
+    };
+    let still_there = match deleted {
+        Deleted::Repo(r) => tx.table::<Repos>().get(r.id).is_some(),
+        Deleted::Team(_) => true,
+        Deleted::Account(a) => tx.table::<Accounts>().get(a.id).is_some(),
+        Deleted::Environment(e) => tx.table::<Environments>().get(e.id).is_some(),
+    };
+    tx.table_mut::<Notes>()
+        .get_mut()
+        .0
+        .push(format!("{name} {still_there}"));
+    Ok(())
+}
+
+fn refuse_deletion(_: &mut TxMut<'_>, _: &Deleted) -> Result<(), ApiError> {
+    Err(ApiError::unprocessable("kept"))
+}
+
+fn deleting(subscriber: DeletionSubscriber) -> Store {
+    let mut b = StoreBuilder::new();
+    b.register_table::<Notes>().on_delete(subscriber);
+    let s = b.build();
+    s.update(|tx| {
+        tx.table_mut::<Accounts>().insert(account(1, "octo"))?;
+        tx.table_mut::<Accounts>().insert(account(2, "other"))?;
+        tx.table_mut::<Repos>().insert(repo(10, 1, "first"))?;
+        tx.table_mut::<Repos>().insert(repo(11, 1, "second"))?;
+        tx.table_mut::<Repos>().insert(repo(12, 2, "kept"))?;
+        Ok(())
+    })
+    .unwrap();
+    s
+}
+
+#[test]
+fn deleting_an_account_deletes_its_repositories_first_and_subscribers_see_the_rows() {
+    // Given an account with two repositories and another account with one
+    let s = deleting(note_deletion);
+
+    // When the first account is deleted
+    s.update(|tx| {
+        let octo = tx.table::<Accounts>().get(1).cloned().unwrap();
+        tx.delete(&Deleted::Account(octo))
+    })
+    .unwrap();
+
+    // Then each repository went as its own deletion before the account, the subscriber saw
+    // each row before the store dropped it, and the other account's repository stays
+    s.view(|tx| {
+        assert_eq!(
+            tx.table::<Notes>().0,
+            ["repo 10 true", "repo 11 true", "account 1 true"]
+        );
+        assert!(tx.table::<Accounts>().get(1).is_none());
+        let repos: Vec<i64> = tx.table::<Repos>().iter().map(|r| r.id).collect();
+        assert_eq!(repos, [12]);
+        Ok(())
+    })
+    .unwrap();
+}
+
+fn environment(id: i64, repo_id: i64, name: &str) -> Environment {
+    Environment {
+        id,
+        node_id: node_id::entity(node_id::ENVIRONMENT, id),
+        repo_id,
+        name: name.into(),
+        created_at: Timestamp::SEED,
+        updated_at: Timestamp::SEED,
+    }
+}
+
+#[test]
+fn deleting_an_environment_drops_its_row_and_keeps_other_environments() {
+    // Given two environments of a repository
+    let s = deleting(note_deletion);
+    s.update(|tx| {
+        tx.table_mut::<Environments>()
+            .insert(environment(20, 10, "staging"))?;
+        tx.table_mut::<Environments>()
+            .insert(environment(21, 10, "production"))?;
+        Ok(())
+    })
+    .unwrap();
+
+    // When one is deleted
+    s.update(|tx| {
+        let staging = tx
+            .table::<Environments>()
+            .by_name(10, "STAGING")
+            .cloned()
+            .unwrap();
+        tx.delete(&Deleted::Environment(staging))
+    })
+    .unwrap();
+
+    // Then the subscriber saw it before it went, and the other environment stays
+    s.view(|tx| {
+        assert_eq!(tx.table::<Notes>().0, ["environment 20 true"]);
+        let kept: Vec<i64> = tx.table::<Environments>().iter().map(|e| e.id).collect();
+        assert_eq!(kept, [21]);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn deleting_a_repository_deletes_its_environments_first() {
+    // Given an environment in each of two repositories
+    let s = deleting(note_deletion);
+    s.update(|tx| {
+        tx.table_mut::<Environments>()
+            .insert(environment(20, 10, "staging"))?;
+        tx.table_mut::<Environments>()
+            .insert(environment(21, 12, "staging"))?;
+        Ok(())
+    })
+    .unwrap();
+
+    // When the first repository is deleted
+    s.update(|tx| {
+        let repo = tx.table::<Repos>().get(10).cloned().unwrap();
+        tx.delete(&Deleted::Repo(repo))
+    })
+    .unwrap();
+
+    // Then its environment went as its own deletion, and the other repository keeps its own
+    s.view(|tx| {
+        assert_eq!(
+            tx.table::<Notes>().0,
+            ["environment 20 true", "repo 10 true"]
+        );
+        let kept: Vec<i64> = tx.table::<Environments>().iter().map(|e| e.id).collect();
+        assert_eq!(kept, [21]);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_subscriber_that_refuses_a_deletion_rolls_the_transaction_back() {
+    // Given a subscriber that refuses every deletion
+    let s = deleting(refuse_deletion);
+
+    // When a repository is deleted
+    let refused = s.update(|tx| {
+        let repo = tx.table::<Repos>().get(10).cloned().unwrap();
+        tx.delete(&Deleted::Repo(repo))
+    });
+
+    // Then the deletion fails and the repository stays
+    assert_eq!(refused.unwrap_err().status, 422);
+    assert!(
+        s.view(|tx| Ok(tx.table::<Repos>().get(10).is_some()))
+            .unwrap()
+    );
 }

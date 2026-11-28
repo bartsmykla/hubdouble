@@ -20,7 +20,7 @@ const PROSE_REDIRECTS: [u16; 3] = [301, 302, 307];
 const RAW_BY_CONTENT: [(&str, [&str; 2]); 1] =
     [("git/get-blob", ["text/plain", "application/octet-stream"])];
 
-/// An answer where live GitHub differs from its docs, and live GitHub wins (plan section 4.7).
+/// An answer where live GitHub differs from its docs, and live GitHub wins.
 struct LiveEvidence {
     operation_id: &'static str,
     status: u16,
@@ -248,8 +248,7 @@ pub fn api_path(path: &str) -> &str {
 ///
 /// The rules and where they come from:
 ///
-/// - Path parameters `ref`, `path`, `branch`, `basehead` and `tag` hold slashes, as on GitHub
-///   (plan section 6.2).
+/// - Path parameters `ref`, `path`, `branch`, `basehead` and `tag` hold slashes, as on GitHub.
 /// - Every operation may also answer what the docs prose gives every endpoint: `304` for a
 ///   conditional `GET` with an empty body
 ///   (<https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api#use-conditional-requests>);
@@ -270,8 +269,8 @@ pub fn api_path(path: &str) -> &str {
 /// - Every answer has `X-GitHub-Request-Id`, `X-GitHub-Media-Type` and the five
 ///   `X-RateLimit-*` headers, `X-RateLimit-Remaining` never `0`
 ///   (<https://docs.github.com/en/rest/using-the-rest-api/getting-started-with-the-rest-api#about-the-response-code-and-headers>,
-///   <https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#checking-the-status-of-your-rate-limit>,
-///   plan section 4.7), and `Location` where the operation documents it. An authenticated
+///   <https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#checking-the-status-of-your-rate-limit>),
+///   and `Location` where the operation documents it. An authenticated
 ///   `304` or `412` has no `X-GitHub-Media-Type`, `X-OAuth-Scopes`, `X-Accepted-OAuth-Scopes`
 ///   or `Link`, as live GitHub answered on 2026-11-25.
 ///   `X-GitHub-Api-Version-Selected` names the selected version unless GitHub rejects the version.
@@ -282,8 +281,14 @@ pub fn api_path(path: &str) -> &str {
 ///   (<https://docs.github.com/en/actions/reference/security/oidc#methods-for-requesting-the-oidc-token>),
 ///   OAuth and the device flow
 ///   (<https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps>),
-///   and `GET /repositories/{repository_id}` against `repos/get`, which go-github v93 calls
-///   it (`Repositories.GetByID`, `github/repos.go`). GraphQL is checked by its own client.
+///   `GET /repositories/{repository_id}` against `repos/get`, which go-github v93 calls
+///   it (`Repositories.GetByID`, `github/repos.go`), and
+///   `GET /organizations/{org_id}/public_members/{username}` against
+///   `orgs/check-public-membership-for-user`, where GitHub redirects
+///   `GET /orgs/{org}/members/{username}` for a caller outside the org, and
+///   `POST /repos/{owner}/{repo}/hooks/{hook_id}/test` against `repos/test-push-webhook`,
+///   the `test_url` GitHub renders in a hook. Each is recorded
+///   under its own route. GraphQL is checked by its own client.
 /// - `/repositories/{id}/...` and `/organizations/{id}/...` are checked against the
 ///   `/repos/{owner}/{repo}/...` and `/orgs/{org}/...` operation they alias, and every `Link`
 ///   URL of a repository or organization answer has that by-ID form, as api.github.com writes
@@ -297,11 +302,14 @@ pub fn check(x: &Exchange<'_>, registered: &dyn Fn(&str) -> bool) -> Result<Chec
     if let Some(result) = outside_the_bundle(x, path) {
         return result;
     }
-    if x.method == "GET" && segments_eq(path, "/repositories/{repository_id}") {
-        let op = resolve_operation("GET", "/repos/o/r")
-            .ok_or_else(|| vec!["the description has no repos/get".to_owned()])?;
+    if let Some((method, route, alias)) = ALIASED_ROUTES
+        .iter()
+        .find(|(method, route, _)| x.method == *method && segments_eq(path, route))
+    {
+        let op = resolve_operation(method, alias)
+            .ok_or_else(|| vec![format!("the description has no {method} {alias}")])?;
         return check_operation(x, op, registered).map(|status| Checked {
-            route: "GET /repositories/{repository_id}".to_owned(),
+            route: format!("{method} {route}"),
             status,
         });
     }
@@ -314,6 +322,20 @@ pub fn check(x: &Exchange<'_>, registered: &dyn Fn(&str) -> bool) -> Result<Chec
         status,
     })
 }
+
+const ALIASED_ROUTES: [(&str, &str, &str); 3] = [
+    ("GET", "/repositories/{repository_id}", "/repos/o/r"),
+    (
+        "GET",
+        "/organizations/{org_id}/public_members/{username}",
+        "/orgs/o/public_members/u",
+    ),
+    (
+        "POST",
+        "/repos/{owner}/{repo}/hooks/{hook_id}/test",
+        "/repos/o/r/hooks/1/tests",
+    ),
+];
 
 fn by_id_alias(path: &str) -> Option<String> {
     let numbered = |prefix: &str| {

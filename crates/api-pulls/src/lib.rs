@@ -1,6 +1,6 @@
 use hubdouble_admin::Registrar;
-use hubdouble_model::{Grant, Requirement, Scope};
-use hubdouble_store::StoreBuilder;
+use hubdouble_model::{ApiError, Grant, Requirement, Scope};
+use hubdouble_store::{Deleted, Issues, Reviews, StoreBuilder, TxMut};
 
 mod association;
 mod change;
@@ -32,6 +32,7 @@ const fn repo_requirement(grants: &'static [Grant]) -> Requirement {
     Requirement {
         scope: Scope::Repo,
         any_of: grants,
+        all_of: &[],
         scopes: &[],
     }
 }
@@ -50,7 +51,44 @@ pub fn register_tables(b: &mut StoreBuilder) {
         .register_table::<merge_state::MergeStates>()
         .register_table::<reviewing::LastPushes>()
         .register_table::<reviewing::ReviewOrder>()
-        .register_table::<association::Contributors>();
+        .register_table::<association::Contributors>()
+        .on_delete(forget);
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a deletion subscriber returns a Result"
+)]
+fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    let Deleted::Repo(repo) = deleted else {
+        return Ok(());
+    };
+    let issues: Vec<i64> = tx
+        .table::<Issues>()
+        .in_repo(repo.id)
+        .map(|i| i.id)
+        .collect();
+    let reviews: Vec<i64> = tx
+        .table::<Reviews>()
+        .in_repo(repo.id)
+        .map(|r| r.id)
+        .collect();
+    tx.table_mut::<StateEvents>().remove_in_repo(repo.id);
+    tx.table_mut::<state::PullBases>()
+        .remove_all(issues.iter().copied());
+    tx.table_mut::<merge_state::MergeStates>()
+        .remove_all(issues.iter().copied());
+    tx.table_mut::<reviewing::LastPushes>()
+        .remove_all(issues.iter().copied());
+    if tx.try_table::<mergeability::MergeJobs>().is_some() {
+        tx.table_mut::<mergeability::MergeJobs>().remove_all(issues);
+        tx.table_mut::<mergeability::MergeReads>()
+            .remove_all([repo.id]);
+    }
+    tx.table_mut::<association::Contributors>()
+        .remove_all([repo.id]);
+    reviewing::forget_reviews(tx, &reviews);
+    Ok(())
 }
 
 pub fn register(r: &mut Registrar<'_>) {

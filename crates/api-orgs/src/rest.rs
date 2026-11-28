@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use hubdouble_auth::{self as auth, Actor, Target};
 use hubdouble_model::{
-    Account, AccountKind, ApiError, MembershipState, Repo, Requirement, Team, TeamMember,
+    Account, AccountKind, ApiError, MembershipState, Repo, Requirement, Team, TeamMember, TokenKind,
 };
 use hubdouble_render::{RepoPermissions, Repository, TeamMembership};
 use hubdouble_rest::{Ctx, Registry, Reply};
-use hubdouble_store::{Accounts, Memberships, Teams, Tx};
+use hubdouble_store::{Accounts, Installations, Memberships, Teams, Tx};
 
 use crate::hierarchy::{TeamViewer, pushes};
 use crate::{
@@ -73,7 +73,18 @@ fn check_member(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let org = organization(ctx.tx(), ctx.param("org")?)?;
     let requester_is_member = match ctx.actor() {
         Actor::Installation { installation, .. } => installation.account_id == org.id,
-        Actor::User { user, .. } => hierarchy::org_role(ctx.tx(), org.id, user.id).is_some(),
+        Actor::User { user, token } => {
+            let app_reaches = token
+                .app_id
+                .filter(|_| token.kind == TokenKind::User)
+                .is_none_or(|app| {
+                    ctx.tx()
+                        .table::<Installations>()
+                        .of(app, org.id)
+                        .is_some_and(|i| i.suspended_at.is_none())
+                });
+            app_reaches && hierarchy::org_role(ctx.tx(), org.id, user.id).is_some()
+        }
         Actor::Anonymous | Actor::App { .. } => false,
     };
     let login = ctx.param("username")?;
@@ -167,7 +178,7 @@ fn membership(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 fn team_repo(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     signed_in(ctx)?;
     let org = organization(ctx.tx(), ctx.param("org")?)?;
-    auth::authorize(ctx.tx(), ctx.actor(), &TEAMS, Target::Org(org))?;
+    auth::authorize_operation(ctx.tx(), ctx.actor(), &TEAMS, Target::Org(org), false)?;
     let t = team(ctx, org)?;
     let repo = ctx.repo()?;
     let role = hierarchy::repo_role(ctx.tx(), t, repo.id).ok_or_else(ApiError::not_found)?;

@@ -4,7 +4,7 @@ use std::process::Command;
 
 use http::{Method, StatusCode};
 use hubdouble_conformance::{ANSWER_FIELDS, VARIANTS, Variant};
-use hubdouble_model::{Access, Clock, Scope, Token, TokenKind};
+use hubdouble_model::{Access, Clock, Grant, Scope, Token, TokenKind};
 use hubdouble_rest::Registry;
 use hubdouble_server::Registries;
 use hubdouble_store::Tokens;
@@ -13,13 +13,35 @@ use hubdouble_testkit::coverage::{self, Case, Record};
 use hubdouble_testkit::{Answer, GoGithub, TestServer, fixture};
 use serde_json::json;
 
-const GATE: &str = "every_inventory_case_gets_a_checked_answer_or_signed_delivery";
+const GATE: &str = "every_registered_case_gets_a_checked_answer_or_signed_delivery";
 
 const NO_GITHUB_422: &str = "the pinned description lists 422, but no input sent to api.github.com gave one (gh api GET, 2026-11-22)";
 const APP_ONLY_422: &str =
     "the pinned description lists 422, the docs name no cause, and only an App can call it";
 
+const HOOK_DELIVERY_422: &str = "the pinned description lists 422 for a delivery read or redelivery, and the docs name no cause";
+
 const DESCRIBED_NOT_SENT: &[(&str, Case, &str)] = &[
+    (
+        "GET /orgs/{org}/hooks/{hook_id}/deliveries/{delivery_id}",
+        Case::Invalid,
+        HOOK_DELIVERY_422,
+    ),
+    (
+        "POST /orgs/{org}/hooks/{hook_id}/deliveries/{delivery_id}/attempts",
+        Case::Invalid,
+        HOOK_DELIVERY_422,
+    ),
+    (
+        "GET /repos/{owner}/{repo}/hooks/{hook_id}/deliveries/{delivery_id}",
+        Case::Invalid,
+        HOOK_DELIVERY_422,
+    ),
+    (
+        "POST /repos/{owner}/{repo}/hooks/{hook_id}/deliveries/{delivery_id}/attempts",
+        Case::Invalid,
+        HOOK_DELIVERY_422,
+    ),
     (
         "GET /app/hook/deliveries/{delivery_id}",
         Case::Invalid,
@@ -53,6 +75,17 @@ fn inventory() -> BTreeSet<String> {
         .collect()
 }
 
+fn gated_routes(registry: &Registry) -> BTreeSet<String> {
+    let mut routes = inventory();
+    routes.extend(
+        registry
+            .operations()
+            .filter(|op| op.registered)
+            .map(|op| format!("{} {}", op.method.as_str(), op.path)),
+    );
+    routes
+}
+
 fn sample_path(template: &str) -> String {
     template
         .split('/')
@@ -79,11 +112,18 @@ fn required(registry: &Registry, route: &str) -> Vec<Case> {
         if req.scope == Scope::Repo {
             cases.push(Case::UnseenRepository);
         }
-        let every_installation_has_it = req
+        let metadata_read = |g: &Grant| g.permission == "metadata" && g.access == Access::Read;
+        let every_installation_has_it =
+            req.any_of.iter().any(metadata_read) && req.all_of.iter().all(metadata_read);
+        let hides_hooks = req
             .any_of
             .iter()
-            .any(|g| g.permission == "metadata" && g.access == Access::Read);
-        if !req.any_of.is_empty() && !every_installation_has_it {
+            .chain(req.all_of)
+            .any(|g| matches!(g.permission, "repository_hooks" | "organization_hooks"));
+        if (!req.any_of.is_empty() || !req.all_of.is_empty())
+            && !every_installation_has_it
+            && !hides_hooks
+        {
             cases.push(Case::MissingPermission);
         }
     }
@@ -117,13 +157,36 @@ fn the_required_cases_come_from_the_registration_and_the_description() {
         case("GET /repos/{owner}/{repo}"),
         [Case::Success, Case::UnseenRepository]
     );
+    assert_eq!(
+        case("GET /repos/{owner}/{repo}/hooks"),
+        [Case::Success, Case::UnseenRepository]
+    );
+    assert_eq!(case("GET /orgs/{org}/hooks"), [Case::Success]);
     assert_eq!(case("GET /app"), [Case::Success]);
     assert_eq!(case("POST /graphql"), [Case::Success]);
 }
 
+#[test]
+fn the_gate_covers_registered_operations_outside_the_client_inventory() {
+    // Given the whole server's registrations, an operation the client inventory leaves out, and a route outside the description
+    let registry = Registries::new(hubdouble_api::register_all).rest;
+    let operation = "GET /repos/{owner}/{repo}/actions/secrets";
+    let outside = "GET /_actions/.well-known/openid-configuration";
+    assert!(!inventory().contains(operation));
+    assert!(!inventory().contains(outside));
+
+    // When the gated routes are listed
+    let gated = gated_routes(&registry);
+
+    // Then the gate requires the cases of both, and only a success for the route the description lacks
+    assert!(gated.contains(operation));
+    assert!(gated.contains(outside));
+    assert_eq!(required(&registry, outside), [Case::Success]);
+}
+
 fn routes_needing(case: Case) -> Vec<(Method, String)> {
     let registry = Registries::new(hubdouble_api::register_all).rest;
-    inventory()
+    gated_routes(&registry)
         .into_iter()
         .filter(|route| required(&registry, route).contains(&case))
         .map(|route| {
@@ -230,9 +293,19 @@ async fn every_route_with_a_permission_answers_403_to_an_installation_without_it
         .await;
     installation_token(&server, "ghs_metadata_only", 4009, 5009);
     let client = GoGithub::new(&server).with_token("ghs_metadata_only");
+    let registry = Registries::new(hubdouble_api::register_all).rest;
+    let installations_call = |method: &Method, template: &str| {
+        registry
+            .route(method, &sample_path(template))
+            .and_then(|r| r.entry)
+            .is_none_or(|entry| entry.tokens.installation)
+    };
 
-    for (method, template) in routes_needing(Case::MissingPermission) {
-        // When the route is called on a repository the installation can see
+    for (method, template) in routes_needing(Case::MissingPermission)
+        .into_iter()
+        .filter(|(method, template)| installations_call(method, template))
+    {
+        // When the route, which GitHub serves to installations, is called on a repository the installation can see
         let path = concrete(&template, fixture::ORG, fixture::PRIVATE_REPO);
         let answer = send(&client, &method, &path).await;
 
@@ -248,13 +321,13 @@ async fn every_route_with_a_permission_answers_403_to_an_installation_without_it
 fn required_webhooks(plan: &str) -> BTreeSet<(String, Option<String>)> {
     let (_, section) = plan
         .split_once("### 4.3 Webhooks")
-        .unwrap_or_else(|| panic!("plan 4.3 is missing"));
+        .unwrap_or_else(|| panic!("the webhook table is missing"));
     let mut required = BTreeSet::new();
     let rows = section.lines().take_while(|line| !line.starts_with("### "));
     for row in rows.filter(|row| row.starts_with("| `")) {
         let (events, cause) = row[2..]
             .split_once(" | ")
-            .unwrap_or_else(|| panic!("invalid plan 4.3 row: {row}"));
+            .unwrap_or_else(|| panic!("invalid webhook table row: {row}"));
         if cause.contains("does not block done") {
             continue;
         }
@@ -280,12 +353,12 @@ fn required_webhooks(plan: &str) -> BTreeSet<(String, Option<String>)> {
             }
         }
     }
-    assert!(!required.is_empty(), "plan 4.3 has no webhook cases");
+    assert!(!required.is_empty(), "the webhook table has no cases");
     required
 }
 
 #[test]
-fn every_inventory_case_gets_a_checked_answer_or_signed_delivery() {
+fn every_registered_case_gets_a_checked_answer_or_signed_delivery() {
     // Given every other conformance test, run in its own nextest process, records its checked answers
     let dir = tempfile::TempDir::new().unwrap();
     let mut run = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
@@ -310,7 +383,7 @@ fn every_inventory_case_gets_a_checked_answer_or_signed_delivery() {
     // When the suite runs
     let out = run.output().unwrap();
 
-    // Then it passes and every inventory route has a checked answer for each case that applies
+    // Then it passes and every inventory route and registered operation has a checked answer for each case that applies
     let stderr = String::from_utf8_lossy(&out.stderr);
     let tail: Vec<&str> = stderr.lines().rev().take(40).collect();
     assert!(
@@ -323,7 +396,7 @@ fn every_inventory_case_gets_a_checked_answer_or_signed_delivery() {
         records.iter().map(|r| (r.route.clone(), r.case)).collect();
     let registry = Registries::new(hubdouble_api::register_all).rest;
     let mut missing = Vec::new();
-    for route in inventory() {
+    for route in gated_routes(&registry) {
         for case in required(&registry, &route) {
             let unsent = DESCRIBED_NOT_SENT
                 .iter()
@@ -342,7 +415,7 @@ fn every_inventory_case_gets_a_checked_answer_or_signed_delivery() {
     for variant in VARIANTS {
         if !records.iter().any(|r| proves(r, variant)) {
             missing.push(format!(
-                "{}: no checked {} answer with [{}] (plan 4.8 {})",
+                "{}: no checked {} answer with [{}] (call table {})",
                 variant.route,
                 variant.status,
                 variant.facts.join(" "),
@@ -356,11 +429,11 @@ fn every_inventory_case_gets_a_checked_answer_or_signed_delivery() {
         let name = action
             .as_ref()
             .map_or_else(|| event.clone(), |a| format!("{event}.{a}"));
-        missing.push(format!("{name}: no checked signed delivery (plan 4.3)"));
+        missing.push(format!("{name}: no checked signed delivery"));
     }
     assert!(
         missing.is_empty(),
-        "inventory cases without a checked answer or signed delivery:\n  {}",
+        "cases without a checked answer or signed delivery:\n  {}",
         missing.join("\n  ")
     );
 }
@@ -453,8 +526,8 @@ fn answer_fields(call: &str) -> impl Iterator<Item = &'static str> + '_ {
 }
 
 #[test]
-fn the_variant_table_holds_every_variant_plan_section_4_8_names() {
-    // Given plan section 4.8's rows, with a requirement such as E9 read from section 1.1
+fn the_variant_table_holds_every_variant_the_call_table_names() {
+    // Given the call table's rows, with a requirement such as E9 read from the requirement list
     let rows = plan_variant_rows();
 
     // When each word a row puts in backticks, outside its source citations, is looked up
@@ -485,7 +558,7 @@ fn the_variant_table_holds_every_variant_plan_section_4_8_names() {
     // Then each is a variant of the table or an answer field, and the table cites only plan rows
     assert!(
         unknown.is_empty(),
-        "plan 4.8 names what the variant table lacks:\n  {}",
+        "the call table names what the variant table lacks:\n  {}",
         unknown.join("\n  ")
     );
     for plan in VARIANTS
@@ -493,6 +566,6 @@ fn the_variant_table_holds_every_variant_plan_section_4_8_names() {
         .map(|v| v.plan)
         .chain(ANSWER_FIELDS.iter().map(|(p, _)| *p))
     {
-        assert!(by_call.contains_key(plan), "{plan} is not a plan 4.8 row");
+        assert!(by_call.contains_key(plan), "{plan} is not a call table row");
     }
 }

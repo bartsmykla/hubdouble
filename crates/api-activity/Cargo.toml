@@ -1,0 +1,33 @@
+[package]
+name = "hubdouble-api-activity"
+description = "Stars, watching, notifications and events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+hubdouble-admin.workspace = true
+hubdouble-auth.workspace = true
+hubdouble-model.workspace = true
+hubdouble-render.workspace = true
+hubdouble-rest.workspace = true
+hubdouble-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+criterion.workspace = true
+http.workspace = true
+hubdouble-git.workspace = true
+hubdouble-gql.workspace = true
+
+[[bench]]
+name = "activity"
+harness = false
+
+[lints]
+workspace = true

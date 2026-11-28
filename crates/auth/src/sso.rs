@@ -1,5 +1,5 @@
 use hubdouble_model::ApiError;
-use hubdouble_store::{Entity, Rows, StoreBuilder, Tx, TxMut};
+use hubdouble_store::{Deleted, Entity, Rows, StoreBuilder, Tx, TxMut};
 
 /// A user's SSO sign-in for an SSO-enforced org, made by `/orgs/{org}/sso`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +30,20 @@ pub type SsoSessions = Rows<SsoSession>;
 /// Registers the tables the choke point reads beyond the frozen ones. The server calls it on its
 /// `StoreBuilder` next to `GitBuilder::new`.
 pub fn register_tables(b: &mut StoreBuilder) {
-    b.register_table::<SsoSessions>();
+    b.register_table::<SsoSessions>().on_delete(forget_sso);
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a deletion subscriber returns a Result"
+)]
+fn forget_sso(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    if let Deleted::Account(account) = deleted {
+        let id = account.id;
+        tx.table_mut::<SsoSessions>()
+            .remove_where(|s| s.org_id == id || s.user_id == id);
+    }
+    Ok(())
 }
 
 #[must_use]

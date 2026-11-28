@@ -336,6 +336,15 @@ async fn reviews_can_be_discarded_edited_or_dismissed_in_the_right_state() {
         json!({"message": "Replaced"})
     );
     assert_eq!(dismissed["state"], "DISMISSED");
+    rest!(client, PUT, path, "pulls/update-review", 422, json!({}));
+    rest!(
+        client,
+        PUT,
+        action,
+        "pulls/dismiss-review",
+        422,
+        json!({"message": "Again"})
+    );
     let deliveries = drain(&server).await;
     assert_eq!(
         webhook(&deliveries, "pull_request_review", "edited")["changes"]["body"]["from"],

@@ -33,13 +33,16 @@ impl Delivery {
             .unwrap_or("")
     }
 
+    /// The payload: the JSON body, or the `payload` parameter of a form-encoded body.
+    ///
     /// # Panics
     ///
-    /// When the body is not JSON.
+    /// When the payload is not JSON.
     #[must_use]
     pub fn json(&self) -> Value {
-        serde_json::from_slice(&self.body)
-            .unwrap_or_else(|e| panic!("the delivery is not JSON: {e}"))
+        let json = crate::validate::delivery_json(self.header("content-type"), &self.body)
+            .unwrap_or_else(|| panic!("the delivery has neither a JSON nor a form body"));
+        serde_json::from_slice(&json).unwrap_or_else(|e| panic!("the delivery is not JSON: {e}"))
     }
 
     /// Whether `X-Hub-Signature-256` is `sha256=` and the HMAC SHA-256 of the body with `secret`.
@@ -64,8 +67,19 @@ impl Delivery {
     }
 }
 
-/// A webhook receiver on its own port-0 listener. Every request answers `200` and queues a
-/// [`Delivery`]; a test waits on [`Receiver::next`], never on time.
+fn answer_status(query: Option<&str>) -> StatusCode {
+    query
+        .into_iter()
+        .flat_map(|q| q.split('&'))
+        .find_map(|pair| pair.strip_prefix("status="))
+        .and_then(|code| code.parse::<u16>().ok())
+        .and_then(|code| StatusCode::from_u16(code).ok())
+        .unwrap_or(StatusCode::OK)
+}
+
+/// A webhook receiver on its own port-0 listener. Every request queues a [`Delivery`] and
+/// answers `200`, or the code of a `status` query parameter of its URL, such as
+/// `?status=404`; a test waits on [`Receiver::next`], never on time.
 pub struct Receiver {
     url: String,
     deliveries: Mutex<mpsc::UnboundedReceiver<Delivery>>,
@@ -95,6 +109,7 @@ impl Receiver {
                         let tx = tx.clone();
                         async move {
                             let (parts, body) = req.into_parts();
+                            let status = answer_status(parts.uri.query());
                             let body = body
                                 .collect()
                                 .await
@@ -105,7 +120,7 @@ impl Receiver {
                                 body,
                             });
                             let mut response = Response::new(Full::new(Bytes::new()));
-                            *response.status_mut() = StatusCode::OK;
+                            *response.status_mut() = status;
                             Ok::<_, Infallible>(response)
                         }
                     });

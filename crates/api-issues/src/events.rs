@@ -12,7 +12,7 @@ use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::{Accounts, Entity, Issues, Repos, Rows, Teams, Tx, TxMut};
 use serde_json::{Value, json};
 
-use crate::shared::{full_name, integration, user};
+use crate::shared::{author, full_name, integration};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum What {
@@ -285,7 +285,7 @@ pub(crate) fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
             "id": e.id,
             "node_id": e.node_id,
             "url": format!("{}/repos/{full}/issues/events/{}", urls.api, e.id),
-            "actor": user(tx, urls, e.actor_id),
+            "actor": author(tx, urls,e.actor_id),
             "event": e.what.name(),
             "commit_url": commit_url,
             "commit_id": commit_id,
@@ -306,13 +306,13 @@ fn fields_of(tx: &Tx, urls: &Urls, e: &IssueEvent) -> Vec<(&'static str, Value)>
             ("intent", Value::Null),
         ],
         What::Assigned(id) => vec![
-            ("assignee", json!(user(tx, urls, *id))),
-            ("assigner", json!(user(tx, urls, e.actor_id))),
+            ("assignee", json!(author(tx, urls, *id))),
+            ("assigner", json!(author(tx, urls, e.actor_id))),
             ("intent", Value::Null),
         ],
         What::Unassigned(id) => vec![
-            ("assignee", json!(user(tx, urls, *id))),
-            ("assigner", json!(user(tx, urls, e.actor_id))),
+            ("assignee", json!(author(tx, urls, *id))),
+            ("assigner", json!(author(tx, urls, e.actor_id))),
         ],
         What::Renamed { from, to } => vec![("rename", json!({"from": from, "to": to}))],
         What::Closed(reason) => vec![
@@ -333,9 +333,9 @@ fn fields_of(tx: &Tx, urls: &Urls, e: &IssueEvent) -> Vec<(&'static str, Value)>
         What::Locked(reason) => vec![("lock_reason", json!(reason))],
         What::Merged(_) | What::PullRef(_) | What::Unlocked | What::AtCommit { .. } => vec![],
         What::ReviewRequest { reviewer, .. } => vec![
-            ("review_requester", json!(user(tx, urls, e.actor_id))),
+            ("review_requester", json!(author(tx, urls, e.actor_id))),
             match reviewer {
-                Reviewer::User(id) => ("requested_reviewer", json!(user(tx, urls, *id))),
+                Reviewer::User(id) => ("requested_reviewer", json!(author(tx, urls, *id))),
                 Reviewer::Team(id) => ("requested_team", json!(team(tx, urls, *id))),
             },
         ],
@@ -385,6 +385,7 @@ fn commit_in(
 
 const READ_COMMIT: Requirement = Requirement {
     any_of: &[Grant::read("contents")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };

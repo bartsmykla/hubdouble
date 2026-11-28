@@ -31,6 +31,7 @@ fn handler(_: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 const fn repo(any_of: &'static [Grant]) -> Requirement {
     Requirement {
         any_of,
+        all_of: &[],
         scope: Scope::Repo,
         scopes: &[],
     }
@@ -41,6 +42,7 @@ const MISSPELT: Requirement = repo(&[Grant::read("content")]);
 const NO_TARGET: Requirement = repo(&[Grant::read("metadata")]);
 const PUBLIC_WITH_GRANT: Requirement = Requirement {
     any_of: &[Grant::read("metadata")],
+    all_of: &[],
     scope: Scope::Public,
     scopes: &[],
 };

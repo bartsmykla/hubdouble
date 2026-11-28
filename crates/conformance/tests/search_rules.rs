@@ -1,5 +1,9 @@
-use hubdouble_model::{Reaction, ReactionContent, ReactionSubjectKind, Timestamp, node_id};
-use hubdouble_store::{Issues, Reactions};
+use std::collections::BTreeMap;
+
+use hubdouble_model::{
+    Access, Reaction, ReactionContent, ReactionSubjectKind, Timestamp, Token, TokenKind, node_id,
+};
+use hubdouble_store::{Accounts, Installations, Issues, Reactions, Tokens};
 use hubdouble_testkit::fixture::{self, ALICE_ID, ALICE_TOKEN, BOB_TOKEN, CAROL_TOKEN};
 use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer};
 use serde_json::{Value, json};
@@ -11,12 +15,26 @@ const SEARCH: &str = "query($query: String!) {
   }
 }";
 
+const MEMBERS_APP_ID: i64 = 4201;
+const MEMBERS_INSTALLATION_ID: i64 = 5201;
+
 async fn server() -> TestServer {
     let mut builder = TestServer::builder().frame(hubdouble_api::register_all);
     for entry in fixture::seed() {
         builder = builder.entry(entry);
     }
     builder
+        .entry(json!({
+            "kind": "app", "id": MEMBERS_APP_ID, "slug": "members-app", "name": "Members App",
+            "owner": fixture::ORG, "public_key": fixture::APP_PUBLIC_KEY,
+            "permissions": {"members": "read", "metadata": "read", "pull_requests": "read"},
+            "events": [],
+        }))
+        .entry(json!({
+            "kind": "installation", "id": MEMBERS_INSTALLATION_ID, "app": "members-app",
+            "account": fixture::ORG,
+            "permissions": {"members": "read", "metadata": "read", "pull_requests": "read"},
+        }))
         .entry(json!({
             "kind": "team", "org": "acme", "name": "Secret", "privacy": "secret",
             "members": [{"login": "alice"}],
@@ -32,6 +50,39 @@ async fn server() -> TestServer {
         }))
         .start()
         .await
+}
+
+fn insert_app_tokens(server: &TestServer, tokens: &[(&str, i64, Option<i64>)]) {
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            for &(token, app_id, installation_id) in tokens {
+                let id = tx.next_id();
+                tx.table_mut::<Tokens>().insert(Token {
+                    id,
+                    token: token.into(),
+                    kind: if installation_id.is_some() {
+                        TokenKind::Installation
+                    } else {
+                        TokenKind::User
+                    },
+                    user_id: installation_id.is_none().then_some(ALICE_ID),
+                    app_id: Some(app_id),
+                    installation_id,
+                    repo_ids: None,
+                    permissions: BTreeMap::new(),
+                    scopes: Vec::new(),
+                    expires_at: None,
+                    revoked: false,
+                    owner_seeded: true,
+                    created_at: Timestamp::SEED,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 fn created(answer: &Answer) -> Value {
@@ -123,6 +174,228 @@ async fn a_team_qualifier_matches_only_a_team_the_searcher_can_see() {
             vec![vec![], vec![], vec![], vec![]],
         ]
     );
+}
+
+#[tokio::test]
+async fn a_team_qualifier_needs_an_app_installed_on_the_org_with_members_read() {
+    // Given alice, an admin of acme, with a user token of the fixture App, whose installation
+    // on acme has no members permission, and one of an App installed on acme with
+    // members=read, and an installation token of each App
+    const USER_WITHOUT_MEMBERS: &str = "ghu_alice_of_the_app_without_members";
+    const USER_WITH_MEMBERS: &str = "ghu_alice_of_the_app_with_members";
+    const INSTALLATION_WITHOUT_MEMBERS: &str = "ghs_installation_without_members";
+    const INSTALLATION_WITH_MEMBERS: &str = "ghs_installation_with_members";
+    let server = server().await;
+    insert_app_tokens(
+        &server,
+        &[
+            (USER_WITHOUT_MEMBERS, fixture::APP_ID, None),
+            (USER_WITH_MEMBERS, MEMBERS_APP_ID, None),
+            (
+                INSTALLATION_WITHOUT_MEMBERS,
+                fixture::APP_ID,
+                Some(fixture::INSTALLATION_ID),
+            ),
+            (
+                INSTALLATION_WITH_MEMBERS,
+                MEMBERS_APP_ID,
+                Some(MEMBERS_INSTALLATION_ID),
+            ),
+        ],
+    );
+    created(
+        &GoGithub::new(&server)
+            .with_token(ALICE_TOKEN)
+            .post(
+                "repos/acme/public/pulls/1/requested_reviewers",
+                &json!({"team_reviewers": ["secret", "reviewers"]}),
+            )
+            .await,
+    );
+
+    // When each token searches for the pull request that requests both teams
+    let mut seen = Vec::new();
+    for token in [
+        USER_WITHOUT_MEMBERS,
+        INSTALLATION_WITHOUT_MEMBERS,
+        USER_WITH_MEMBERS,
+        INSTALLATION_WITH_MEMBERS,
+    ] {
+        let client = GoGithub::new(&server).with_token(token);
+        let mut row = Vec::new();
+        for query in [
+            "team-review-requested:acme/secret",
+            "team-review-requested:acme/reviewers",
+        ] {
+            row.push(numbers(&client, query).await);
+        }
+        seen.push(row);
+    }
+
+    // Then only the App with members=read on acme resolves acme's teams
+    let hidden = vec![vec![], vec![]];
+    let found = vec![vec![1], vec![1]];
+    assert_eq!(seen, vec![hidden.clone(), hidden, found.clone(), found]);
+}
+
+#[tokio::test]
+async fn a_team_qualifier_needs_an_active_installation_and_a_token_that_keeps_members() {
+    // Given an App installed on acme with members=read, alice's user token of it, and an
+    // installation token of it narrowed to permissions without members
+    const USER_WITH_MEMBERS: &str = "ghu_alice_of_the_app_with_members";
+    const NARROWED: &str = "ghs_installation_narrowed_without_members";
+    let server = server().await;
+    insert_app_tokens(&server, &[(USER_WITH_MEMBERS, MEMBERS_APP_ID, None)]);
+    created(
+        &GoGithub::new(&server)
+            .with_token(ALICE_TOKEN)
+            .post(
+                "repos/acme/public/pulls/1/requested_reviewers",
+                &json!({"team_reviewers": ["reviewers"]}),
+            )
+            .await,
+    );
+    let store = &server.server.services().store;
+    store
+        .update(|tx| {
+            let id = tx.next_id();
+            tx.table_mut::<Tokens>().insert(Token {
+                id,
+                token: NARROWED.into(),
+                kind: TokenKind::Installation,
+                user_id: None,
+                app_id: Some(MEMBERS_APP_ID),
+                installation_id: Some(MEMBERS_INSTALLATION_ID),
+                repo_ids: None,
+                permissions: BTreeMap::from([
+                    ("metadata".to_owned(), Access::Read),
+                    ("pull_requests".to_owned(), Access::Read),
+                ]),
+                scopes: Vec::new(),
+                expires_at: None,
+                revoked: false,
+                owner_seeded: true,
+                created_at: Timestamp::SEED,
+            })?;
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+    let query = "team-review-requested:acme/reviewers";
+
+    // When the narrowed token searches, and the user token searches before and after the
+    // installation is suspended
+    let narrowed = numbers(&GoGithub::new(&server).with_token(NARROWED), query).await;
+    let active = numbers(&GoGithub::new(&server).with_token(USER_WITH_MEMBERS), query).await;
+    store
+        .update(|tx| {
+            let mut installation = (**tx
+                .table::<Installations>()
+                .get(MEMBERS_INSTALLATION_ID)
+                .unwrap())
+            .clone();
+            installation.suspended_at = Some(Timestamp::SEED);
+            tx.table_mut::<Installations>().replace(installation)?;
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+    let suspended = numbers(&GoGithub::new(&server).with_token(USER_WITH_MEMBERS), query).await;
+
+    // Then
+    assert_eq!(narrowed, Vec::<i64>::new());
+    assert_eq!(active, vec![1]);
+    assert_eq!(suspended, Vec::<i64>::new());
+}
+
+#[tokio::test]
+async fn a_team_qualifier_needs_sso_for_a_user_token_on_an_org_that_enforces_it() {
+    // Given acme enforces SSO, and alice holds a user token of an App with members=read
+    const USER_WITH_MEMBERS: &str = "ghu_alice_of_the_app_with_members";
+    let server = server().await;
+    insert_app_tokens(&server, &[(USER_WITH_MEMBERS, MEMBERS_APP_ID, None)]);
+    created(
+        &GoGithub::new(&server)
+            .with_token(ALICE_TOKEN)
+            .post(
+                "repos/acme/public/pulls/1/requested_reviewers",
+                &json!({"team_reviewers": ["secret"]}),
+            )
+            .await,
+    );
+    let store = &server.server.services().store;
+    store
+        .update(|tx| {
+            let mut acme = (**tx.table::<Accounts>().get(fixture::ORG_ID).unwrap()).clone();
+            acme.sso_enforced = true;
+            tx.table_mut::<Accounts>().replace(acme)?;
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+    let client = GoGithub::new(&server).with_token(USER_WITH_MEMBERS);
+    let query = "team-review-requested:acme/secret";
+
+    // When alice searches before and after she authorizes SSO
+    let before = numbers(&client, query).await;
+    store
+        .update(|tx| hubdouble_auth::record_sso(tx, ALICE_ID, fixture::ORG_ID))
+        .unwrap_or_else(|error| panic!("{error}"));
+    let after = numbers(&client, query).await;
+
+    // Then
+    assert_eq!(before, Vec::<i64>::new());
+    assert_eq!(after, vec![1]);
+}
+
+#[tokio::test]
+async fn a_team_qualifier_needs_an_org_scope_for_a_classic_token() {
+    // Given alice, an admin of acme, with a classic token of no scope and one of read:org
+    const NO_SCOPE: &str = "ghp_a11ce00000000000000000000000000noscope";
+    const READ_ORG: &str = "ghp_a11ce00000000000000000000000000readorg";
+    let server = server().await;
+    created(
+        &GoGithub::new(&server)
+            .with_token(ALICE_TOKEN)
+            .post(
+                "repos/acme/public/pulls/1/requested_reviewers",
+                &json!({"team_reviewers": ["secret"]}),
+            )
+            .await,
+    );
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            for (token, scopes) in [(NO_SCOPE, vec![]), (READ_ORG, vec!["read:org".to_owned()])] {
+                let id = tx.next_id();
+                tx.table_mut::<Tokens>().insert(Token {
+                    id,
+                    token: token.into(),
+                    kind: TokenKind::Personal,
+                    user_id: Some(ALICE_ID),
+                    app_id: None,
+                    installation_id: None,
+                    repo_ids: None,
+                    permissions: BTreeMap::new(),
+                    scopes,
+                    expires_at: None,
+                    revoked: false,
+                    owner_seeded: true,
+                    created_at: Timestamp::SEED,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    // When each token searches for the pull request that requests the secret team
+    let mut seen = Vec::new();
+    for token in [NO_SCOPE, READ_ORG] {
+        let client = GoGithub::new(&server).with_token(token);
+        seen.push(numbers(&client, "team-review-requested:acme/secret").await);
+    }
+
+    // Then
+    assert_eq!(seen, vec![vec![], vec![1]]);
 }
 
 #[tokio::test]

@@ -15,7 +15,7 @@ pub use shared::{comment_view, issue_view};
 
 use crate::shared::{ISSUES_READ, ISSUES_WRITE, READ, WRITE};
 
-/// Registers what T7 owns: the issue event and manual link side tables, the `issue_link` kind,
+/// Registers what this crate owns: the issue event and manual link side tables, the `issue_link` kind,
 /// the ref subscriber that closes issues from commits and pull requests on the default branch,
 /// the issue, label, comment and reaction operations, and the `Issue`,
 /// `IssueComment` and `Repository.issue` GraphQL types and fields.
@@ -23,7 +23,9 @@ pub fn register(r: &mut Registrar<'_>) {
     r.store.register_table::<events::IssueEvents>();
     r.store.register_table::<links::IssueLinks>();
     r.store.register_table::<links::MergeCloses>();
-    r.store.register_table::<links::CommitCloses>();
+    r.store
+        .register_table::<links::CommitCloses>()
+        .on_delete(links::forget);
     r.git.on_ref_update(links::ref_updated);
     r.admin.kind("issue_link", links::seed);
 

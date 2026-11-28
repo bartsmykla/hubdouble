@@ -75,6 +75,9 @@ pub enum Scope {
 pub struct Requirement {
     /// Any one grant suffices, as GitHub documents per operation; empty for public data.
     pub any_of: &'static [Grant],
+    /// Grants needed together with one of `any_of`, for the permission sets that GitHub
+    /// documents with more than one permission (Pages needs `pages` and `administration`).
+    pub all_of: &'static [Grant],
     pub scope: Scope,
     /// Classic OAuth scopes, any one of which suffices for a classic token.
     pub scopes: &'static [&'static str],
@@ -85,6 +88,7 @@ impl Requirement {
     pub const fn public() -> Requirement {
         Requirement {
             any_of: &[],
+            all_of: &[],
             scope: Scope::Public,
             scopes: &[],
         }

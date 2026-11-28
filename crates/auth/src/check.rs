@@ -7,9 +7,12 @@ use hubdouble_model::{
 use hubdouble_store::{Accounts, Installations, Memberships, Repos, Teams, Tx};
 
 use crate::contract::{Actor, Target};
+use crate::requirement::PUBLIC_READ_PERMISSIONS;
 use crate::sso::has_sso;
 
 const MAX_TEAM_DEPTH: usize = 32;
+const SIGNED_IN_ORG_READS: &[&str] = &["organization_events"];
+const WEBHOOK_SCOPES: &[&str] = &["admin:repo_hook", "write:repo_hook", "read:repo_hook"];
 
 pub(crate) fn authorize(
     tx: &Tx,
@@ -17,6 +20,7 @@ pub(crate) fn authorize(
     req: &Requirement,
     target: Target<'_>,
     base_url: &str,
+    operation_public: bool,
 ) -> Result<(), ApiError> {
     match req.scope {
         Scope::Public => Ok(()),
@@ -30,7 +34,7 @@ pub(crate) fn authorize(
                 installation,
                 ..
             } => {
-                if satisfies(req.any_of, |p| installation_level(token, installation, p)) {
+                if satisfies(req, |p| installation_level(token, installation, p)) {
                     Ok(())
                 } else {
                     Err(integration_denied(req))
@@ -45,11 +49,11 @@ pub(crate) fn authorize(
             Actor::App { .. } | Actor::Installation { .. } => Err(integration_denied(req)),
         },
         Scope::Repo => match target {
-            Target::Repo(repo) => repo_access(tx, actor, req, repo, base_url),
+            Target::Repo(repo) => repo_access(tx, actor, req, repo, base_url, operation_public),
             Target::Org(_) | Target::None => Err(no_target()),
         },
         Scope::Org => match target {
-            Target::Org(org) => org_access(tx, actor, req, org, base_url),
+            Target::Org(org) => org_access(tx, actor, req, org, base_url, operation_public),
             Target::Repo(_) | Target::None => Err(no_target()),
         },
     }
@@ -147,12 +151,22 @@ fn repo_access(
     req: &Requirement,
     repo: &Repo,
     base_url: &str,
+    operation_public: bool,
 ) -> Result<(), ApiError> {
-    if !can_see(tx, actor, repo) {
+    let reaches = match actor {
+        Actor::User { token, user } if webhook_scope(token, req) => {
+            !repo.is_private() || repo_role(tx, user.id, repo).is_some()
+        }
+        _ => can_see(tx, actor, repo),
+    };
+    if !reaches {
         return Err(ApiError::not_found());
     }
+    let public_data = public_read(req);
+    let public_read = public_data && operation_public;
     match actor {
-        Actor::Anonymous if is_read(req) => Ok(()),
+        Actor::Anonymous if hidden(req) => Err(ApiError::not_found()),
+        Actor::Anonymous if public_read => Ok(()),
         Actor::Anonymous => Err(requires_authentication()),
         Actor::App { .. } => Err(integration_denied(req)),
         Actor::Installation {
@@ -161,12 +175,14 @@ fn repo_access(
             ..
         } => {
             let allowed = if covers(installation, Some(token), repo) {
-                satisfies(req.any_of, |p| installation_level(token, installation, p))
+                satisfies(req, |p| installation_level(token, installation, p))
             } else {
-                is_read(req)
+                public_read
             };
             if allowed {
                 Ok(())
+            } else if hidden(req) {
+                Err(ApiError::not_found())
             } else {
                 Err(integration_denied(req))
             }
@@ -175,11 +191,13 @@ fn repo_access(
             if repo.is_private() {
                 sso(tx, token, user, repo.owner_id, base_url)?;
             }
-            user_to_server(token, req, is_read(req), |app| {
+            user_to_server(token, req, public_read, |app| {
                 app_installation(tx, app, repo)
             })?;
-            classic_scopes(token, req)?;
-            if token.kind == TokenKind::Personal && !is_read(req) {
+            if repo.is_private() || !public_repo_hook_scope(token, req) {
+                classic_scopes(token, req)?;
+            }
+            if token.kind == TokenKind::Personal && !is_read(req) && !webhook_scope(token, req) {
                 let wanted = if repo.is_private() {
                     &["repo"][..]
                 } else {
@@ -189,10 +207,13 @@ fn repo_access(
                     return Err(scope_denied(wanted));
                 }
             }
-            let held =
-                repo_role(tx, user.id, repo).or((!repo.is_private()).then_some(RepoRole::Read));
+            let held = repo_role(tx, user.id, repo)
+                .or((!repo.is_private() && (public_data || !is_read(req)))
+                    .then_some(RepoRole::Read));
             if held >= Some(needed_role(req)) {
                 Ok(())
+            } else if hidden(req) {
+                Err(ApiError::not_found())
             } else {
                 Err(user_denied(token, req))
             }
@@ -206,15 +227,13 @@ fn org_access(
     req: &Requirement,
     org: &Account,
     base_url: &str,
+    operation_public: bool,
 ) -> Result<(), ApiError> {
-    let public_read = is_read(req)
-        && (req.any_of.is_empty()
-            || req
-                .any_of
-                .iter()
-                .any(|grant| grant.permission != "organization_self_hosted_runners"));
+    let public_data = public_read(req);
+    let public_read = public_data && operation_public;
     match actor {
         Actor::Anonymous if public_read => Ok(()),
+        Actor::Anonymous if hidden(req) => Err(ApiError::not_found()),
         Actor::Anonymous => Err(requires_authentication()),
         Actor::App { .. } => Err(integration_denied(req)),
         Actor::Installation {
@@ -223,12 +242,14 @@ fn org_access(
             ..
         } => {
             let allowed = if installation.account_id == org.id {
-                satisfies(req.any_of, |p| installation_level(token, installation, p))
+                satisfies(req, |p| installation_level(token, installation, p))
             } else {
                 public_read
             };
             if allowed {
                 Ok(())
+            } else if hidden(req) {
+                Err(ApiError::not_found())
             } else {
                 Err(integration_denied(req))
             }
@@ -242,7 +263,7 @@ fn org_access(
                     .map(AsRef::as_ref)
             })?;
             classic_scopes(token, req)?;
-            if public_read {
+            if public_data || signed_in_read(req) {
                 return Ok(());
             }
             let role = tx
@@ -250,11 +271,13 @@ fn org_access(
                 .of(org.id, user.id)
                 .filter(|m| m.state == MembershipState::Active)
                 .map(|m| m.role);
-            let needs_owner = req.any_of.iter().all(|g| {
+            let owner_grant = |g: &Grant| {
                 g.access == Access::Admin
                     || g.permission == "members"
                     || g.permission.starts_with("organization_")
-            });
+            };
+            let needs_owner =
+                req.any_of.iter().all(owner_grant) || req.all_of.iter().any(owner_grant);
             let allowed = match role {
                 Some(OrgRole::Admin) => true,
                 Some(OrgRole::Member) => !needs_owner,
@@ -262,6 +285,8 @@ fn org_access(
             };
             if allowed {
                 Ok(())
+            } else if hidden(req) {
+                Err(ApiError::not_found())
             } else {
                 Err(user_denied(token, req))
             }
@@ -279,13 +304,13 @@ fn user_to_server<'t>(
         return Ok(());
     };
     let allowed = match installation(app) {
-        Some(i) => satisfies(req.any_of, |p| {
-            implicit_metadata(p, i.permissions.get(p).copied())
-        }),
+        Some(i) => satisfies(req, |p| implicit_metadata(p, i.permissions.get(p).copied())),
         None => allow_uninstalled,
     };
     if allowed {
         Ok(())
+    } else if hidden(req) {
+        Err(ApiError::not_found())
     } else {
         Err(integration_denied(req))
     }
@@ -323,7 +348,7 @@ fn app_installation<'t>(tx: &'t Tx, app_id: i64, repo: &Repo) -> Option<&'t Inst
         .filter(|i| covers(i, None, repo))
 }
 
-fn covers(installation: &Installation, token: Option<&Token>, repo: &Repo) -> bool {
+pub(crate) fn covers(installation: &Installation, token: Option<&Token>, repo: &Repo) -> bool {
     installation.suspended_at.is_none()
         && installation.account_id == repo.owner_id
         && (installation.repository_selection == RepositorySelection::All
@@ -355,29 +380,56 @@ pub(crate) fn implicit_metadata(permission: &str, level: Option<Access>) -> Opti
     }
 }
 
-fn satisfies(any_of: &[Grant], level: impl Fn(&str) -> Option<Access>) -> bool {
-    any_of.is_empty()
-        || any_of
-            .iter()
-            .any(|g| level(g.permission).is_some_and(|l| l >= g.access))
+fn satisfies(req: &Requirement, level: impl Fn(&str) -> Option<Access>) -> bool {
+    let holds = |g: &Grant| level(g.permission).is_some_and(|l| l >= g.access);
+    req.all_of.iter().all(holds) && (req.any_of.is_empty() || req.any_of.iter().any(holds))
 }
 
 fn is_read(req: &Requirement) -> bool {
-    req.any_of.iter().all(|g| g.access == Access::Read)
+    req.any_of
+        .iter()
+        .chain(req.all_of)
+        .all(|g| g.access == Access::Read)
+}
+
+fn public_read(req: &Requirement) -> bool {
+    let public =
+        |g: &Grant| g.access == Access::Read && PUBLIC_READ_PERMISSIONS.contains(&g.permission);
+    req.all_of.iter().all(public) && (req.any_of.is_empty() || req.any_of.iter().any(public))
+}
+
+fn signed_in_read(req: &Requirement) -> bool {
+    !req.any_of.is_empty()
+        && req
+            .any_of
+            .iter()
+            .chain(req.all_of)
+            .all(|g| g.access == Access::Read && SIGNED_IN_ORG_READS.contains(&g.permission))
+}
+
+fn hidden(req: &Requirement) -> bool {
+    req.any_of
+        .iter()
+        .chain(req.all_of)
+        .any(|g| matches!(g.permission, "repository_hooks" | "organization_hooks"))
+}
+
+fn role_for(g: &Grant) -> RepoRole {
+    match (g.access, g.permission) {
+        (_, "repository_hooks") | (Access::Admin, _) | (Access::Write, "administration") => {
+            RepoRole::Admin
+        }
+        (Access::Read, _) | (Access::Write, "issues" | "pull_requests" | "discussions") => {
+            RepoRole::Read
+        }
+        (Access::Write, _) => RepoRole::Write,
+    }
 }
 
 fn needed_role(req: &Requirement) -> RepoRole {
-    req.any_of
-        .iter()
-        .map(|g| match (g.access, g.permission) {
-            (Access::Read, _) | (Access::Write, "issues" | "pull_requests" | "discussions") => {
-                RepoRole::Read
-            }
-            (Access::Admin, _) | (Access::Write, "administration") => RepoRole::Admin,
-            (Access::Write, _) => RepoRole::Write,
-        })
-        .min()
-        .unwrap_or(RepoRole::Read)
+    let alternative = req.any_of.iter().map(role_for).min();
+    let joint = req.all_of.iter().map(role_for).max();
+    alternative.max(joint).unwrap_or(RepoRole::Read)
 }
 
 fn classic_scopes(token: &Token, req: &Requirement) -> Result<(), ApiError> {
@@ -386,9 +438,25 @@ fn classic_scopes(token: &Token, req: &Requirement) -> Result<(), ApiError> {
         || req.scopes.iter().any(|w| holds_scope(&token.scopes, w))
     {
         Ok(())
+    } else if hidden(req) {
+        Err(ApiError::not_found())
     } else {
         Err(scope_denied(req.scopes))
     }
+}
+
+fn public_repo_hook_scope(token: &Token, req: &Requirement) -> bool {
+    token.kind == TokenKind::Personal
+        && req.scopes.iter().any(|w| WEBHOOK_SCOPES.contains(w))
+        && holds_scope(&token.scopes, "public_repo")
+}
+
+fn webhook_scope(token: &Token, req: &Requirement) -> bool {
+    token.kind == TokenKind::Personal
+        && req
+            .scopes
+            .iter()
+            .any(|w| WEBHOOK_SCOPES.contains(w) && holds_scope(&token.scopes, w))
 }
 
 fn holds_scope(held: &[String], wanted: &str) -> bool {
@@ -421,26 +489,33 @@ fn implies(held: &str, wanted: &str) -> bool {
         )
 }
 
-fn accepted_permissions(any_of: &[Grant]) -> String {
+fn accepted_permissions(req: &Requirement) -> String {
     let mut out = String::new();
-    for (i, g) in any_of.iter().enumerate() {
-        if i > 0 {
+    let mut set = |first: Option<&Grant>| {
+        if !out.is_empty() {
             out.push_str("; ");
         }
-        let _ = write!(out, "{}={}", g.permission, g.access.as_str());
+        for (i, g) in first.into_iter().chain(req.all_of).enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "{}={}", g.permission, g.access.as_str());
+        }
+    };
+    if req.any_of.is_empty() {
+        set(None);
+    } else {
+        req.any_of.iter().for_each(|g| set(Some(g)));
     }
     out
 }
 
 fn integration_denied(req: &Requirement) -> ApiError {
     let e = ApiError::forbidden("Resource not accessible by integration");
-    if req.any_of.is_empty() {
+    if req.any_of.is_empty() && req.all_of.is_empty() {
         e
     } else {
-        e.with_header(
-            "X-Accepted-GitHub-Permissions",
-            accepted_permissions(req.any_of),
-        )
+        e.with_header("X-Accepted-GitHub-Permissions", accepted_permissions(req))
     }
 }
 

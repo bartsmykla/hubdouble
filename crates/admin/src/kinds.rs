@@ -30,6 +30,24 @@ fn id_or_next(ctx: &mut SeedCtx<'_>, given: Option<i64>) -> i64 {
     given.unwrap_or_else(|| ctx.tx.next_id())
 }
 
+fn account_id(ctx: &mut SeedCtx<'_>, given: Option<i64>) -> i64 {
+    given.unwrap_or_else(|| match ctx.tx.next_id() {
+        id if Account::is_ghost(id, "") => ctx.tx.next_id(),
+        id => id,
+    })
+}
+
+fn insert_account(ctx: &mut SeedCtx<'_>, a: Account) -> Result<(), ApiError> {
+    if Account::is_ghost(a.id, &a.login) {
+        return Err(ApiError::unprocessable(format!(
+            "account {} {} is reserved for the ghost user",
+            a.id, a.login
+        )));
+    }
+    ctx.tx.table_mut::<Accounts>().insert(a)?;
+    Ok(())
+}
+
 fn account<'t>(tx: &'t Tx, login: &str) -> Result<&'t Arc<Account>, ApiError> {
     tx.table::<Accounts>()
         .by_login(login)
@@ -161,7 +179,7 @@ pub(crate) fn user_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<(
     if s.login.is_empty() {
         return Err(ApiError::unprocessable("login is empty"));
     }
-    let id = id_or_next(ctx, s.id);
+    let id = account_id(ctx, s.id);
     let prefix = if kind == AccountKind::Bot {
         node_id::BOT
     } else {
@@ -177,7 +195,7 @@ pub(crate) fn user_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<(
     a.twitter_username = s.twitter_username;
     a.site_admin = s.site_admin;
     a.verified_email = s.verified_email;
-    ctx.tx.table_mut::<Accounts>().insert(a)?;
+    insert_account(ctx, a)?;
     for t in s.tokens {
         personal_token(ctx, id, t)?;
     }
@@ -274,7 +292,7 @@ struct OrgSeed {
 
 pub(crate) fn org_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<(), ApiError> {
     let s: OrgSeed = decode(v)?;
-    let id = id_or_next(ctx, s.id);
+    let id = account_id(ctx, s.id);
     let mut a = blank_account(
         id,
         node_id::ORGANIZATION,
@@ -290,7 +308,7 @@ pub(crate) fn org_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<()
     a.location = s.location;
     a.twitter_username = s.twitter_username;
     a.sso_enforced = s.sso_enforced;
-    ctx.tx.table_mut::<Accounts>().insert(a)?;
+    insert_account(ctx, a)?;
     for m in s.members {
         let user_id = user(&ctx.tx, &m.login)?.id;
         let role = match m.role.as_deref() {
@@ -611,6 +629,9 @@ pub(crate) fn app_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<()
             "slug {ACTIONS_APP_SLUG} belongs to GitHub Actions"
         )));
     }
+    if s.id.is_some_and(|id| id < 1) {
+        return Err(ApiError::unprocessable("App ID must be positive"));
+    }
     if s.id == Some(ACTIONS_APP_ID) {
         return Err(ApiError::unprocessable(format!(
             "App ID {ACTIONS_APP_ID} belongs to GitHub Actions"
@@ -624,7 +645,7 @@ pub(crate) fn app_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<()
             id => id,
         },
     };
-    let bot_id = id_or_next(ctx, s.bot_id);
+    let bot_id = account_id(ctx, s.bot_id);
     let now = ctx.clock.now();
     let mut bot = blank_account(
         bot_id,
@@ -634,7 +655,7 @@ pub(crate) fn app_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<()
         now,
     );
     bot.app_id = Some(id);
-    ctx.tx.table_mut::<Accounts>().insert(bot)?;
+    insert_account(ctx, bot)?;
     ctx.tx.table_mut::<Apps>().insert(App {
         id,
         node_id: node_id::entity(node_id::APP, id),
