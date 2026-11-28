@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use hubdouble_hooks::Hooks;
 use hubdouble_store::{Apps, Store};
 use serde_json::Value;
 
@@ -190,20 +191,26 @@ impl Recorder {
 
     pub(crate) fn record_webhook(&self, delivery: &Delivery, payload: &Value, store: &Store) {
         let Some(file) = &self.file else { return };
-        let Ok(app_id) = delivery.header("x-github-hook-id").parse() else {
+        let Ok(hook_id) = delivery.header("x-github-hook-id").parse() else {
             return;
         };
+        let target = delivery.header("x-github-hook-installation-target-type");
         let signed = store
             .view(|tx| {
-                let secret = tx
-                    .table::<Apps>()
-                    .get(app_id)
-                    .and_then(|app| app.webhook.as_ref()?.secret.as_deref());
-                Ok(secret.map(|secret| delivery.signed_with(secret)))
+                let secret = if target == "integration" {
+                    tx.table::<Apps>()
+                        .get(hook_id)
+                        .and_then(|app| app.webhook.as_ref()?.secret.clone())
+                } else {
+                    tx.try_table::<Hooks>()
+                        .and_then(|hooks| hooks.get(hook_id))
+                        .and_then(|hook| hook.secret.clone())
+                };
+                Ok(secret.map(|secret| delivery.signed_with(&secret)))
             })
             .unwrap_or_else(|e| panic!("read the webhook secret: {e}"));
         if let Some(signed) = signed {
-            assert!(signed, "invalid signature for App {app_id}");
+            assert!(signed, "invalid signature for {target} hook {hook_id}");
             let event = delivery.header("x-github-event");
             let action = payload["action"].as_str().unwrap_or_default();
             append(
