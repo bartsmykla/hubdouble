@@ -521,6 +521,20 @@ For a release with `draft: false`, the loader creates the tag at `target_commiti
   author: alice
 ```
 
+## `environment`
+
+| Field | Type | Required | Default |
+| --- | --- | --- | --- |
+| `id` | Integer | No | Allocated ID |
+| `repository` | `owner/repo` string | Yes | None |
+| `name` | String, unique in the repository without case | Yes | None |
+
+```yaml
+- kind: environment
+  repository: workshop/demo
+  name: production
+```
+
 ## `ruleset`
 
 | Field | Type | Required | Default |

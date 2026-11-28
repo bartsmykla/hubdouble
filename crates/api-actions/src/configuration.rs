@@ -55,7 +55,7 @@ pub(crate) fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiErr
     let id = match deleted {
         Deleted::Repo(repo) => repo.id,
         Deleted::Account(account) => account.id,
-        Deleted::Team(_) => return Ok(()),
+        Deleted::Team(_) | Deleted::Environment(_) => return Ok(()),
     };
     tx.table_mut::<Entries>().remove_children(id);
     let selecting: Vec<_> = tx

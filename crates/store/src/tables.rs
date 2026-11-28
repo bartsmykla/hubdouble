@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 use hubdouble_model::{
-    Account, App, CheckRun, CheckSuite, Delivery, Installation, Issue, IssueComment, Label,
-    Membership, Pull, Reaction, Release, ReleaseAsset, Repo, Review, ReviewComment, ReviewThread,
-    Ruleset, Status, Team, Timestamp, Token, WorkflowJob, WorkflowRun,
+    Account, App, CheckRun, CheckSuite, Delivery, Environment, Installation, Issue, IssueComment,
+    Label, Membership, Pull, Reaction, Release, ReleaseAsset, Repo, Review, ReviewComment,
+    ReviewThread, Ruleset, Status, Team, Timestamp, Token, WorkflowJob, WorkflowRun,
 };
 
 use crate::blobs::Blobs;
@@ -26,6 +26,7 @@ pub type ReviewComments = Rows<ReviewComment>;
 pub type ReviewThreads = Rows<ReviewThread>;
 pub type Reactions = Rows<Reaction>;
 pub type Labels = Rows<Label>;
+pub type Environments = Rows<Environment>;
 pub type CheckSuites = Rows<CheckSuite>;
 pub type CheckRuns = Rows<CheckRun>;
 pub type Statuses = Rows<Status>;
@@ -54,6 +55,7 @@ pub(crate) fn register_frozen(b: &mut StoreBuilder) {
         .register_table::<ReviewThreads>()
         .register_table::<Reactions>()
         .register_table::<Labels>()
+        .register_table::<Environments>()
         .register_table::<CheckSuites>()
         .register_table::<CheckRuns>()
         .register_table::<Statuses>()
@@ -376,6 +378,29 @@ impl Entity for Label {
     }
     fn keys(&self) -> Vec<String> {
         vec![pair(self.repo_id, &self.name)]
+    }
+}
+
+impl Entity for Environment {
+    fn id(&self) -> i64 {
+        self.id
+    }
+    fn node_id(&self) -> Option<&str> {
+        Some(&self.node_id)
+    }
+    fn repo_id(&self) -> Option<i64> {
+        Some(self.repo_id)
+    }
+    fn keys(&self) -> Vec<String> {
+        vec![pair(self.repo_id, &self.name)]
+    }
+}
+
+impl Rows<Environment> {
+    /// Case-insensitive, as GitHub matches environment names.
+    #[must_use]
+    pub fn by_name(&self, repo_id: i64, name: &str) -> Option<&Arc<Environment>> {
+        self.by_key(&pair(repo_id, name))
     }
 }
 

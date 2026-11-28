@@ -93,7 +93,7 @@ fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
             HookOwner::Repo(repo.id)
         }
         Deleted::Account(account) => HookOwner::Org(account.id),
-        Deleted::Team(_) => return Ok(()),
+        Deleted::Team(_) | Deleted::Environment(_) => return Ok(()),
     };
     let hooks: Vec<i64> = tx
         .table::<Hooks>()

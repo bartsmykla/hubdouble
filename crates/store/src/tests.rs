@@ -3,13 +3,13 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use bytes::Bytes;
 use hubdouble_model::{
-    Account, AccountKind, ApiError, Delivery, DeliveryRequest, DeliveryResponse, Repo, Timestamp,
-    Visibility, node_id,
+    Account, AccountKind, ApiError, Delivery, DeliveryRequest, DeliveryResponse, Environment, Repo,
+    Timestamp, Visibility, node_id,
 };
 
 use crate::{
     Accounts, Blob, Blobs, Committed, Counters, Deleted, DeletionSubscriber, Deliveries,
-    OutboxEntry, OutboxUse, Repos, Sequence, Store, StoreBuilder, Table, TxMut,
+    Environments, OutboxEntry, OutboxUse, Repos, Sequence, Store, StoreBuilder, Table, TxMut,
 };
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -511,11 +511,13 @@ fn note_deletion(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> 
         Deleted::Repo(r) => format!("repo {}", r.id),
         Deleted::Team(t) => format!("team {}", t.id),
         Deleted::Account(a) => format!("account {}", a.id),
+        Deleted::Environment(e) => format!("environment {}", e.id),
     };
     let still_there = match deleted {
         Deleted::Repo(r) => tx.table::<Repos>().get(r.id).is_some(),
         Deleted::Team(_) => true,
         Deleted::Account(a) => tx.table::<Accounts>().get(a.id).is_some(),
+        Deleted::Environment(e) => tx.table::<Environments>().get(e.id).is_some(),
     };
     tx.table_mut::<Notes>()
         .get_mut()
@@ -566,6 +568,84 @@ fn deleting_an_account_deletes_its_repositories_first_and_subscribers_see_the_ro
         assert!(tx.table::<Accounts>().get(1).is_none());
         let repos: Vec<i64> = tx.table::<Repos>().iter().map(|r| r.id).collect();
         assert_eq!(repos, [12]);
+        Ok(())
+    })
+    .unwrap();
+}
+
+fn environment(id: i64, repo_id: i64, name: &str) -> Environment {
+    Environment {
+        id,
+        node_id: node_id::entity(node_id::ENVIRONMENT, id),
+        repo_id,
+        name: name.into(),
+        created_at: Timestamp::SEED,
+        updated_at: Timestamp::SEED,
+    }
+}
+
+#[test]
+fn deleting_an_environment_drops_its_row_and_keeps_other_environments() {
+    // Given two environments of a repository
+    let s = deleting(note_deletion);
+    s.update(|tx| {
+        tx.table_mut::<Environments>()
+            .insert(environment(20, 10, "staging"))?;
+        tx.table_mut::<Environments>()
+            .insert(environment(21, 10, "production"))?;
+        Ok(())
+    })
+    .unwrap();
+
+    // When one is deleted
+    s.update(|tx| {
+        let staging = tx
+            .table::<Environments>()
+            .by_name(10, "STAGING")
+            .cloned()
+            .unwrap();
+        tx.delete(&Deleted::Environment(staging))
+    })
+    .unwrap();
+
+    // Then the subscriber saw it before it went, and the other environment stays
+    s.view(|tx| {
+        assert_eq!(tx.table::<Notes>().0, ["environment 20 true"]);
+        let kept: Vec<i64> = tx.table::<Environments>().iter().map(|e| e.id).collect();
+        assert_eq!(kept, [21]);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn deleting_a_repository_deletes_its_environments_first() {
+    // Given an environment in each of two repositories
+    let s = deleting(note_deletion);
+    s.update(|tx| {
+        tx.table_mut::<Environments>()
+            .insert(environment(20, 10, "staging"))?;
+        tx.table_mut::<Environments>()
+            .insert(environment(21, 12, "staging"))?;
+        Ok(())
+    })
+    .unwrap();
+
+    // When the first repository is deleted
+    s.update(|tx| {
+        let repo = tx.table::<Repos>().get(10).cloned().unwrap();
+        tx.delete(&Deleted::Repo(repo))
+    })
+    .unwrap();
+
+    // Then its environment went as its own deletion, and the other repository keeps its own
+    s.view(|tx| {
+        assert_eq!(
+            tx.table::<Notes>().0,
+            ["environment 20 true", "repo 10 true"]
+        );
+        let kept: Vec<i64> = tx.table::<Environments>().iter().map(|e| e.id).collect();
+        assert_eq!(kept, [21]);
         Ok(())
     })
     .unwrap();

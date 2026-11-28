@@ -19,6 +19,7 @@ Use `POST /_hubdouble/{kind}` with one JSON object. Use the fields for that kind
 | `actions`, `actions_secret`, `actions_variable` | [Actions policy](seed.md#actions) or [secret and variable](seed.md#actions_secret-and-actions_variable) fields |
 | `actions_runner` | [Self-hosted runner](seed.md#actions_runner) fields |
 | `release`, `ruleset` | [Release](seed.md#release) or [ruleset](seed.md#ruleset) fields |
+| `environment` | [Environment](seed.md#environment) fields |
 
 An explicit ID must exceed the current ID sequence. Replace startup environment templates with their values in admin requests. Some creates emit webhook events. Startup seed application emits none.
 
@@ -69,6 +70,7 @@ The App routes accept a numeric App ID in place of the slug. App and user reads 
 | --- | --- | --- |
 | `PATCH /_hubdouble/repos/{owner}/{repo}` | Optional `sender`, `name`, `owner`, `description`, `homepage`, `default_branch`, `topics`, `archived`, `visibility`, and `private`. | `200` with the updated repository object. |
 | `DELETE /_hubdouble/repos/{owner}/{repo}` | Optional `sender` | `204`. Removes the repository. |
+| `DELETE /_hubdouble/environments/{owner}/{repo}/{name}` | None | `204`. Removes the environment and every row that other features keep for it. The name matches without case. Returns `404` if the repository has no such environment. |
 | `POST /_hubdouble/repos/{owner}/{repo}/pulls/{pull_number}/mergeability` | No body | `200` with the pull request object. Completes a pending mergeability computation at once against the base the pull request shows. On a pull request without one, computes the test merge against the live base tip and keeps `base.sha`, as GitHub's later computation after a base push does. A closed pull request does not change. |
 | `PATCH /_hubdouble/releases/{release_id}` | Optional `sender`, `tag_name`, `target_commitish`, `name`, `body`, `draft`, and `prerelease`. | `200` with the updated release object. |
 | `GET /_hubdouble/org/{org}/members/{login}` | None | `200` with the membership object, including `url`, `organization_url`, `organization`, `user`, `role`, and `state`. |

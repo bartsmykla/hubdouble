@@ -5,14 +5,16 @@ use bytes::Bytes;
 use http::{Method, StatusCode};
 use http_body_util::Full;
 use hubdouble_admin::{
-    AdminHandler, AdminRequest, Registrar, Services, clear_repository_properties, error_response,
-    json_response, read_json,
+    AdminHandler, AdminRequest, Registrar, SeedCtx, Services, clear_repository_properties,
+    error_response, json_response, read_json,
 };
 use hubdouble_git::{Git, ObjectId};
-use hubdouble_model::{AccountKind, ApiError, Release, Repo, Visibility};
+use hubdouble_model::{AccountKind, ApiError, Environment, Release, Repo, Visibility, node_id};
 use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
 use hubdouble_rest::Params;
-use hubdouble_store::{Accounts, Deleted, Releases, RepoRedirects, Repos, Table, Tx, TxMut};
+use hubdouble_store::{
+    Accounts, Deleted, Environments, Releases, RepoRedirects, Repos, Table, Tx, TxMut,
+};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -34,6 +36,56 @@ pub(crate) fn register(r: &mut Registrar<'_>) {
         .route(Method::DELETE, "/repos/{owner}/{repo}", route(delete_repo));
     r.admin
         .route(Method::PATCH, "/releases/{release_id}", route(edit_release));
+    r.admin.kind("environment", environment_kind);
+    r.admin.route(
+        Method::DELETE,
+        "/environments/{owner}/{repo}/{name}",
+        route(delete_environment),
+    );
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnvironmentSeed {
+    #[serde(default)]
+    id: Option<i64>,
+    repository: String,
+    name: String,
+}
+
+fn environment_kind(ctx: &mut SeedCtx<'_>, v: Value) -> Result<(), ApiError> {
+    let s: EnvironmentSeed = decode(v)?;
+    let repo = repo_by_full_name(&ctx.tx, &s.repository)?;
+    if s.name.is_empty() {
+        return Err(ApiError::unprocessable("name is empty"));
+    }
+    let id = s.id.unwrap_or_else(|| ctx.tx.next_id());
+    let now = ctx.clock.now();
+    ctx.tx.table_mut::<Environments>().insert(Environment {
+        id,
+        node_id: node_id::entity(node_id::ENVIRONMENT, id),
+        repo_id: repo.id,
+        name: s.name,
+        created_at: now,
+        updated_at: now,
+    })?;
+    Ok(())
+}
+
+fn delete_environment(
+    tx: &mut TxMut<'_>,
+    _: &Services,
+    params: &Params,
+    _: Value,
+) -> Result<Option<Value>, ApiError> {
+    let repo = named_repo(tx, params)?;
+    let environment = tx
+        .table::<Environments>()
+        .by_name(repo.id, params.get("name").unwrap_or_default())
+        .cloned()
+        .ok_or_else(ApiError::not_found)?;
+    tx.delete(&Deleted::Environment(environment))?;
+    Ok(None)
 }
 
 pub(crate) fn decode<T: DeserializeOwned>(v: Value) -> Result<T, ApiError> {

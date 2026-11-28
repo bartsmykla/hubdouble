@@ -1,6 +1,8 @@
 use http::Method;
 use hubdouble_hooks::Hooks;
-use hubdouble_store::{CheckRuns, IssueComments, Issues, Releases, Rulesets, Statuses, Teams};
+use hubdouble_store::{
+    CheckRuns, Environments, IssueComments, Issues, Releases, Rulesets, Statuses, Teams,
+};
 use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer, fixture};
 use serde_json::{Value, json};
 
@@ -57,7 +59,23 @@ fn repo_rows(owner: &str, name: &str) -> Vec<Value> {
                "rules": [{"type": "required_linear_history"}]}),
         json!({"kind": "actions_variable", "repository": full, "name": "STAGE",
                "value": "prod"}),
+        json!({"kind": "environment", "repository": full, "name": "staging"}),
     ]
+}
+
+fn environments(server: &TestServer, repo_id: i64) -> Vec<String> {
+    server
+        .server
+        .services()
+        .store
+        .view(|tx| {
+            Ok(tx
+                .table::<Environments>()
+                .in_repo(repo_id)
+                .map(|e| e.name.clone())
+                .collect())
+        })
+        .unwrap_or_else(|error| panic!("{error}"))
 }
 
 fn carol_in_acme() -> Value {
@@ -189,8 +207,13 @@ async fn deleting_a_repository_drops_the_rows_of_every_feature_and_keeps_other_r
     }
     assert_no_repo_rows(&server, fixture::PUBLIC_REPO_ID);
     assert_eq!(hook_count(&server, fixture::PUBLIC_REPO_ID), 0);
+    assert_eq!(
+        environments(&server, fixture::PUBLIC_REPO_ID),
+        Vec::<String>::new()
+    );
     assert_eq!(feed_sizes(&alice, fixture::ORG, "kept").await, kept);
     assert_eq!(hook_count(&server, KEPT_REPO_ID), 1);
+    assert_eq!(environments(&server, KEPT_REPO_ID), ["staging"]);
 
     // And a new repository with the same name starts empty
     let mut fresh = repository(0, fixture::ORG, fixture::PUBLIC_REPO);
@@ -201,6 +224,28 @@ async fn deleting_a_repository_drops_the_rows_of_every_feature_and_keeps_other_r
     admin(&server, Method::POST, "repository", Some(&fresh)).await;
     let fresh = feed_sizes(&alice, fixture::ORG, fixture::PUBLIC_REPO).await;
     assert!(fresh.iter().all(|size| *size == 0), "{fresh:?}");
+}
+
+#[tokio::test]
+async fn deleting_an_environment_drops_it_and_keeps_the_other_environments() {
+    // Given two environments of a repository
+    let server = start(vec![
+        json!({"kind": "environment", "repository": "acme/public", "name": "staging"}),
+        json!({"kind": "environment", "repository": "acme/public", "name": "production"}),
+    ])
+    .await;
+
+    // When one is deleted
+    let path = "environments/acme/public/Staging";
+    admin(&server, Method::DELETE, path, None).await;
+
+    // Then it is gone, a second deletion answers 404, and the other environment stays
+    assert_eq!(
+        environments(&server, fixture::PUBLIC_REPO_ID),
+        ["production"]
+    );
+    let again = server.admin(Method::DELETE, path, None).await;
+    assert_eq!(again.status.as_u16(), 404);
 }
 
 #[tokio::test]

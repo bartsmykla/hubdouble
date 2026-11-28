@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use hubdouble_model::{Account, ApiError, Repo, Team};
+use hubdouble_model::{Account, ApiError, Environment, Repo, Team};
 
 use crate::rows::{Entity, Rows};
 use crate::store::TxMut;
 use crate::tables::{
-    Accounts, ActivityEvents, Apps, CheckRuns, CheckSuites, Deliveries, Installations,
-    IssueComments, Issues, Labels, Memberships, Reactions, ReleaseAssets, Releases, RepoRedirects,
-    Repos, ReviewComments, ReviewThreads, Reviews, Rulesets, Statuses, Teams, Tokens, WorkflowJobs,
-    WorkflowRuns,
+    Accounts, ActivityEvents, Apps, CheckRuns, CheckSuites, Deliveries, Environments,
+    Installations, IssueComments, Issues, Labels, Memberships, Reactions, ReleaseAssets, Releases,
+    RepoRedirects, Repos, ReviewComments, ReviewThreads, Reviews, Rulesets, Statuses, Teams,
+    Tokens, WorkflowJobs, WorkflowRuns,
 };
 
 /// An entity that [`TxMut::delete`] removes.
@@ -18,6 +18,7 @@ pub enum Deleted {
     Team(Arc<Team>),
     /// A user or an organization.
     Account(Arc<Account>),
+    Environment(Arc<Environment>),
 }
 
 /// Removes a crate's own rows of a deleted entity inside the deleting transaction. It runs
@@ -36,6 +37,16 @@ pub(crate) fn delete(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiErr
             delete(tx, &Deleted::Team(team))?;
         }
     }
+    if let Deleted::Repo(repo) = deleted {
+        let environments: Vec<_> = tx
+            .table::<Environments>()
+            .in_repo(repo.id)
+            .cloned()
+            .collect();
+        for environment in environments {
+            delete(tx, &Deleted::Environment(environment))?;
+        }
+    }
     for subscriber in tx.deletion_subscribers().iter() {
         subscriber(tx, deleted)?;
     }
@@ -45,6 +56,9 @@ pub(crate) fn delete(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiErr
             tx.table_mut::<Teams>().remove(team.id);
         }
         Deleted::Account(account) => drop_account(tx, account.id),
+        Deleted::Environment(environment) => {
+            tx.table_mut::<Environments>().remove(environment.id);
+        }
     }
     Ok(())
 }

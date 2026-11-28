@@ -495,6 +495,18 @@ pub struct Reaction {
     pub created_at: Timestamp,
 }
 
+/// A deployment environment of a repository.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Environment {
+    pub id: i64,
+    pub node_id: String,
+    pub repo_id: i64,
+    pub name: String,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Label {
