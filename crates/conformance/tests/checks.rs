@@ -996,6 +996,28 @@ async fn status_check_rollup_reports_the_worst_latest_context() {
 }
 
 #[tokio::test]
+async fn an_anonymous_caller_reads_a_check_run_of_a_public_repository() {
+    // Given a check run on the public acme/public
+    let server = start(vec![]).await;
+    let head = sha(&server, "main");
+    let created = checked(
+        &app_client(&server)
+            .post(RUNS, &json!({"name": "build", "head_sha": head}))
+            .await,
+        201,
+        "checks/create",
+    );
+
+    // When a caller without a token reads it
+    let read = GoGithub::enterprise(&server)
+        .get(&format!("{RUNS}/{}", created["id"]))
+        .await;
+
+    // Then GitHub serves it, as rest-permissions.tsv marks checks/get public_read=yes
+    assert_eq!(checked(&read, 200, "checks/get")["id"], created["id"]);
+}
+
+#[tokio::test]
 async fn every_operation_hides_unseen_repositories_and_needs_its_permission() {
     // Given
     let server = start(vec![]).await;

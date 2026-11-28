@@ -864,41 +864,6 @@ fn the_public_read_permissions_are_those_github_serves_publicly_on_a_repository_
     assert_eq!(ours, public);
 }
 
-#[test]
-fn every_read_github_serves_publicly_passes_anonymously_on_a_public_repository() {
-    // Given GitHub's permission table and an anonymous caller
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/inventory/rest-permissions.tsv"
-    );
-    let table = std::fs::read_to_string(path).expect("table");
-    let store = store();
-
-    for (route, grants) in public_reads(&table) {
-        if !(route.contains("{owner}") && route.contains("{repo}")) {
-            continue;
-        }
-        // When the read's grants guard a public repository
-        let all_of: Vec<Grant> = grants
-            .iter()
-            .map(|(permission, _)| Grant::read(Box::leak(permission.to_string().into_boxed_str())))
-            .collect();
-        let req = Requirement {
-            any_of: &[],
-            all_of: Box::leak(all_of.into_boxed_slice()),
-            scope: Scope::Repo,
-            scopes: &[],
-        };
-
-        // Then the anonymous caller passes
-        assert_eq!(
-            status(on_repo(&store, &Actor::Anonymous, &req, PUBLIC)),
-            200,
-            "{route} {grants:?}"
-        );
-    }
-}
-
 /// The repository and org routes GitHub marks `public_read=yes`, with the grants of each
 /// all-read alternative (`|` between alternatives, `+` inside one) that installations and
 /// user-to-server tokens take.

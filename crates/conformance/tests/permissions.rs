@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use hubdouble_model::Requirement;
+use hubdouble_auth::{Actor, Target, authorize_operation};
+use hubdouble_model::{ApiError, Requirement, Scope};
 use hubdouble_rest::Entry;
 use hubdouble_server::Registries;
+use hubdouble_store::{Accounts, Repos};
+use hubdouble_testkit::{TestServer, fixture};
 
 const TABLE: &str = include_str!("../../../docs/inventory/rest-permissions.tsv");
 const EXTRAS: &str = include_str!("../../../docs/inventory/rest-extra-permissions.tsv");
@@ -210,6 +213,67 @@ fn every_registered_operation_needs_the_access_github_documents() {
     for id in extras.keys().filter(|id| !extras_seen.contains(*id)) {
         mismatches.push(format!("{id}: an extra row without a registration"));
     }
+    assert!(mismatches.is_empty(), "\n{}", mismatches.join("\n"));
+}
+
+#[tokio::test]
+async fn every_registered_read_github_serves_publicly_passes_anonymously_on_public_data() {
+    // Given every registration of the whole server, the table, and the public acme/public
+    let registry = Registries::new(hubdouble_api::register_all).rest;
+    let table = table();
+    let server = TestServer::builder()
+        .frame(hubdouble_api::register_all)
+        .fixture()
+        .start()
+        .await;
+
+    // When each registration of a table row is authorized for an anonymous caller with its
+    // own requirement and public_read flag
+    let mismatches = server
+        .server
+        .services()
+        .store
+        .view(|tx| {
+            let repo = tx
+                .table::<Repos>()
+                .get(fixture::PUBLIC_REPO_ID)
+                .ok_or_else(ApiError::not_found)?;
+            let org = tx
+                .table::<Accounts>()
+                .get(fixture::ORG_ID)
+                .ok_or_else(ApiError::not_found)?;
+            let mut mismatches = Vec::new();
+            for entry in registry.entries() {
+                let id = entry.operation_id;
+                let Some(row) = table.get(id) else { continue };
+                if entry.public_read != row.public_read {
+                    mismatches.push(format!(
+                        "{id}: GitHub public_read {}, hubdouble {}",
+                        row.public_read, entry.public_read
+                    ));
+                }
+                let target = match entry.requirement.scope {
+                    Scope::Repo => Target::Repo(repo),
+                    Scope::Org => Target::Org(org),
+                    _ => continue,
+                };
+                if row.public_read
+                    && let Err(e) = authorize_operation(
+                        tx,
+                        &Actor::Anonymous,
+                        &entry.requirement,
+                        target,
+                        entry.public_read,
+                    )
+                {
+                    mismatches.push(format!("{id}: anonymous read answers {}", e.status));
+                }
+            }
+            Ok(mismatches)
+        })
+        .unwrap_or_else(|e| panic!("{}", e.status));
+
+    // Then each flag matches the table and each public read passes
     assert!(mismatches.is_empty(), "\n{}", mismatches.join("\n"));
 }
 
