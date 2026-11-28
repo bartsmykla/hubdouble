@@ -491,6 +491,11 @@ pub struct ActivityEvent {
     pub created_at: Timestamp,
 }
 
+impl ActivityEvent {
+    /// How long GitHub's feeds list an event after it happened.
+    pub const RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
+}
+
 impl Entity for ActivityEvent {
     fn id(&self) -> i64 {
         self.id

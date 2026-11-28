@@ -2,6 +2,8 @@ use hubdouble_model::{AccountKind, Event};
 use hubdouble_store::{Accounts, ActivityEvent, ActivityEvents, Counters, Repos, Sequence, TxMut};
 use serde_json::{Map, Value, json};
 
+const EXPIRED_EVENTS_PER_WRITE: usize = 64;
+
 const ISSUE_ACTIONS: [&str; 8] = [
     "opened",
     "edited",
@@ -170,7 +172,18 @@ pub(crate) fn record(tx: &mut TxMut<'_>, e: &Event) {
         public: !repo.is_private(),
         created_at: tx.now(),
     };
-    let _ = tx.table_mut::<ActivityEvents>().insert(row);
+    let oldest = row
+        .created_at
+        .plus_seconds(-ActivityEvent::RETENTION_SECONDS);
+    let mut events = tx.table_mut::<ActivityEvents>();
+    let expired: Vec<i64> = events
+        .iter()
+        .take(EXPIRED_EVENTS_PER_WRITE)
+        .take_while(|e| e.created_at < oldest)
+        .map(|e| e.id)
+        .collect();
+    events.remove_all(expired);
+    let _ = events.insert(row);
 }
 
 #[cfg(test)]

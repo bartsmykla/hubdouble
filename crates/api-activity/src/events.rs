@@ -20,7 +20,6 @@ const EVENTS: PageLimit = PageLimit {
     before_overflow: true,
 };
 
-const RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
 const PUBLIC_PER_PAGE: usize = 15;
 const PER_PAGE: usize = 30;
 const MOST_PER_PAGE: usize = 100;
@@ -150,7 +149,7 @@ fn reply<'e>(
     per_page: usize,
     events: impl Iterator<Item = &'e Arc<ActivityEvent>>,
 ) -> Result<Reply, ApiError> {
-    let oldest = ctx.now().plus_seconds(-RETENTION_SECONDS);
+    let oldest = ctx.now().plus_seconds(-ActivityEvent::RETENTION_SECONDS);
     let tx = ctx.tx();
     let accounts = tx.table::<Accounts>();
     let mut kept: Vec<(&ActivityEvent, &Account)> = events

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use http::Method;
 use hubdouble_model::{ApiError, Timestamp, Token, TokenKind, Visibility};
-use hubdouble_store::{Accounts, Repos, Tokens};
+use hubdouble_store::{Accounts, ActivityEvents, Repos, Tokens};
 use hubdouble_testkit::{Answer, GoGithub, TestServer, fixture};
 use serde_json::{Value, json};
 
@@ -472,4 +472,36 @@ async fn event_feeds_hold_only_the_past_30_days() {
     assert!(fresh.len() >= 4);
     assert_eq!(within, fresh);
     assert_eq!(past, Vec::<Value>::new());
+}
+
+#[tokio::test]
+async fn a_new_event_drops_the_events_past_30_days_from_the_store() {
+    // Given events in the public repository, and 31 days later
+    let server = start().await;
+    act(&server).await;
+    server.clock.advance(31 * DAY);
+
+    // When alice opens another issue
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    ok(
+        &alice
+            .post("repos/acme/public/issues", &json!({"title": "Later"}))
+            .await,
+        "issue",
+    );
+
+    // Then the store keeps only that issue's event
+    let kept: Vec<&'static str> = server
+        .server
+        .services()
+        .store
+        .view(|tx| {
+            Ok(tx
+                .table::<ActivityEvents>()
+                .iter()
+                .map(|e| e.kind)
+                .collect())
+        })
+        .unwrap_or_else(|error: ApiError| panic!("{error}"));
+    assert_eq!(kept, ["IssuesEvent"]);
 }
