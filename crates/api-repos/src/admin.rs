@@ -9,7 +9,9 @@ use hubdouble_admin::{
     error_response, json_response, read_json,
 };
 use hubdouble_git::{Git, ObjectId};
-use hubdouble_model::{AccountKind, ApiError, Environment, Release, Repo, Visibility, node_id};
+use hubdouble_model::{
+    AccountKind, ApiError, Environment, Event, Release, Repo, Visibility, node_id,
+};
 use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
 use hubdouble_rest::Params;
 use hubdouble_store::{
@@ -344,14 +346,30 @@ fn edit_repo(
         crate::emit(tx, "repository", action, id, sender, Map::new());
     }
     if new.is_private() != old.is_private() {
-        let action = if new.is_private() {
-            "privatized"
-        } else {
-            "publicized"
-        };
-        crate::emit(tx, "repository", action, id, sender, Map::new());
+        emit_visibility(tx, new.is_private(), id, sender);
     }
     Ok(Some(rendered(tx, &new)?))
+}
+
+fn emit_visibility(tx: &mut TxMut<'_>, private: bool, id: i64, sender: i64) {
+    let action = if private { "privatized" } else { "publicized" };
+    crate::emit(tx, "repository", action, id, sender, Map::new());
+    if private {
+        return;
+    }
+    hubdouble_hooks::emit(
+        tx,
+        Event {
+            name: "public",
+            action: None,
+            repo_id: Some(id),
+            org_id: None,
+            sender_id: sender,
+            app_id: None,
+            installation_id: None,
+            payload: Map::new(),
+        },
+    );
 }
 
 fn changes_of(changes: Value) -> Map<String, Value> {

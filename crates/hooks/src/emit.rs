@@ -52,7 +52,7 @@ fn needs(event: &str, action: Option<&str>) -> Option<Need> {
     };
     Some(match event {
         _ if ALWAYS_DELIVERED.contains(&event) => Need::Nothing,
-        "repository" | "label" => Need::Nothing,
+        "repository" | "label" | "public" => Need::Nothing,
         "push" | "create" | "delete" | "release" | "workflow_dispatch" => {
             Need::Permission("contents", Access::Read)
         }

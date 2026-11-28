@@ -1081,6 +1081,39 @@ async fn a_transfer_from_an_organization_names_it_as_the_previous_owner() {
 }
 
 #[tokio::test]
+async fn making_a_private_repository_public_delivers_the_public_event() {
+    // Given an App with metadata read that subscribes to public
+    let server = start(vec![
+        json!({"kind": "app", "id": 4002, "slug": "watcher", "owner": "acme",
+               "public_key": APP_PUBLIC_KEY,
+               "webhook": {"url": format!("{{{{env \"{WEBHOOK_URL_ENV}\"}}}}"),
+                           "secret": WEBHOOK_SECRET},
+               "permissions": {"metadata": "read"},
+               "events": ["public"]}),
+        json!({"kind": "installation", "id": 5002, "app": "watcher", "account": "acme",
+               "repository_selection": "all"}),
+    ])
+    .await;
+    // When the private repository is made public
+    let public = server
+        .admin(
+            Method::PATCH,
+            "repos/acme/private",
+            Some(&json!({"private": false, "sender": "alice"})),
+        )
+        .await;
+    assert_eq!(public.status, StatusCode::OK, "{:?}", public.body);
+    // Then the App gets one public event, without an action, for the public repository
+    let got = deliveries(&server, 1).await;
+    let event = delivered_as(&got, "public", None);
+    assert_eq!(event.get("action"), None);
+    assert_eq!(event["repository"]["full_name"], json!("acme/private"));
+    assert_eq!(event["repository"]["private"], json!(false));
+    assert_eq!(event["sender"]["login"], json!("alice"));
+    assert_eq!(event["installation"]["id"], json!(5002));
+}
+
+#[tokio::test]
 async fn repository_admin_writes_deliver_their_repository_actions() {
     // Given
     let server = start(watcher().to_vec()).await;
