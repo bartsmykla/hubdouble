@@ -121,13 +121,18 @@ fn forks_first(entries: Vec<Entry>) -> Vec<Entry> {
     order.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
-pub(crate) fn given_ids(value: &Value, out: &mut Vec<i64>) {
+pub(crate) fn given_ids(value: &Value, out: &mut Vec<(&'static str, i64)>) {
     match value {
         Value::Object(map) => {
             for (k, v) in map {
-                match v {
-                    Value::Number(n) if k == "id" => out.extend(n.as_i64()),
-                    other => given_ids(other, out),
+                let field = match k.as_str() {
+                    "id" => Some("id"),
+                    "bot_id" => Some("bot_id"),
+                    _ => None,
+                };
+                match (field, v) {
+                    (Some(field), Value::Number(n)) => out.extend(n.as_i64().map(|id| (field, id))),
+                    (_, other) => given_ids(other, out),
                 }
             }
         }
@@ -151,7 +156,7 @@ pub(crate) fn apply(
     for e in &entries {
         given_ids(&e.body, &mut ids);
     }
-    if let Some(max) = ids.into_iter().max() {
+    if let Some(max) = ids.into_iter().map(|(_, id)| id).max() {
         tx.table_mut::<Counters>().bump(Sequence::Id, max);
     }
     for e in entries {
@@ -251,11 +256,11 @@ mod tests {
     fn given_ids_are_found_at_every_depth() {
         let mut ids = Vec::new();
         given_ids(
-            &json!({"id": 5, "assets": [{"id": 9}], "app": 3, "x": {"id": "7"}}),
+            &json!({"id": 5, "assets": [{"id": 9}], "app": 3, "bot_id": 11, "x": {"id": "7"}}),
             &mut ids,
         );
         ids.sort_unstable();
-        assert_eq!(ids, [5, 9]);
+        assert_eq!(ids, [("bot_id", 11), ("id", 5), ("id", 9)]);
     }
 
     #[test]

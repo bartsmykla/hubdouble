@@ -923,6 +923,32 @@ async fn deleting_the_bot_account_of_an_existing_app_is_refused_with_422() {
 }
 
 #[tokio::test]
+async fn an_app_cannot_take_the_id_of_a_deleted_user_for_its_bot() {
+    // Given carol was deleted
+    let server = start(Vec::new()).await;
+    admin(&server, Method::DELETE, "user/carol", None).await;
+
+    // When an App is created whose bot takes carol's ID
+    let answer = server
+        .admin(
+            Method::POST,
+            "app",
+            Some(
+                &json!({"slug": "late-app", "owner": "alice", "bot_id": fixture::CAROL_ID,
+                         "public_key": fixture::APP_PUBLIC_KEY}),
+            ),
+        )
+        .await;
+
+    // Then it is refused as a used ID on bot_id, and no App or bot is made
+    assert_eq!(answer.status.as_u16(), 422, "{:?}", answer.body);
+    assert_eq!(answer.json()["errors"][0]["field"], json!("bot_id"));
+    assert_eq!(answer.json()["errors"][0]["code"], json!("invalid"));
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    assert_eq!(status(&alice, "users/late-app[bot]").await, 404);
+}
+
+#[tokio::test]
 async fn an_account_cannot_be_renamed_to_the_ghost_login() {
     // Given carol
     let server = start(Vec::new()).await;
