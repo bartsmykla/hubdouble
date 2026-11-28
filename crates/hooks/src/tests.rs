@@ -1287,6 +1287,66 @@ async fn reset_drops_the_log_of_a_hook_made_after_the_seed_and_keeps_the_app_log
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_reset_that_ends_while_a_discarded_hooks_attempts_run_leaves_none_unlogged() {
+    // Given an App attempt in flight that holds a first reset open
+    const HOOK: i64 = 300;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    let snapshot = store.snapshot();
+    let (hooks, mut hits) = start(&store, |o| o.workers = 3);
+    emit_one(&store, event("push", WIDGET));
+    let held = hits.recv().await.unwrap();
+    let first = hooks.reset(&snapshot);
+    tokio::pin!(first);
+    tokio::select! {
+        biased;
+        _ = &mut first => panic!("the first reset returned before the attempt in flight ended"),
+        () = std::future::ready(()) => {}
+    }
+    // Given a hook made after the first reset, with two attempts in flight
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>()
+                .insert(hook_row(HOOK, HookOwner::Repo(WIDGET), "issues"))?;
+            Ok(())
+        })
+        .unwrap();
+    for n in 1..=2 {
+        let mut e = event("issues", WIDGET);
+        e.payload.insert("n".to_owned(), json!(n));
+        emit_one(&store, e);
+    }
+    let mut by_n = BTreeMap::new();
+    for _ in 0..2 {
+        let hit = hits.recv().await.unwrap();
+        by_n.insert(hit.json()["n"].as_i64().unwrap(), hit);
+    }
+    // Given a second reset that discards the hook
+    let second = hooks.reset(&snapshot);
+    tokio::pin!(second);
+    tokio::select! {
+        biased;
+        _ = &mut second => panic!("the second reset returned before the attempts in flight ended"),
+        () = std::future::ready(()) => {}
+    }
+    // Given the higher hook delivery ends first and waits behind the lower one
+    by_n.remove(&2).unwrap().reply.send(200).unwrap();
+    hooks.shared.wait_stats(|s| s.in_flight == 2).await;
+
+    // When the first reset ends, and then the lower hook delivery and the second reset end
+    held.reply.send(200).unwrap();
+    first.await.unwrap();
+    by_n.remove(&1).unwrap().reply.send(200).unwrap();
+    second.await.unwrap();
+
+    // Then no delivery waits to be logged, and a drain returns
+    assert_eq!(hooks.stats().unlogged, 0);
+    hooks.drain().await.unwrap();
+    assert_eq!(logged_ids(&store, HOOK), Vec::<i64>::new());
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_log_keeps_only_the_first_response_bytes_of_a_long_answer() {
     let store = world();
     // Given a cap shorter than the receiver's 8-byte answer "received"

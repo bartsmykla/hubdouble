@@ -265,9 +265,9 @@ impl Shared {
                 .collect();
             let stale: Vec<i64> = st
                 .apps
-                .keys()
-                .copied()
-                .filter(|log| !live(view, *log))
+                .iter()
+                .filter(|(log, state)| state.running.is_empty() && !live(view, **log))
+                .map(|(log, _)| *log)
                 .collect();
             tx.table_mut::<Deliveries>()
                 .remove_all(doomed.iter().copied());
