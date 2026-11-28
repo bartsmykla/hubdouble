@@ -1927,17 +1927,17 @@ async fn a_reset_strips_the_oldest_restored_body_past_the_log_byte_budget() {
     // Then the oldest delivery loses its body and the newer ones keep theirs
     assert_eq!(logged_ids(&store, APP_A), vec![1, 3]);
     assert_eq!(logged_ids(&store, ISSUES_HOOK), vec![2]);
-    let full: Vec<bool> = store
+    let bodies: Vec<(bool, bool)> = store
         .view(|tx| {
             Ok((1..=3)
                 .map(|id| {
                     let d = tx.table::<Deliveries>().get(id).unwrap();
-                    !d.request.payload.is_empty() && d.response.payload.is_some()
+                    (!d.request.payload.is_empty(), d.response.payload.is_some())
                 })
                 .collect())
         })
         .unwrap();
-    assert_eq!(full, [false, true, true]);
+    assert_eq!(bodies, [(false, false), (true, true), (true, true)]);
     assert!(hooks.stats().log_bytes <= limit);
 }
 
