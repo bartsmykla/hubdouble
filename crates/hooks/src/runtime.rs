@@ -243,7 +243,44 @@ impl Shared {
 
     pub(crate) async fn reset(&self, snapshot: &Snapshot) -> Result<(), HooksError> {
         let epoch = self.store.restore_epoch(snapshot);
-        self.forget_older(epoch).await
+        self.forget_older(epoch).await?;
+        self.forget_discarded_hooks();
+        Ok(())
+    }
+
+    fn forget_discarded_hooks(&self) {
+        let mut st = self.state.lock();
+        let live = |tx: &Tx, log: i64| {
+            tx.try_table::<Hooks>()
+                .is_some_and(|h| h.get(log).is_some())
+                || tx.table::<Apps>().get(log).is_some()
+        };
+        let Ok((doomed, stale)) = self.store.update(|tx| {
+            let view: &Tx = tx;
+            let doomed: Vec<i64> = view
+                .table::<Deliveries>()
+                .iter()
+                .filter(|d| d.app_id == 0 && !live(view, d.hook_id))
+                .map(|d| d.id)
+                .collect();
+            let stale: Vec<i64> = st
+                .apps
+                .keys()
+                .copied()
+                .filter(|log| !live(view, *log))
+                .collect();
+            tx.table_mut::<Deliveries>()
+                .remove_all(doomed.iter().copied());
+            Ok((doomed, stale))
+        }) else {
+            return;
+        };
+        for id in doomed {
+            st.bodies.release(id);
+        }
+        for log in stale {
+            st.apps.remove(&log);
+        }
     }
 
     pub(crate) async fn forget_older(&self, epoch: u64) -> Result<(), HooksError> {

@@ -1252,6 +1252,41 @@ async fn reset_stops_queued_and_in_flight_attempts_of_the_old_epoch() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn reset_drops_the_log_of_a_hook_made_after_the_seed_and_keeps_the_app_log() {
+    // Given an App delivery, and a delivery to a repository hook made after the seed
+    const HOOK: i64 = 300;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    let snapshot = store.snapshot();
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>()
+                .insert(hook_row(HOOK, HookOwner::Repo(WIDGET), "issues"))?;
+            Ok(())
+        })
+        .unwrap();
+    let (hooks, hits) = start(&store, |_| {});
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    let app_log = logged_ids(&store, APP_A);
+    let app_bytes = hooks.stats().log_bytes;
+    emit_one(&store, event("issues", WIDGET));
+    hooks.drain().await.unwrap();
+    assert_eq!(logged_ids(&store, HOOK).len(), 1);
+    assert!(hooks.stats().log_bytes > app_bytes);
+
+    // When reset discards the hook
+    hooks.reset(&snapshot).await.unwrap();
+
+    // Then the hook's deliveries and their bodies are gone and the App keeps its log
+    assert_eq!(logged_ids(&store, HOOK), Vec::<i64>::new());
+    assert_eq!(logged_ids(&store, APP_A), app_log);
+    assert_eq!(hooks.stats().log_bytes, app_bytes);
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_log_keeps_only_the_first_response_bytes_of_a_long_answer() {
     let store = world();
     // Given a cap shorter than the receiver's 8-byte answer "received"
