@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use http::{Method, StatusCode};
-use hubdouble_hooks::{Hooks, LatestPushes};
-use hubdouble_model::{Clock, Token, TokenKind};
+use hubdouble_hooks::{ContentType, Hook, HookOwner, Hooks, LatestPushes};
+use hubdouble_model::{Clock, Timestamp, Token, TokenKind};
 use hubdouble_store::{Deliveries, Tokens};
 use hubdouble_testkit::fixture::{
     ALICE_ID, ALICE_TOKEN, APP_PUBLIC_KEY, BOB_TOKEN, ORG, ORG_ID, PUBLIC_REPO_ID,
@@ -603,6 +603,79 @@ async fn repository_deleted_reaches_organization_hooks_only() {
     assert_eq!(to_org.len(), 1);
     assert_eq!(to_org[0].json()["action"], "deleted");
     assert!(to_hook(&sent, repo_hook, "repository").is_empty());
+}
+
+fn shared_url(server: &TestServer) -> String {
+    format!("{}?shared", server.receiver.url())
+}
+
+fn insert_hook(server: &TestServer, owner: HookOwner) -> i64 {
+    let url = shared_url(server);
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            let id = tx.next_id();
+            tx.table_mut::<Hooks>().insert(Hook {
+                id,
+                owner,
+                url,
+                content_type: ContentType::Json,
+                secret: Some("s".to_owned()),
+                insecure_ssl: false,
+                events: vec!["*".to_owned()],
+                active: true,
+                created_at: Timestamp::SEED,
+                updated_at: Timestamp::SEED,
+            })?;
+            Ok(id)
+        })
+        .unwrap_or_else(|e| panic!("insert a hook: {e:?}"))
+}
+
+#[tokio::test]
+async fn a_hook_belongs_to_its_owner_kind_when_a_repository_and_an_organization_share_an_id() {
+    // Given an organization hook whose owner id is the repository's id, and a repository hook
+    // whose owner id is the organization's id, as GitHub numbers the two kinds apart
+    let server = server().await;
+    let alice = alice(&server);
+    let org_hook = insert_hook(&server, HookOwner::Org(PUBLIC_REPO_ID));
+    let repo_hook = insert_hook(&server, HookOwner::Repo(ORG_ID));
+    let own_hook = create(&alice, REPO_HOOKS, &hook(&server, "s", &["issues"], true)).await;
+    drained(&server).await;
+
+    // When
+    let opened = alice
+        .post("repos/acme/public/issues", &json!({"title": "shared id"}))
+        .await;
+    let repo_hooks = alice.get(REPO_HOOKS).await;
+    let org_hooks = alice.get(ORG_HOOKS).await;
+    let sent = drained(&server).await;
+    let same_url = alice
+        .post(
+            REPO_HOOKS,
+            &json!({"name": "web", "config": {"url": shared_url(&server)}, "events": ["issues"]}),
+        )
+        .await;
+
+    // Then neither hook hears the repository, is listed or blocks a url under the other kind
+    assert_eq!(opened.status, StatusCode::CREATED);
+    assert_eq!(same_url.status, StatusCode::CREATED);
+    assert_eq!(to_hook(&sent, own_hook, "issues").len(), 1);
+    assert!(to_hook(&sent, org_hook, "issues").is_empty());
+    assert!(to_hook(&sent, repo_hook, "issues").is_empty());
+    let ids = |listed: &Answer| -> Vec<i64> {
+        listed
+            .json()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["id"].as_i64().unwrap())
+            .collect()
+    };
+    assert!(!ids(&repo_hooks).contains(&org_hook));
+    assert!(!ids(&org_hooks).contains(&repo_hook));
 }
 
 #[tokio::test]

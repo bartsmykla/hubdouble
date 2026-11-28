@@ -237,7 +237,7 @@ fn check_unique(tx: &Tx, hook: &Hook) -> Result<(), ApiError> {
     let taken = tx
         .table::<Hooks>()
         .children(hook.owner.id())
-        .any(|h| h.id != hook.id && h.url == hook.url);
+        .any(|h| h.owner == hook.owner && h.id != hook.id && h.url == hook.url);
     if taken {
         return Err(invalid(match hook.owner {
             HookOwner::Repo(_) => "Hook already exists on this repository",
@@ -253,6 +253,7 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let hooks: Vec<Value> = tx
         .table::<Hooks>()
         .children(owner.id())
+        .filter(|h| h.owner == owner)
         .map(|h| rendered(tx, ctx.urls(), h))
         .collect::<Result<_, _>>()?;
     ctx.page(&hooks, Clone::clone)

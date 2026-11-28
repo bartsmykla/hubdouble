@@ -168,10 +168,10 @@ pub(crate) fn hook_recipients(tx: &Tx, e: &Event) -> Vec<i64> {
         return Vec::new();
     };
     repo.filter(|_| !organization_hooks_only(e))
-        .map(|r| r.id)
+        .map(|r| HookOwner::Repo(r.id))
         .into_iter()
-        .chain([account])
-        .flat_map(|parent| hooks.children(parent))
+        .chain([HookOwner::Org(account)])
+        .flat_map(|owner| hooks.children(owner.id()).filter(move |h| h.owner == owner))
         .filter(|h| h.active && h.subscribes(e.name))
         .map(|h| h.id)
         .collect()
