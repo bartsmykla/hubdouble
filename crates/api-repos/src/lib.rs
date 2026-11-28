@@ -55,7 +55,7 @@ fn full_name(tx: &Tx, repo: &Repo) -> Result<String, ApiError> {
 fn emit(
     tx: &mut TxMut<'_>,
     name: &'static str,
-    action: &'static str,
+    action: impl Into<Option<&'static str>>,
     repo_id: i64,
     sender_id: i64,
     payload: serde_json::Map<String, serde_json::Value>,
@@ -64,7 +64,7 @@ fn emit(
         tx,
         Event {
             name,
-            action: Some(action),
+            action: action.into(),
             repo_id: Some(repo_id),
             org_id: None,
             sender_id,

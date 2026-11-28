@@ -9,9 +9,7 @@ use hubdouble_admin::{
     error_response, json_response, read_json,
 };
 use hubdouble_git::{Git, ObjectId};
-use hubdouble_model::{
-    AccountKind, ApiError, Environment, Event, Release, Repo, Visibility, node_id,
-};
+use hubdouble_model::{AccountKind, ApiError, Environment, Release, Repo, Visibility, node_id};
 use hubdouble_render::{OrganizationSimple, Repository, SimpleUser, Urls};
 use hubdouble_rest::Params;
 use hubdouble_store::{
@@ -354,22 +352,9 @@ fn edit_repo(
 fn emit_visibility(tx: &mut TxMut<'_>, private: bool, id: i64, sender: i64) {
     let action = if private { "privatized" } else { "publicized" };
     crate::emit(tx, "repository", action, id, sender, Map::new());
-    if private {
-        return;
+    if !private {
+        crate::emit(tx, "public", None, id, sender, Map::new());
     }
-    hubdouble_hooks::emit(
-        tx,
-        Event {
-            name: "public",
-            action: None,
-            repo_id: Some(id),
-            org_id: None,
-            sender_id: sender,
-            app_id: None,
-            installation_id: None,
-            payload: Map::new(),
-        },
-    );
 }
 
 fn changes_of(changes: Value) -> Map<String, Value> {
