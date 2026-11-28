@@ -312,6 +312,14 @@ impl Inner {
             hubdouble_auth::authenticate(tx, services.clock.as_ref(), r.headers)?
         };
         who.of(&actor);
+        if r.entry.requirement.scope != hubdouble_model::Scope::App {
+            hubdouble_auth::accepts_token(
+                &actor,
+                r.entry.tokens.installation,
+                r.entry.tokens.user_to_server,
+            )
+            .map_err(|e| e.with_docs(r.entry.documentation_url))?;
+        }
         let served: &[&str] = if r.entry.operation_id == "repos/get-release-asset" {
             &["application/octet-stream"]
         } else {

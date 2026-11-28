@@ -233,10 +233,7 @@ mod tests {
         let committed = include_str!("../../../docs/coverage.txt");
 
         // Then they are the same, so the committed list of missing operations is never stale
-        assert_eq!(
-            committed, report,
-            "run `mise run gen`"
-        );
+        assert_eq!(committed, report, "run `mise run gen`");
     }
 
     #[test]
@@ -248,7 +245,10 @@ mod tests {
         let report = missing_report(&rest);
 
         // Then every unregistered operation of the pinned bundle appears under its category
-        assert!(report.contains("\n  rate-limit:\n    rate-limit/get\n"), "{report}");
+        assert!(
+            report.contains("\n  rate-limit:\n    rate-limit/get\n"),
+            "{report}"
+        );
         assert_eq!(
             report.lines().filter(|l| l.starts_with("    ")).count(),
             1281

@@ -19,6 +19,7 @@ use crate::CONTENTS;
 
 const CONTENTS_WRITE: Requirement = Requirement {
     any_of: &[Grant::write("contents")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };

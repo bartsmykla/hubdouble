@@ -13,11 +13,13 @@ mod view;
 
 const READ: Requirement = Requirement {
     any_of: &[Grant::read("pull_requests")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
 const WRITE: Requirement = Requirement {
     any_of: &[Grant::write("pull_requests")],
+    all_of: &[],
     scopes: &["repo", "public_repo"],
     ..READ
 };

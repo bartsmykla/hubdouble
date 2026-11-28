@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use http::HeaderMap;
-use hubdouble_model::{Account, ApiError, App, Clock, Installation, Repo, Requirement, Token};
+use hubdouble_model::{
+    Account, ApiError, App, Clock, Installation, Repo, Requirement, Token, TokenKind,
+};
 use hubdouble_store::Tx;
 
 /// Who a request acts as, resolved once per request from its `Authorization` header.
@@ -116,6 +118,35 @@ pub fn authorize(
     target: Target<'_>,
 ) -> Result<(), ApiError> {
     crate::check::authorize(tx, actor, req, target, &tx.config().base_url)
+}
+
+/// Refuses a token of a family that GitHub's docs do not list for the operation: an installation
+/// token where `installation` is false, and a GitHub App user token where `user_to_server` is
+/// false. Classic and `OAuth` App tokens and every other actor pass.
+///
+/// # Errors
+///
+/// `403` `Resource not accessible by integration`, which GitHub answers to a token family that
+/// the operation does not accept.
+pub fn accepts_token(
+    actor: &Actor,
+    installation: bool,
+    user_to_server: bool,
+) -> Result<(), ApiError> {
+    let accepted = match actor {
+        Actor::Installation { .. } => installation,
+        Actor::User { token, .. } if token.kind == TokenKind::User && token.app_id.is_some() => {
+            user_to_server
+        }
+        _ => true,
+    };
+    if accepted {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(
+            "Resource not accessible by integration",
+        ))
+    }
 }
 
 /// Whether the actor can see the repository, for GraphQL's per-object check. A public

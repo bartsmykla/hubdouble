@@ -34,7 +34,8 @@ jobs:
       - name: generated code is current
         run: |
           mise run gen
-          git diff --exit-code -- crates/spec/src/ops_gen.rs docs/coverage.txt
+          git diff --exit-code -- crates/spec/src/ops_gen.rs docs/coverage.txt \
+            docs/inventory/rest-permissions.tsv
       - name: no registered operation goes missing
         if: github.event_name == 'pull_request'
         run: mise run coverage:ratchet HEAD^1

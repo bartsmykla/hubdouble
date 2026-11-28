@@ -11,6 +11,7 @@ use serde::Serialize;
 const SIGNED_IN: Requirement = Requirement {
     scope: Scope::User,
     any_of: &[],
+    all_of: &[],
     scopes: &[],
 };
 

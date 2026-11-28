@@ -3,8 +3,8 @@ mod common;
 use common::*;
 use http::HeaderMap;
 use hubdouble_auth::{
-    Actor, AuthError, NarrowRequest, Target, authenticate, authenticate_admin, authorize, can_see,
-    narrow, record_sso, repo_role, verify_app_jwt,
+    Actor, AuthError, NarrowRequest, Target, accepts_token, authenticate, authenticate_admin,
+    authorize, can_see, narrow, record_sso, repo_role, verify_app_jwt,
 };
 use hubdouble_model::{
     Access, ApiError, Grant, ManualClock, RepoRole, Requirement, Scope, TeamRepo, Timestamp,
@@ -14,46 +14,55 @@ use serde_json::json;
 
 const READ_CONTENTS: Requirement = Requirement {
     any_of: &[Grant::read("contents")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
 const WRITE_CONTENTS: Requirement = Requirement {
     any_of: &[Grant::write("contents")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &["repo"],
 };
 const CREATE_COMMENT: Requirement = Requirement {
     any_of: &[Grant::write("issues"), Grant::write("pull_requests")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &["repo", "public_repo"],
 };
 const ADMIN_REPO: Requirement = Requirement {
     any_of: &[Grant::write("administration")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &["repo"],
 };
 const ORG_REPOS: Requirement = Requirement {
     any_of: &[Grant::read("metadata")],
+    all_of: &[],
     scope: Scope::Org,
     scopes: &[],
 };
 const ORG_MEMBERS_WRITE: Requirement = Requirement {
     any_of: &[Grant::write("members")],
+    all_of: &[],
     scope: Scope::Org,
     scopes: &["admin:org"],
 };
 const APP_ONLY: Requirement = Requirement {
     any_of: &[],
+    all_of: &[],
     scope: Scope::App,
     scopes: &[],
 };
 const INSTALLATION_ONLY: Requirement = Requirement {
     any_of: &[],
+    all_of: &[],
     scope: Scope::Installation,
     scopes: &[],
 };
 const USER_EMAILS: Requirement = Requirement {
     any_of: &[Grant::read("email_addresses")],
+    all_of: &[],
     scope: Scope::User,
     scopes: &["user", "user:email"],
 };
@@ -309,6 +318,65 @@ fn an_app_jwt_with_a_bad_issuer_key_or_algorithm_is_refused() {
     assert_eq!(got, Err(AuthError::JwtAlgorithm));
     assert_eq!(status_of(&store, &jwt(OTHER_KEY, &good)), 401);
     assert_eq!(status_of(&store, "a.b.c"), 401);
+}
+
+const COMMENT_WITH_CONTENTS: Requirement = Requirement {
+    any_of: &[Grant::write("issues"), Grant::write("pull_requests")],
+    all_of: &[Grant::write("contents")],
+    scope: Scope::Repo,
+    scopes: &["repo"],
+};
+
+#[test]
+fn an_all_of_grant_is_needed_beside_one_any_of_alternative() {
+    // Given an installation token that holds every grant and one that holds issues:write only
+    let store = store();
+    let full = actor(&store, "ghs_full");
+    let issues = actor(&store, "ghs_issues");
+
+    // When each calls an operation that needs issues or pull_requests, and contents, for writing
+    let allowed = on_repo(&store, &full, &COMMENT_WITH_CONTENTS, PRIVATE);
+    let denied = on_repo(&store, &issues, &COMMENT_WITH_CONTENTS, PRIVATE).expect_err("denied");
+
+    // Then the full token passes, and the refusal lists each alternative together with contents
+    assert_eq!(status(allowed), 200);
+    assert_eq!(denied.status, 403);
+    assert_eq!(
+        header(&denied, "X-Accepted-GitHub-Permissions"),
+        Some("issues=write,contents=write; pull_requests=write,contents=write")
+    );
+}
+
+#[test]
+fn a_user_token_needs_the_highest_role_of_its_all_of_grants() {
+    // Given user-to-server tokens of alice, a writer, and bob, a reader of the private repository
+    let store = store();
+    let alice = actor(&store, "ghu_alice");
+    let bob = actor(&store, "ghu_bob");
+
+    // When each calls an operation whose alternatives need a reader and whose joint grant a writer
+    let writer = on_repo(&store, &alice, &COMMENT_WITH_CONTENTS, PRIVATE);
+    let reader = on_repo(&store, &bob, &COMMENT_WITH_CONTENTS, PRIVATE);
+
+    // Then the writer passes and the reader is refused
+    assert_eq!(status(writer), 200);
+    assert_eq!(status(reader), 403);
+}
+
+#[test]
+fn a_token_family_that_the_operation_does_not_accept_is_403() {
+    // Given an installation token, a GitHub App user token and a classic token
+    let store = store();
+    let installation = actor(&store, "ghs_full");
+    let user_to_server = actor(&store, "ghu_alice");
+    let classic = actor(&store, "ghp_alice");
+
+    // Then each family is refused only where GitHub's docs leave it out, and a classic token never
+    assert_eq!(status(accepts_token(&installation, false, true)), 403);
+    assert_eq!(status(accepts_token(&installation, true, false)), 200);
+    assert_eq!(status(accepts_token(&user_to_server, true, false)), 403);
+    assert_eq!(status(accepts_token(&user_to_server, false, true)), 200);
+    assert_eq!(status(accepts_token(&classic, false, false)), 200);
 }
 
 #[test]

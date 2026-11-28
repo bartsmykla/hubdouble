@@ -14,24 +14,28 @@ use serde_json::{Map, Value};
 
 pub(crate) const READ: Requirement = Requirement {
     any_of: &[Grant::read("issues"), Grant::read("pull_requests")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
 
 pub(crate) const WRITE: Requirement = Requirement {
     any_of: &[Grant::write("issues"), Grant::write("pull_requests")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
 
 pub(crate) const ISSUES_READ: Requirement = Requirement {
     any_of: &[Grant::read("issues")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
 
 pub(crate) const ISSUES_WRITE: Requirement = Requirement {
     any_of: &[Grant::write("issues")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };

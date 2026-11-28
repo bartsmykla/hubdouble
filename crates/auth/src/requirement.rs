@@ -79,6 +79,7 @@ pub fn check_requirement(path: &str, req: &Requirement) -> Result<(), AuthError>
     if let Some(g) = req
         .any_of
         .iter()
+        .chain(req.all_of)
         .find(|g| !APP_PERMISSIONS.contains(&g.permission))
     {
         return Err(AuthError::UnknownPermission(g.permission));
@@ -88,13 +89,15 @@ pub fn check_requirement(path: &str, req: &Requirement) -> Result<(), AuthError>
             path.contains("{owner}") && path.contains("{repo}") || path.contains("{repository_id}")
         }
         Scope::Org => path.contains("{org}"),
-        Scope::Public if !req.any_of.is_empty() => return Err(AuthError::PublicWithGrant),
+        Scope::Public if !req.any_of.is_empty() || !req.all_of.is_empty() => {
+            return Err(AuthError::PublicWithGrant);
+        }
         Scope::Public | Scope::App | Scope::User | Scope::Installation => return Ok(()),
     };
     if !names_target {
         return Err(AuthError::NoTarget);
     }
-    if req.any_of.is_empty() {
+    if req.any_of.is_empty() && req.all_of.is_empty() {
         return Err(AuthError::NoGrant);
     }
     Ok(())

@@ -16,6 +16,7 @@ use crate::METADATA;
 
 const ORG_METADATA: Requirement = Requirement {
     any_of: &[Grant::read("metadata")],
+    all_of: &[],
     scope: Scope::Org,
     scopes: &[],
 };

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use hubdouble_model::Requirement;
-use hubdouble_spec::{Method, OPERATIONS, lookup};
+use hubdouble_spec::{Method, OPERATIONS, Tokens, lookup};
 
 use crate::Handler;
 use crate::params::Params;
@@ -21,6 +21,8 @@ pub struct Entry {
     pub writes: bool,
     /// The operation's page in GitHub's docs, empty for a route outside the `OpenAPI` bundle.
     pub documentation_url: &'static str,
+    /// The token families GitHub accepts; every family for a route outside the bundle.
+    pub tokens: Tokens,
 }
 
 enum Segment {
@@ -104,6 +106,7 @@ impl Registry {
             authenticates: false,
             writes: false,
             documentation_url: OPERATIONS[i].docs,
+            tokens: OPERATIONS[i].tokens,
         });
     }
 
@@ -196,6 +199,7 @@ impl Registry {
             authenticates: false,
             writes: false,
             documentation_url: "",
+            tokens: Tokens::ALL,
         };
         self.extras.push(Extra {
             method: m,

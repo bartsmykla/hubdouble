@@ -14,6 +14,7 @@ use hubdouble_store::{Accounts, Apps, Installations};
 const APP: Requirement = Requirement {
     scope: Scope::App,
     any_of: &[],
+    all_of: &[],
     scopes: &[],
 };
 

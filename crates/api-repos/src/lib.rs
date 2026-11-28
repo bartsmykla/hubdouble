@@ -14,7 +14,7 @@ use hubdouble_store::{Accounts, Tx, TxMut};
 
 pub use admin::DeletedRepos;
 
-/// Registers what T10 owns: tables, REST operations, GraphQL fields, ref subscribers, seed kinds
+/// Registers what this crate owns: tables, REST operations, GraphQL fields, ref subscribers, seed kinds
 /// and admin routes.
 pub fn register(r: &mut Registrar<'_>) {
     activity::register(r);
@@ -28,12 +28,14 @@ pub fn register(r: &mut Registrar<'_>) {
 
 const METADATA: Requirement = Requirement {
     any_of: &[Grant::read("metadata")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };
 
 const CONTENTS: Requirement = Requirement {
     any_of: &[Grant::read("contents")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };

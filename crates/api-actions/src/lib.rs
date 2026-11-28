@@ -26,6 +26,7 @@ const fn repository(any_of: &'static [Grant]) -> Requirement {
     Requirement {
         scope: Scope::Repo,
         any_of,
+        all_of: &[],
         scopes: &["repo", "public_repo"],
     }
 }

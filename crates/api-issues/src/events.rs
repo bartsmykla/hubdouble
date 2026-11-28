@@ -385,6 +385,7 @@ fn commit_in(
 
 const READ_COMMIT: Requirement = Requirement {
     any_of: &[Grant::read("contents")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &[],
 };

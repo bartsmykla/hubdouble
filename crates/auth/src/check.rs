@@ -30,7 +30,7 @@ pub(crate) fn authorize(
                 installation,
                 ..
             } => {
-                if satisfies(req.any_of, |p| installation_level(token, installation, p)) {
+                if satisfies(req, |p| installation_level(token, installation, p)) {
                     Ok(())
                 } else {
                     Err(integration_denied(req))
@@ -161,7 +161,7 @@ fn repo_access(
             ..
         } => {
             let allowed = if covers(installation, Some(token), repo) {
-                satisfies(req.any_of, |p| installation_level(token, installation, p))
+                satisfies(req, |p| installation_level(token, installation, p))
             } else {
                 is_read(req)
             };
@@ -223,7 +223,7 @@ fn org_access(
             ..
         } => {
             let allowed = if installation.account_id == org.id {
-                satisfies(req.any_of, |p| installation_level(token, installation, p))
+                satisfies(req, |p| installation_level(token, installation, p))
             } else {
                 public_read
             };
@@ -250,11 +250,13 @@ fn org_access(
                 .of(org.id, user.id)
                 .filter(|m| m.state == MembershipState::Active)
                 .map(|m| m.role);
-            let needs_owner = req.any_of.iter().all(|g| {
+            let owner_grant = |g: &Grant| {
                 g.access == Access::Admin
                     || g.permission == "members"
                     || g.permission.starts_with("organization_")
-            });
+            };
+            let needs_owner =
+                req.any_of.iter().all(owner_grant) || req.all_of.iter().any(owner_grant);
             let allowed = match role {
                 Some(OrgRole::Admin) => true,
                 Some(OrgRole::Member) => !needs_owner,
@@ -279,9 +281,7 @@ fn user_to_server<'t>(
         return Ok(());
     };
     let allowed = match installation(app) {
-        Some(i) => satisfies(req.any_of, |p| {
-            implicit_metadata(p, i.permissions.get(p).copied())
-        }),
+        Some(i) => satisfies(req, |p| implicit_metadata(p, i.permissions.get(p).copied())),
         None => allow_uninstalled,
     };
     if allowed {
@@ -355,29 +355,32 @@ pub(crate) fn implicit_metadata(permission: &str, level: Option<Access>) -> Opti
     }
 }
 
-fn satisfies(any_of: &[Grant], level: impl Fn(&str) -> Option<Access>) -> bool {
-    any_of.is_empty()
-        || any_of
-            .iter()
-            .any(|g| level(g.permission).is_some_and(|l| l >= g.access))
+fn satisfies(req: &Requirement, level: impl Fn(&str) -> Option<Access>) -> bool {
+    let holds = |g: &Grant| level(g.permission).is_some_and(|l| l >= g.access);
+    req.all_of.iter().all(holds) && (req.any_of.is_empty() || req.any_of.iter().any(holds))
 }
 
 fn is_read(req: &Requirement) -> bool {
-    req.any_of.iter().all(|g| g.access == Access::Read)
+    req.any_of
+        .iter()
+        .chain(req.all_of)
+        .all(|g| g.access == Access::Read)
+}
+
+fn role_for(g: &Grant) -> RepoRole {
+    match (g.access, g.permission) {
+        (Access::Read, _) | (Access::Write, "issues" | "pull_requests" | "discussions") => {
+            RepoRole::Read
+        }
+        (Access::Admin, _) | (Access::Write, "administration") => RepoRole::Admin,
+        (Access::Write, _) => RepoRole::Write,
+    }
 }
 
 fn needed_role(req: &Requirement) -> RepoRole {
-    req.any_of
-        .iter()
-        .map(|g| match (g.access, g.permission) {
-            (Access::Read, _) | (Access::Write, "issues" | "pull_requests" | "discussions") => {
-                RepoRole::Read
-            }
-            (Access::Admin, _) | (Access::Write, "administration") => RepoRole::Admin,
-            (Access::Write, _) => RepoRole::Write,
-        })
-        .min()
-        .unwrap_or(RepoRole::Read)
+    let alternative = req.any_of.iter().map(role_for).min();
+    let joint = req.all_of.iter().map(role_for).max();
+    alternative.max(joint).unwrap_or(RepoRole::Read)
 }
 
 fn classic_scopes(token: &Token, req: &Requirement) -> Result<(), ApiError> {
@@ -421,26 +424,33 @@ fn implies(held: &str, wanted: &str) -> bool {
         )
 }
 
-fn accepted_permissions(any_of: &[Grant]) -> String {
+fn accepted_permissions(req: &Requirement) -> String {
     let mut out = String::new();
-    for (i, g) in any_of.iter().enumerate() {
-        if i > 0 {
+    let mut set = |first: Option<&Grant>| {
+        if !out.is_empty() {
             out.push_str("; ");
         }
-        let _ = write!(out, "{}={}", g.permission, g.access.as_str());
+        for (i, g) in first.into_iter().chain(req.all_of).enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "{}={}", g.permission, g.access.as_str());
+        }
+    };
+    if req.any_of.is_empty() {
+        set(None);
+    } else {
+        req.any_of.iter().for_each(|g| set(Some(g)));
     }
     out
 }
 
 fn integration_denied(req: &Requirement) -> ApiError {
     let e = ApiError::forbidden("Resource not accessible by integration");
-    if req.any_of.is_empty() {
+    if req.any_of.is_empty() && req.all_of.is_empty() {
         e
     } else {
-        e.with_header(
-            "X-Accepted-GitHub-Permissions",
-            accepted_permissions(req.any_of),
-        )
+        e.with_header("X-Accepted-GitHub-Permissions", accepted_permissions(req))
     }
 }
 

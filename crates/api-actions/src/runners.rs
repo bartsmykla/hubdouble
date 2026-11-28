@@ -10,6 +10,7 @@ use crate::configuration::find_org;
 const ORG_RUNNERS: Requirement = Requirement {
     scope: Scope::Org,
     any_of: &[Grant::read("organization_self_hosted_runners")],
+    all_of: &[],
     scopes: &["admin:org"],
 };
 

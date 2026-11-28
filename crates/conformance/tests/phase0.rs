@@ -276,6 +276,7 @@ const CONTENTS_WRITE: Requirement = Requirement {
         permission: "contents",
         access: Access::Write,
     }],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &["repo"],
 };

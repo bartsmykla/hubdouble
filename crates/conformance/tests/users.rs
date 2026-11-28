@@ -31,6 +31,7 @@ fn org_repos(r: &mut Registrar<'_>) {
         "repos/list-for-org",
         Requirement {
             any_of: &[],
+            all_of: &[],
             scope: Scope::Org,
             scopes: &[],
         },

@@ -20,6 +20,7 @@ mod view;
 const fn repo(grants: &'static [Grant], scopes: &'static [&'static str]) -> Requirement {
     Requirement {
         any_of: grants,
+        all_of: &[],
         scope: Scope::Repo,
         scopes,
     }
@@ -30,7 +31,7 @@ const CHECKS_WRITE: Requirement = repo(&[Grant::write("checks")], &[]);
 const STATUSES_READ: Requirement = repo(&[Grant::read("statuses")], &[]);
 const STATUSES_WRITE: Requirement = repo(&[Grant::write("statuses")], &["repo:status"]);
 
-/// Registers what T8 owns: tables, REST operations, GraphQL fields, ref subscribers, seed kinds
+/// Registers what this crate owns: tables, REST operations, GraphQL fields, ref subscribers, seed kinds
 /// and admin routes.
 pub fn register(r: &mut Registrar<'_>) {
     r.rest.handle("checks/create", CHECKS_WRITE, runs::create);

@@ -26,11 +26,11 @@ description = "Build the release binary"
 run = "cargo build --release --locked -p hubdouble"
 
 [bench]
-description = "Run the criterion benchmarks and measure every target of plan section 9"
+description = "Run the criterion benchmarks and measure every performance target"
 run = "cargo bench --workspace --locked"
 
 ["bench:targets"]
-description = "Measure every row of plan section 9 on the release profile on one CPU; fails on a miss"
+description = "Measure every performance target on the release profile on one CPU; fails on a miss"
 run = "cargo bench --locked -p hubdouble --bench targets"
 
 ["bench:gate"]
@@ -44,6 +44,10 @@ run = "cargo run --locked -p xtask -- gen"
 ["graphql:pin"]
 description = "Read live GET /graphql and one introspection POST with GITHUB_TOKEN or GH_TOKEN, rewrite the GraphQL pins in spec/graphql and regenerate the schema"
 run = "cargo run --locked -p xtask -- graphql-pin"
+
+["access:pin"]
+description = "Pin spec/github-apps/access.json to the REST reference data of github/docs at the given commit, then regenerate"
+run = "cargo run --locked -p xtask -- access-pin"
 
 ["coverage:ratchet"]
 description = "Fail when an operation that docs/coverage.txt registers at the given base revision is missing now"

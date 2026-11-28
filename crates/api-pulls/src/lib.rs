@@ -32,6 +32,7 @@ const fn repo_requirement(grants: &'static [Grant]) -> Requirement {
     Requirement {
         scope: Scope::Repo,
         any_of: grants,
+        all_of: &[],
         scopes: &[],
     }
 }

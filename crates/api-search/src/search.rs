@@ -22,6 +22,7 @@ use crate::query::{
 const fn read(grants: &'static [Grant]) -> Requirement {
     Requirement {
         any_of: grants,
+        all_of: &[],
         scope: Scope::Repo,
         scopes: &[],
     }

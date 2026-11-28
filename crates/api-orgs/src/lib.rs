@@ -21,12 +21,14 @@ impl Table for PublicMemberships {}
 
 const MEMBERS: Requirement = Requirement {
     any_of: &[Grant::read("members")],
+    all_of: &[],
     scope: Scope::Org,
     scopes: &["read:org"],
 };
 
 const METADATA: Requirement = Requirement {
     any_of: &[Grant::read("metadata")],
+    all_of: &[],
     scope: Scope::Repo,
     scopes: &["repo", "public_repo"],
 };
@@ -53,6 +55,7 @@ const COLLABORATOR_PERMISSION: Requirement = Requirement {
 
 const TEAM_REPOSITORY: Requirement = Requirement {
     any_of: MEMBERS.any_of,
+    all_of: &[],
     scopes: &[],
     ..METADATA
 };

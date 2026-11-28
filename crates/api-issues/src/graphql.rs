@@ -15,6 +15,7 @@ use crate::shared::{ISSUES_READ, READ, full_name};
 
 const PULLS_READ: Requirement = Requirement {
     any_of: &[Grant::read("pull_requests")],
+    all_of: &[],
     ..ISSUES_READ
 };
 
