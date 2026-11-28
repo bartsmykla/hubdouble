@@ -305,7 +305,7 @@ impl TxMut<'_> {
 }
 impl Tx { pub fn table<T: Table>(&self) -> &T; pub fn config(&self) -> &Config; }
 pub struct StoreBuilder;                          // register_table::<T>() for every table, then build_with(config) (build() uses Config::default, for tests); no table is added after start
-pub struct OutboxEntry { pub app_id: i64, pub installation_id: Option<i64>, pub repo_id: Option<i64>, pub event: &'static str, pub action: Option<&'static str>, pub payload: serde_json::Value, pub redelivery_of: Option<String> }
+pub struct OutboxEntry { pub app_id: i64, pub hook_id: Option<i64>, pub installation_id: Option<i64>, pub repo_id: Option<i64>, pub event: &'static str, pub action: Option<&'static str>, pub payload: serde_json::Value, pub redelivery_of: Option<String> }
 ```
 
 A table overrides `restore` only where section 4.6 keeps state across a reset: the token table keeps every unexpired token of a seeded installation or user, the delivery table keeps the App delivery log, and the counter table (the global ID sequence, delivery IDs, run IDs, each repository's issue and PR number, and the request log cursor) keeps its current values, so every generated sequence keeps counting up. A track's side table uses the default unless 4.6 says otherwise.
@@ -434,12 +434,17 @@ pub struct Event {                                 // in hubdouble-model
 }
 pub fn emit(tx: &mut TxMut<'_>, e: Event);         // in hubdouble-hooks; every track and P0-C emit through it; URLs from Urls::new(tx.config(), "")
 pub fn ping(tx: &mut TxMut<'_>, app_id: i64);
-pub fn redeliver(tx: &mut TxMut<'_>, app_id: i64, delivery_id: i64) -> Result<(), HooksError>; // same GUID, new delivery ID
+pub fn ping_hook(tx: &mut TxMut<'_>, hook_id: i64, sender_id: Option<i64>) -> Result<(), HooksError>; // zen, hook_id, hook
+pub fn deliver_to_hook(tx: &mut TxMut<'_>, hook_id: i64, event: &'static str, sender_id: Option<i64>, payload: &Map<String, Value>) -> Result<(), HooksError>; // the push test
+pub fn redeliver(tx: &mut TxMut<'_>, hook_id: i64, delivery_id: i64) -> Result<(), HooksError>; // same GUID, new delivery ID; an App's own webhook uses its App ID as hook_id
+pub struct Hook { pub id: i64, pub owner: HookOwner /* Repo(i64) | Org(i64) */, pub url: String, /* content_type, secret, insecure_ssl, events, active, ... */ } // table Hooks
 pub fn inject(tx: &mut TxMut<'_>, i: Injection) -> Result<(), HooksError>; // POST /_hubdouble/events: an owned event name and action for one App, whatever it subscribes to
 impl Handle { pub async fn drain(&self); pub async fn reset(&self, s: &Snapshot); } // admin reset calls Handle::reset, never Store::restore directly
 ```
 
 `emit` renders the payload and resolves the recipients (the App and installation when set, otherwise every App installed on the account or repository that subscribes) inside the transaction and pushes one `OutboxEntry` per recipient with `TxMut::push_outbox`, so an `installation.deleted` or `installation_repositories.removed` event carries the installation and repositories as they were before the change, and a rolled-back `update` delivers nothing. A test installs two Apps on one account, deletes one installation, and checks that only that App receives the event, with the deleted installation's data.
+
+Repository and organization webhooks are rows of `Hooks`. `emit` also pushes one entry for each active hook of the event's repository and of its organization that subscribes to the event (`*` subscribes to all). Each entry carries `hook_id`, and every delivery is logged under its hook, so each hook has its own delivery log, cursor and redelivery, with GitHub's `X-GitHub-Hook-ID` and `X-GitHub-Hook-Installation-Target-Type` and `-ID` headers, signed with the hook's secret, as JSON or as a `payload=` form. A hook route answers `404` to a caller who may not administer the hook, as GitHub documents only `404` there.
 
 `hubdouble-render` holds the frozen REST shapes for every entity in 6.1, each written once and used both in REST answers and in webhook payloads. A track adds render structs only for its own new resources, in its own crate.
 
