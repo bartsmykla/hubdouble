@@ -717,11 +717,11 @@ fn installation_event_reaches_only_its_app_with_the_data_before_the_change() {
 #[test]
 fn signatures_match_known_vectors() {
     assert_eq!(
-        signature_256(b"It's a Secret to Everybody", b"Hello, World!"),
+        signature_256(b"It's a Secret to Everybody", [&b"Hello, "[..], b"World!"]),
         "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17"
     );
     assert_eq!(
-        signature_1(b"Jefe", b"what do ya want for nothing?"),
+        signature_1(b"Jefe", [&b"what do ya want for nothing?"[..]]),
         "sha1=effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"
     );
 }
@@ -760,9 +760,12 @@ async fn delivers_signed_with_githubs_headers_and_logs_the_attempt() {
     assert!(h["user-agent"].starts_with("GitHub-Hookshot/"));
     assert_eq!(
         h["x-hub-signature-256"],
-        signature_256(SECRET.as_bytes(), &raw)
+        signature_256(SECRET.as_bytes(), [&raw[..]])
     );
-    assert_eq!(h["x-hub-signature"], signature_1(SECRET.as_bytes(), &raw));
+    assert_eq!(
+        h["x-hub-signature"],
+        signature_1(SECRET.as_bytes(), [&raw[..]])
+    );
     // Then the payload has its context with the configured origins
     assert_eq!(body["action"], json!("created"));
     assert_eq!(body["comment"]["id"], json!(7));
@@ -1140,6 +1143,40 @@ async fn in_flight_attempts_keep_their_share_of_the_queue_byte_budget() {
         .unwrap();
     assert_eq!(codes, [200, 200, 0, 0, 0, 0]);
     assert_eq!(hooks.stats().waiting_bytes, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_form_deliveries_hold_only_the_payload_bytes_the_queue_counts() {
+    // Given a form hook with a secret, one worker and a receiver that answers nothing yet
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            let mut hook = hook_row(ISSUES_HOOK, HookOwner::Repo(WIDGET), "issues");
+            hook.content_type = ContentType::Form;
+            hook.secret = Some(SECRET.to_owned());
+            tx.table_mut::<Hooks>().insert(hook)?;
+            Ok(())
+        })
+        .unwrap();
+    let (hooks, mut hits) = start(&store, |o| o.workers = 1);
+    // When three events commit, one is in flight and two wait in the queue
+    for n in 1..=3 {
+        let mut e = event("issues", WIDGET);
+        e.payload.insert("n".to_owned(), json!(n));
+        e.payload
+            .insert("path".to_owned(), json!("/a/b".repeat(1024)));
+        emit_one(&store, e);
+    }
+    let in_flight = hits.recv().await.unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 1 && s.queued == 2)
+        .await;
+    // Then the queued deliveries hold no more bytes than the queue byte limit counts for them
+    assert!(hooks.shared.queued_bytes() <= hooks.stats().waiting_bytes);
+    drop(in_flight);
 }
 
 #[tokio::test(start_paused = true)]

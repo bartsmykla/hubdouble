@@ -32,11 +32,25 @@ pub(crate) struct Job {
     url: String,
     headers: BTreeMap<String, String>,
     body: Bytes,
-    wire: Bytes,
+    form: bool,
     over_budget: bool,
 }
 
+fn form_chunks(body: &[u8]) -> impl Iterator<Item = &[u8]> {
+    std::iter::once(&b"payload="[..])
+        .chain(url::form_urlencoded::byte_serialize(body).map(str::as_bytes))
+}
+
 impl Job {
+    fn wire(&self) -> Bytes {
+        if !self.form {
+            return self.body.clone();
+        }
+        let mut out = Vec::with_capacity(self.body.len() + 8);
+        form_chunks(&self.body).for_each(|chunk| out.extend_from_slice(chunk));
+        Bytes::from(out)
+    }
+
     fn logged(self, delivered_at: Timestamp, duration: f64, outcome: Outcome) -> Delivery {
         Delivery {
             id: self.id,
@@ -349,6 +363,16 @@ impl Shared {
     }
 
     #[cfg(test)]
+    pub(crate) fn queued_bytes(&self) -> usize {
+        self.state
+            .lock()
+            .queue
+            .iter()
+            .map(|job| job.body.len())
+            .sum()
+    }
+
+    #[cfg(test)]
     pub(crate) async fn forget_older(&self, epoch: u64) -> Result<(), HooksError> {
         self.drop_older(&mut self.state.lock(), epoch);
         self.wait_older(epoch).await
@@ -480,12 +504,10 @@ impl Shared {
             None => (uuid::Uuid::new_v4().to_string(), false),
         };
         let body = entry.payload;
-        let (content_type, wire) = if target.form {
-            let mut form = b"payload=".to_vec();
-            form.extend(url::form_urlencoded::byte_serialize(&body).flat_map(str::bytes));
-            ("application/x-www-form-urlencoded", Bytes::from(form))
+        let content_type = if target.form {
+            "application/x-www-form-urlencoded"
         } else {
-            ("application/json", body.clone())
+            "application/json"
         };
         let mut headers = BTreeMap::from([
             ("Accept".to_owned(), "*/*".to_owned()),
@@ -507,14 +529,20 @@ impl Shared {
             ),
         ]);
         if let Some(secret) = target.secret.as_deref().filter(|s| !s.is_empty()) {
-            headers.insert(
-                "X-Hub-Signature".to_owned(),
-                signature_1(secret.as_bytes(), &wire),
-            );
-            headers.insert(
-                "X-Hub-Signature-256".to_owned(),
-                signature_256(secret.as_bytes(), &wire),
-            );
+            let key = secret.as_bytes();
+            let (sha1, sha256) = if target.form {
+                (
+                    signature_1(key, form_chunks(&body)),
+                    signature_256(key, form_chunks(&body)),
+                )
+            } else {
+                (
+                    signature_1(key, [&body[..]]),
+                    signature_256(key, [&body[..]]),
+                )
+            };
+            headers.insert("X-Hub-Signature".to_owned(), sha1);
+            headers.insert("X-Hub-Signature-256".to_owned(), sha256);
         }
         Job {
             id,
@@ -530,7 +558,7 @@ impl Shared {
             url: target.url,
             headers,
             body,
-            wire,
+            form: target.form,
             over_budget,
         }
     }
@@ -626,7 +654,7 @@ impl Shared {
                 &self.pool,
                 &job.url,
                 &job.headers,
-                job.wire.clone(),
+                job.wire(),
                 self.options.response_bytes,
             ),
         )

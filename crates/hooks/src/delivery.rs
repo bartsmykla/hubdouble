@@ -62,17 +62,17 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-pub(crate) fn signature_256(secret: &[u8], body: &[u8]) -> String {
+pub(crate) fn signature_256<'a>(secret: &[u8], body: impl IntoIterator<Item = &'a [u8]>) -> String {
     let mut mac = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(secret)
         .unwrap_or_else(|_| unreachable!("HMAC takes a key of any length"));
-    mac.update(body);
+    body.into_iter().for_each(|chunk| mac.update(chunk));
     format!("sha256={}", hex(&mac.finalize().into_bytes()))
 }
 
-pub(crate) fn signature_1(secret: &[u8], body: &[u8]) -> String {
+pub(crate) fn signature_1<'a>(secret: &[u8], body: impl IntoIterator<Item = &'a [u8]>) -> String {
     let mut mac = <Hmac<sha1::Sha1> as KeyInit>::new_from_slice(secret)
         .unwrap_or_else(|_| unreachable!("HMAC takes a key of any length"));
-    mac.update(body);
+    body.into_iter().for_each(|chunk| mac.update(chunk));
     format!("sha1={}", hex(&mac.finalize().into_bytes()))
 }
 
