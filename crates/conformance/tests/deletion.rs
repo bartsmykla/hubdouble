@@ -427,6 +427,18 @@ async fn the_content_of_a_deleted_user_reads_back_as_the_ghost_user() {
         ghost(&answer.json()["user"]);
     }
 
+    // And the repository's events stay, with the ghost user as their actor
+    let events = alice.get("repos/acme/public/events").await.json();
+    let by_ghost: Vec<&Value> = events
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| e["actor"]["login"] == "ghost")
+        .map(|e| &e["type"])
+        .collect();
+    assert!(by_ghost.contains(&&json!("IssuesEvent")), "{events}");
+    assert!(by_ghost.contains(&&json!("IssueCommentEvent")), "{events}");
+
     // And GraphQL names the ghost user as the author of both
     let answer = Graphql::new(alice)
         .query(

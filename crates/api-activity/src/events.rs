@@ -107,7 +107,7 @@ fn reply<'e>(
     let accounts = tx.table::<Accounts>();
     let mut kept: Vec<(&ActivityEvent, &Account)> = events
         .filter(|e| e.created_at >= oldest)
-        .filter_map(|e| Some((e.as_ref(), accounts.get(e.actor_id)?.as_ref())))
+        .map(|e| (e.as_ref(), accounts.author(e.actor_id).as_ref()))
         .collect();
     kept.sort_unstable_by_key(|(e, _)| std::cmp::Reverse(e.id));
     let urls = ctx.urls();

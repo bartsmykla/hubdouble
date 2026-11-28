@@ -241,6 +241,5 @@ fn drop_account(tx: &mut TxMut<'_>, account_id: i64) {
     }
     tx.table_mut::<Apps>().remove_all(apps);
     tx.table_mut::<Rulesets>().remove_children(account_id);
-    tx.table_mut::<ActivityEvents>().remove_children(account_id);
     tx.table_mut::<Accounts>().remove(account_id);
 }
