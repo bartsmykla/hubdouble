@@ -1,10 +1,9 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use http::{Method, StatusCode};
 use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
 use hubdouble_model::{Clock, Repo, Timestamp};
-use hubdouble_store::{Deliveries, Repos};
+use hubdouble_store::Repos;
 use hubdouble_testkit::fixture::{self, ALICE_ID, ALICE_TOKEN, BOB_ID, BOB_TOKEN, PUBLIC_REPO_ID};
 use hubdouble_testkit::{Answer, Delivery, GoGithub, Graphql, TestServer};
 use serde_json::{Value, json};
@@ -1166,20 +1165,7 @@ async fn a_pull_request_merge_of_each_method_sends_push_before_closed() {
             .await;
         assert_eq!(merged.status, StatusCode::OK, "{method}: {}", merged.json());
         // Then push is queued before pull_request closed, and closed carries the new pushed_at
-        let mut sent = deliveries(&server).await;
-        let queued: HashMap<String, i64> = server
-            .server
-            .services()
-            .store
-            .view(|tx| {
-                Ok(tx
-                    .table::<Deliveries>()
-                    .iter()
-                    .map(|d| (d.guid.clone(), d.id))
-                    .collect())
-            })
-            .unwrap();
-        sent.sort_by_key(|d| queued[d.header("x-github-delivery")]);
+        let sent = server.deliveries_in_queue_order().await;
         let order: Vec<(String, Value)> = sent
             .iter()
             .map(|d| {
