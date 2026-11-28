@@ -7,6 +7,7 @@ use hubdouble_api_apps::{DeliveryLog, get_delivery, list_deliveries, redeliver_d
 use hubdouble_git::{ObjectData, RefChange};
 use hubdouble_hooks::{ContentType, Hook, HookOwner, Hooks, LatestPushes, is_event};
 use hubdouble_model::{AccountKind, ApiError, FieldError, Grant, Requirement, Scope};
+use hubdouble_render::Urls;
 use hubdouble_rest::{Ctx, Reply};
 use hubdouble_store::{Accounts, Deleted, Deliveries, Tx, TxMut};
 use serde::Deserialize;
@@ -137,8 +138,8 @@ fn hook(ctx: &Ctx<'_>) -> Result<Arc<Hook>, ApiError> {
         .ok_or_else(ApiError::not_found)
 }
 
-fn rendered(tx: &Tx, hook: &Hook) -> Result<Value, ApiError> {
-    hook.render(tx)
+fn rendered(tx: &Tx, urls: &Urls, hook: &Hook) -> Result<Value, ApiError> {
+    hook.render_at(tx, urls)
         .ok_or_else(|| ApiError::internal("the webhook's owner is gone"))
 }
 
@@ -234,7 +235,7 @@ fn list(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let hooks: Vec<Value> = tx
         .table::<Hooks>()
         .children(owner.id())
-        .map(|h| rendered(tx, h))
+        .map(|h| rendered(tx, ctx.urls(), h))
         .collect::<Result<_, _>>()?;
     ctx.page(&hooks, Clone::clone)
 }
@@ -275,13 +276,14 @@ fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         }));
     }
     let sender = sender(ctx);
+    let urls = ctx.urls().clone();
     let tx = ctx.tx_mut()?;
     hook.id = tx.next_id();
     let id = hook.id;
     tx.table_mut::<Hooks>().insert(hook)?;
     hubdouble_hooks::ping_hook(tx, id, sender)?;
     let hook = hook_by_id(tx, id)?;
-    let answer = rendered(tx, &hook)?;
+    let answer = rendered(tx, &urls, &hook)?;
     let location = answer["url"].as_str().unwrap_or_default().to_owned();
     Reply::json(&answer)?
         .status(StatusCode::CREATED)
@@ -297,7 +299,7 @@ fn hook_by_id(tx: &Tx, id: i64) -> Result<Arc<Hook>, ApiError> {
 
 fn get(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let hook = hook(ctx)?;
-    Reply::json(&rendered(ctx.tx(), &hook)?)
+    Reply::json(&rendered(ctx.tx(), ctx.urls(), &hook)?)
 }
 
 fn save(ctx: &mut Ctx<'_>, mut hook: Hook) -> Result<Arc<Hook>, ApiError> {
@@ -334,7 +336,7 @@ fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         hook.active = active;
     }
     let hook = save(ctx, hook)?;
-    Reply::json(&rendered(ctx.tx(), &hook)?)
+    Reply::json(&rendered(ctx.tx(), ctx.urls(), &hook)?)
 }
 
 fn delete(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {

@@ -548,9 +548,49 @@ async fn the_test_url_of_a_hook_sends_the_push_test() {
     let status = post_outside_the_spec(&server, path).await;
 
     // Then
-    assert!(test_url.ends_with(&format!("/hooks/{id}/test")), "{test_url}");
+    assert!(
+        test_url.ends_with(&format!("/hooks/{id}/test")),
+        "{test_url}"
+    );
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(to_hook(&drained(&server).await, id, "push").len(), 1);
+}
+
+#[tokio::test]
+async fn hook_links_keep_the_api_prefix_of_the_request() {
+    // Given
+    let server = server().await;
+    let enterprise = GoGithub::enterprise(&server).with_token(HOOK_ADMIN_TOKEN);
+    let prefix = format!("{}/api/v3/", server.base);
+
+    // When
+    let repo_hook = enterprise
+        .post(REPO_HOOKS, &hook(&server, "s", &["push"], true))
+        .await;
+    let org_hook = enterprise
+        .post(ORG_HOOKS, &hook(&server, "s", &["push"], true))
+        .await;
+    let id = repo_hook.json()["id"].as_i64().unwrap();
+    let got = enterprise.get(&format!("{REPO_HOOKS}/{id}")).await;
+    let listed = enterprise.get(ORG_HOOKS).await;
+
+    // Then
+    assert_eq!(
+        repo_hook.header("location"),
+        format!("{prefix}{REPO_HOOKS}/{id}")
+    );
+    assert!(org_hook.header("location").starts_with(&prefix));
+    for body in [&repo_hook.json(), &got.json(), &listed.json()[0]] {
+        for link in ["url", "ping_url", "deliveries_url"] {
+            assert!(body[link].as_str().unwrap().starts_with(&prefix), "{body}");
+        }
+    }
+    assert!(
+        got.json()["test_url"]
+            .as_str()
+            .unwrap()
+            .starts_with(&prefix)
+    );
 }
 
 async fn post_outside_the_spec(server: &TestServer, path: &str) -> StatusCode {

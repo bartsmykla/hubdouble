@@ -115,10 +115,17 @@ impl Hook {
         }
     }
 
-    /// GitHub's `hook` for a repository webhook and `org-hook` for an organization webhook.
+    /// [`Hook::render_at`] with the API origin and no API prefix, as delivery payloads link it.
     #[must_use]
     pub fn render(&self, tx: &Tx) -> Option<Value> {
-        let url = format!("{}/{}", Urls::new(tx.config(), "").api, self.path(tx)?);
+        self.render_at(tx, &Urls::new(tx.config(), ""))
+    }
+
+    /// GitHub's `hook` for a repository webhook and `org-hook` for an organization webhook, its
+    /// links under `urls.api`.
+    #[must_use]
+    pub fn render_at(&self, tx: &Tx, urls: &Urls) -> Option<Value> {
+        let url = format!("{}/{}", urls.api, self.path(tx)?);
         let mut hook = json!({
             "id": self.id,
             "name": "web",
