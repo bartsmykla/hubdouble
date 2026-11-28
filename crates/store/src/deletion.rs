@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use hubdouble_model::{Account, ApiError, Environment, Repo, Team};
+use hubdouble_model::{Account, ApiError, Environment, Repo, RulesetSource, Team};
 
 use crate::rows::{Entity, Rows};
 use crate::store::TxMut;
@@ -281,6 +281,8 @@ fn drop_account(tx: &mut TxMut<'_>, account_id: i64) {
         tx.table_mut::<Deliveries>().remove_children(*app);
     }
     tx.table_mut::<Apps>().remove_all(apps);
-    tx.table_mut::<Rulesets>().remove_children(account_id);
+    tx.table_mut::<Rulesets>().remove_where(|r| {
+        r.source_type == RulesetSource::Organization && r.source_id == account_id
+    });
     tx.table_mut::<Accounts>().remove(account_id);
 }

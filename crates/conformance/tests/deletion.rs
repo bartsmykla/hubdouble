@@ -276,6 +276,47 @@ async fn deleting_a_repository_or_an_org_keeps_the_actions_variables_of_an_owner
     assert_eq!(shared.json()["variables"][0]["name"], "SHARED");
 }
 
+#[tokio::test]
+async fn deleting_an_org_keeps_the_rulesets_of_a_repository_with_the_same_id() {
+    // Given repository acme/kept and org twin with one ID, each with a ruleset
+    let server = start(vec![
+        repository(KEPT_REPO_ID, fixture::ORG, "kept"),
+        json!({"kind": "org", "id": KEPT_REPO_ID, "login": "twin"}),
+        json!({"kind": "ruleset", "repository": "acme/kept", "name": "kept rules",
+               "target": "branch", "enforcement": "active", "bypass_actors": [],
+               "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+               "rules": [{"type": "required_linear_history"}]}),
+        json!({"kind": "ruleset", "org": "twin", "name": "twin rules", "target": "branch",
+               "enforcement": "active",
+               "conditions": {"ref_name": {"include": ["~ALL"], "exclude": []},
+                              "repository_name": {"include": ["~ALL"], "exclude": []}},
+               "rules": [{"type": "deletion"}]}),
+    ])
+    .await;
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+
+    // When org twin is deleted
+    admin(&server, Method::DELETE, "org/twin", None).await;
+
+    // Then acme/kept keeps its ruleset and the org's ruleset is gone
+    let rules = alice.get("repos/acme/kept/rules/branches/main").await;
+    assert_eq!(rules.status.as_u16(), 200, "{:?}", rules.body);
+    assert_eq!(rules.json()[0]["type"], "required_linear_history");
+    let names: Vec<String> = server
+        .server
+        .services()
+        .store
+        .view(|tx| {
+            Ok(tx
+                .table::<Rulesets>()
+                .iter()
+                .map(|r| r.name.clone())
+                .collect())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(names, ["kept rules"]);
+}
+
 fn fork(id: i64, owner: &str, name: &str, parent: &str, visibility: &str) -> Value {
     json!({"kind": "repository", "id": id, "owner": owner, "name": name,
            "visibility": visibility, "fork_of": parent})
