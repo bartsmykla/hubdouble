@@ -1420,6 +1420,41 @@ async fn a_hook_keeps_at_most_one_dropped_answer_per_gap_between_running_attempt
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_older_answer_the_log_drops_into_a_gap_keeps_the_newer_dropped_answer_there() {
+    // Given a log capacity of one and six hook attempts in flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 6;
+        o.log_capacity = 1;
+    });
+    let mut attempts = BTreeMap::new();
+    for n in 1..=6 {
+        emit_one(&store, event("issues", WIDGET));
+        attempts.insert(n, hits.recv().await.unwrap());
+    }
+    // When the second answers 500, the fourth 200 so the log drops the second, the sixth 201 so
+    // the log drops the fourth, the third 404 so the log drops it, and the first then answers 503
+    // while the fifth still runs
+    for (answered, (n, code)) in (1..).zip([(2, 500), (4, 200), (6, 201), (3, 404), (1, 503)]) {
+        attempts.remove(&n).unwrap().reply.send(code).unwrap();
+        let dropped = if answered < 5 { answered - 1 } else { 4 };
+        hooks
+            .shared
+            .wait_stats(|s| s.in_flight == 6 - answered && s.unlogged == 6 - dropped)
+            .await;
+    }
+    // Then the hook's last response is the fourth attempt
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 200, "status": "active", "message": "OK"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_hooks_newer_logged_answer_beats_an_older_answer_the_log_dropped() {
     // Given a log capacity of one and three hook attempts in flight
     let store = world_with_issues_hook();
