@@ -1806,6 +1806,51 @@ async fn a_reset_keeps_an_apps_log_within_its_capacity_when_the_snapshot_holds_a
     assert_eq!(hooks.stats().log_bytes, kept);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_reset_strips_the_oldest_restored_body_past_the_log_byte_budget() {
+    let limit = log_bytes_of_an_app_delivery_beside_one_more().await;
+
+    // Given a log budget of two deliveries, and a snapshot that holds an App delivery and a newer
+    // delivery of a seeded hook
+    let store = world_with_issues_hook();
+    let (hooks, hits) = start(&store, |o| o.log_bytes = limit);
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    emit_one(&store, event("issues", WIDGET));
+    hooks.drain().await.unwrap();
+    let snapshot = store.snapshot();
+
+    // When the hook is deleted with its deliveries, the App gets one more, and a reset brings
+    // the hook back with its delivery
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Deliveries>().remove_children(ISSUES_HOOK);
+            tx.table_mut::<Hooks>().remove(ISSUES_HOOK);
+            Ok(())
+        })
+        .unwrap();
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    hooks.reset(&snapshot).await.unwrap();
+
+    // Then the oldest delivery loses its body and the newer ones keep theirs
+    assert_eq!(logged_ids(&store, APP_A), vec![1, 3]);
+    assert_eq!(logged_ids(&store, ISSUES_HOOK), vec![2]);
+    let full: Vec<bool> = store
+        .view(|tx| {
+            Ok((1..=3)
+                .map(|id| {
+                    let d = tx.table::<Deliveries>().get(id).unwrap();
+                    !d.request.payload.is_empty() && d.response.payload.is_some()
+                })
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(full, [false, true, true]);
+    assert!(hooks.stats().log_bytes <= limit);
+}
+
 async fn app_request_app_and_hook_log_bytes() -> (usize, usize, usize) {
     let headers =
         |h: &BTreeMap<String, String>| -> usize { h.iter().map(|(k, v)| k.len() + v.len()).sum() };
