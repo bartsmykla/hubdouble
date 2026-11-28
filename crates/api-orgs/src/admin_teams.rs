@@ -266,30 +266,13 @@ fn edit(tx: &mut TxMut<'_>, params: &Params, now: Timestamp, body: Value) -> Res
     Ok(())
 }
 
-fn delete(
-    tx: &mut TxMut<'_>,
-    params: &Params,
-    now: Timestamp,
-    body: Value,
-) -> Result<(), ApiError> {
+fn delete(tx: &mut TxMut<'_>, params: &Params, _: Timestamp, body: Value) -> Result<(), ApiError> {
     let input: Sender = decode(body)?;
     let (org, team) = lookup(tx, params)?;
     let source = events::Source {
         org: &org,
         sender: sender(tx, &org, input.sender.as_deref())?,
     };
-    let children: Vec<_> = tx
-        .table::<Teams>()
-        .children(org.id)
-        .filter(|child| child.parent_id == Some(team.id))
-        .cloned()
-        .collect();
-    for child in children {
-        let mut updated = (*child).clone();
-        updated.parent_id = None;
-        updated.updated_at = now;
-        tx.table_mut::<Teams>().replace(updated)?;
-    }
     tx.delete(&Deleted::Team(team.clone()))?;
     events::team(tx, &source, "deleted", &team, None, None);
     Ok(())

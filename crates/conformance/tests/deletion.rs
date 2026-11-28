@@ -658,6 +658,32 @@ async fn deleting_a_user_drops_the_apps_they_own_with_installations_and_tokens()
 }
 
 #[tokio::test]
+async fn deleting_a_parent_team_deletes_its_child_teams_and_keeps_other_teams() {
+    // Given a team with a child and a grandchild, and another team
+    let server = start(vec![
+        json!({"kind": "team", "org": "acme", "name": "Root"}),
+        json!({"kind": "team", "org": "acme", "name": "Child", "parent": "root"}),
+        json!({"kind": "team", "org": "acme", "name": "Grandchild", "parent": "child"}),
+        json!({"kind": "team", "org": "acme", "name": "Other"}),
+    ])
+    .await;
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+
+    // When the root team is deleted
+    admin(&server, Method::DELETE, "team/acme/root", None).await;
+
+    // Then its child and grandchild are gone with it, and the other team stays
+    for slug in ["root", "child", "grandchild"] {
+        assert_eq!(
+            status(&alice, &format!("orgs/acme/teams/{slug}")).await,
+            404,
+            "{slug}"
+        );
+    }
+    assert_eq!(status(&alice, "orgs/acme/teams/other").await, 200);
+}
+
+#[tokio::test]
 async fn a_deleted_user_or_team_leaves_no_assignment_or_review_request() {
     // Given an issue assigned to carol, and a pull request that asks carol and a team to review
     let server = start(vec![

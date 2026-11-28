@@ -32,8 +32,13 @@ pub(crate) fn delete(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiErr
         for repo in repos {
             delete(tx, &Deleted::Repo(repo))?;
         }
-        let teams: Vec<_> = tx.table::<Teams>().children(account.id).cloned().collect();
-        for team in teams {
+        let teams = tx.table::<Teams>();
+        let roots: Vec<_> = teams
+            .children(account.id)
+            .filter(|t| t.parent_id.is_none_or(|p| teams.get(p).is_none()))
+            .cloned()
+            .collect();
+        for team in roots {
             delete(tx, &Deleted::Team(team))?;
         }
         let bots: Vec<_> = tx
@@ -44,6 +49,17 @@ pub(crate) fn delete(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiErr
             .collect();
         for bot in bots {
             delete(tx, &Deleted::Account(bot))?;
+        }
+    }
+    if let Deleted::Team(team) = deleted {
+        let children: Vec<_> = tx
+            .table::<Teams>()
+            .children(team.org_id)
+            .filter(|t| t.parent_id == Some(team.id))
+            .cloned()
+            .collect();
+        for child in children {
+            delete(tx, &Deleted::Team(child))?;
         }
     }
     if let Deleted::Repo(repo) = deleted {
