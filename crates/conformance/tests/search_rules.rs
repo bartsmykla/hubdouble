@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use hubdouble_model::{
-    Reaction, ReactionContent, ReactionSubjectKind, Timestamp, Token, TokenKind, node_id,
+    Access, Reaction, ReactionContent, ReactionSubjectKind, Timestamp, Token, TokenKind, node_id,
 };
-use hubdouble_store::{Accounts, Issues, Reactions, Tokens};
+use hubdouble_store::{Accounts, Installations, Issues, Reactions, Tokens};
 use hubdouble_testkit::fixture::{self, ALICE_ID, ALICE_TOKEN, BOB_TOKEN, CAROL_TOKEN};
 use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer};
 use serde_json::{Value, json};
@@ -232,10 +232,64 @@ async fn a_team_qualifier_needs_an_app_installed_on_the_org_with_members_read() 
         seen.push(row);
     }
 
-    // Then only the App with members=read on acme resolves acme's teams
+    // And an installation token of that App narrowed to no members permission searches, then
+    // the user token searches after the App's installation is suspended
+    const NARROWED: &str = "ghs_installation_narrowed_without_members";
+    let store = &server.server.services().store;
+    store
+        .update(|tx| {
+            let id = tx.next_id();
+            tx.table_mut::<Tokens>().insert(Token {
+                id,
+                token: NARROWED.into(),
+                kind: TokenKind::Installation,
+                user_id: None,
+                app_id: Some(MEMBERS_APP_ID),
+                installation_id: Some(MEMBERS_INSTALLATION_ID),
+                repo_ids: None,
+                permissions: BTreeMap::from([
+                    ("metadata".to_owned(), Access::Read),
+                    ("pull_requests".to_owned(), Access::Read),
+                ]),
+                scopes: Vec::new(),
+                expires_at: None,
+                revoked: false,
+                owner_seeded: true,
+                created_at: Timestamp::SEED,
+            })?;
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+    let narrowed = numbers(
+        &GoGithub::new(&server).with_token(NARROWED),
+        "team-review-requested:acme/reviewers",
+    )
+    .await;
+    store
+        .update(|tx| {
+            let mut installation = (**tx
+                .table::<Installations>()
+                .get(MEMBERS_INSTALLATION_ID)
+                .unwrap())
+            .clone();
+            installation.suspended_at = Some(Timestamp::SEED);
+            tx.table_mut::<Installations>().replace(installation)?;
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+    let suspended = numbers(
+        &GoGithub::new(&server).with_token(USER_WITH_MEMBERS),
+        "team-review-requested:acme/reviewers",
+    )
+    .await;
+
+    // Then only the App with members=read on acme resolves acme's teams, and only while its
+    // token keeps members and its installation is active
     let hidden = vec![vec![], vec![]];
     let found = vec![vec![1], vec![1]];
     assert_eq!(seen, vec![hidden.clone(), hidden, found.clone(), found]);
+    assert_eq!(narrowed, Vec::<i64>::new());
+    assert_eq!(suspended, Vec::<i64>::new());
 }
 
 #[tokio::test]
