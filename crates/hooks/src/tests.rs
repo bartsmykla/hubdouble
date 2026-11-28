@@ -7,7 +7,7 @@ use bytes::Bytes;
 use http::Uri;
 use http_body_util::{BodyExt, Full};
 use hubdouble_model::{
-    Access, Account, AccountKind, App, Config, Event, Installation, ManualClock, Repo,
+    Access, Account, AccountKind, App, Config, Delivery, Event, Installation, ManualClock, Repo,
     RepositorySelection, Timestamp, Visibility, Webhook, node_id,
 };
 use hubdouble_store::{
@@ -1547,6 +1547,85 @@ async fn a_reset_that_brings_back_a_deleted_seeded_hook_frees_its_deleted_delive
     // Then the App keeps its log with its older delivery's request and response, and the hook has none
     assert_eq!(logged_ids(&store, APP_A), vec![1, 3]);
     assert_eq!(logged_ids(&store, ISSUES_HOOK), Vec::<i64>::new());
+    let first = store
+        .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
+        .unwrap()
+        .unwrap();
+    assert!(!first.request.payload.is_empty());
+    assert!(first.response.payload.is_some());
+}
+
+async fn app_request_app_and_hook_log_bytes() -> (usize, usize, usize) {
+    let headers =
+        |h: &BTreeMap<String, String>| -> usize { h.iter().map(|(k, v)| k.len() + v.len()).sum() };
+    let store = world_with_issues_hook();
+    let (hooks, hits) = start(&store, |_| {});
+    let _bodies = answer_all(hits);
+    for name in ["push", "issues"] {
+        emit_one(&store, event(name, WIDGET));
+        hooks.drain().await.unwrap();
+    }
+    store
+        .view(|tx| {
+            let rows = tx.table::<Deliveries>();
+            let (app, hook) = (rows.get(1).unwrap(), rows.get(2).unwrap());
+            let request = |d: &Delivery| d.request.payload.len() + headers(&d.request.headers);
+            let full = |d: &Delivery| {
+                request(d)
+                    + d.response.payload.as_ref().map_or(0, String::len)
+                    + headers(&d.response.headers)
+            };
+            Ok((request(app), full(app), full(hook)))
+        })
+        .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_attempt_started_during_a_reset_does_not_count_a_restored_hooks_deleted_deliveries() {
+    let (request, app, hook) = app_request_app_and_hook_log_bytes().await;
+
+    // Given a log budget of an App delivery, a hook delivery and one request, or of an App
+    // delivery and two requests
+    let store = world_with_issues_hook();
+    let snapshot = store.snapshot();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.log_bytes = app + request + hook.max(request);
+        o.workers = 2;
+    });
+    for name in ["push", "issues"] {
+        emit_one(&store, event(name, WIDGET));
+        hits.recv().await.unwrap().reply.send(200).unwrap();
+        hooks.drain().await.unwrap();
+    }
+    assert_eq!(logged_ids(&store, ISSUES_HOOK), vec![2]);
+    // Given an App attempt in flight, and then the seeded hook deleted with its deliveries
+    emit_one(&store, event("push", WIDGET));
+    let in_flight = hits.recv().await.unwrap();
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Deliveries>().remove_children(ISSUES_HOOK);
+            tx.table_mut::<Hooks>().remove(ISSUES_HOOK);
+            Ok(())
+        })
+        .unwrap();
+
+    // When a reset brings the hook back and a new App attempt starts before the reset returns
+    let reset = hooks.reset(&snapshot);
+    tokio::pin!(reset);
+    tokio::select! {
+        biased;
+        _ = &mut reset => panic!("the reset returned before the attempt in flight ended"),
+        () = std::future::ready(()) => {}
+    }
+    emit_one(&store, event("push", WIDGET));
+    let started = hits.recv().await.unwrap();
+    in_flight.reply.send(200).unwrap();
+    reset.await.unwrap();
+    started.reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+
+    // Then the App's older delivery keeps its request and response
+    assert_eq!(logged_ids(&store, APP_A), vec![1, 4]);
     let first = store
         .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
         .unwrap()

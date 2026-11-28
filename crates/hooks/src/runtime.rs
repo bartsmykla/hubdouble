@@ -259,17 +259,20 @@ impl Shared {
     }
 
     pub(crate) async fn reset(&self, snapshot: &Snapshot) -> Result<(), HooksError> {
-        let epoch = self.store.restore_epoch(snapshot);
-        self.forget_older(epoch).await?;
-        self.forget_discarded_hooks();
-        Ok(())
+        let epoch = {
+            let mut st = self.state.lock();
+            let epoch = self.store.restore_epoch(snapshot);
+            self.drop_older(&mut st, epoch);
+            self.forget_discarded_hooks(&mut st);
+            epoch
+        };
+        self.wait_older(epoch).await
     }
 
-    fn forget_discarded_hooks(&self) {
-        let mut st = self.state.lock();
+    fn forget_discarded_hooks(&self, st: &mut State) {
         let State {
             apps: logs, bodies, ..
-        } = &mut *st;
+        } = st;
         let Ok(stale) = self.store.update(|tx| {
             let hooks = tx.try_table::<Hooks>();
             let apps = tx.table::<Apps>();
@@ -305,7 +308,7 @@ impl Shared {
         for log in logs.values_mut() {
             log.logged = None;
         }
-        self.forget_gone(&mut st);
+        self.forget_gone(st);
     }
 
     fn forget_gone(&self, st: &mut State) {
@@ -327,35 +330,41 @@ impl Shared {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn forget_older(&self, epoch: u64) -> Result<(), HooksError> {
-        {
-            let mut st = self.state.lock();
-            let (dropped, kept): (Vec<Job>, Vec<Job>) =
-                st.queue.drain(..).partition(|job| job.epoch < epoch);
-            st.queue.extend(kept);
-            self.space.add_permits(dropped.len());
-            for job in dropped {
-                self.release_job(&job);
-                self.finish(&mut st, job.log, job.id, None);
-            }
-            let stale: Vec<(i64, i64)> = st
-                .apps
-                .iter()
-                .flat_map(|(app, log)| {
-                    log.ready
-                        .iter()
-                        .filter(|(_, (e, _))| *e < epoch)
-                        .map(|(id, _)| (*app, *id))
-                })
-                .collect();
-            for (app, id) in stale {
-                if let Some(log) = st.apps.get_mut(&app) {
-                    log.ready.remove(&id);
-                }
-                st.bodies.release(id);
-                st.unlogged.remove(&id);
-            }
+        self.drop_older(&mut self.state.lock(), epoch);
+        self.wait_older(epoch).await
+    }
+
+    fn drop_older(&self, st: &mut State, epoch: u64) {
+        let (dropped, kept): (Vec<Job>, Vec<Job>) =
+            st.queue.drain(..).partition(|job| job.epoch < epoch);
+        st.queue.extend(kept);
+        self.space.add_permits(dropped.len());
+        for job in dropped {
+            self.release_job(&job);
+            self.finish(st, job.log, job.id, None);
         }
+        let stale: Vec<(i64, i64)> = st
+            .apps
+            .iter()
+            .flat_map(|(app, log)| {
+                log.ready
+                    .iter()
+                    .filter(|(_, (e, _))| *e < epoch)
+                    .map(|(id, _)| (*app, *id))
+            })
+            .collect();
+        for (app, id) in stale {
+            if let Some(log) = st.apps.get_mut(&app) {
+                log.ready.remove(&id);
+            }
+            st.bodies.release(id);
+            st.unlogged.remove(&id);
+        }
+    }
+
+    async fn wait_older(&self, epoch: u64) -> Result<(), HooksError> {
         self.notify();
         self.wait_until(|st| st.in_flight.range(..epoch).next().is_none())
             .await
