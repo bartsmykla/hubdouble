@@ -121,7 +121,7 @@ struct AppLog {
 }
 
 impl AppLog {
-    fn drop_answer(&mut self, id: i64, epoch: u64, answer: LastResponse) {
+    fn gap(&self, id: i64) -> (i64, i64) {
         let low = self
             .running
             .range(..id)
@@ -129,8 +129,29 @@ impl AppLog {
             .copied()
             .unwrap_or(i64::MIN);
         let high = self.running.range(id..).next().copied().unwrap_or(i64::MAX);
+        (low, high)
+    }
+
+    fn remove_newest(&mut self, low: i64, high: i64) {
+        if let Some((&older, _)) = self.dropped_answers.range(low..high).next_back() {
+            self.dropped_answers.remove(&older);
+        }
+    }
+
+    fn end(&mut self, id: i64) {
+        if !self.running.remove(&id) {
+            return;
+        }
+        let (low, high) = self.gap(id);
+        if self.dropped_answers.range(id..high).next().is_some() {
+            self.remove_newest(low, id);
+        }
+    }
+
+    fn drop_answer(&mut self, id: i64, epoch: u64, answer: LastResponse) {
+        let (low, high) = self.gap(id);
         if self.dropped_answers.range(id..high).next().is_none() {
-            self.dropped_answers.retain(|k, _| !(low..high).contains(k));
+            self.remove_newest(low, high);
             self.dropped_answers.insert(id, (epoch, answer));
         }
     }
@@ -429,6 +450,15 @@ impl Shared {
             .filter(|(id, _)| !st.bodies.kept.contains_key(id))
             .map(|(_, (_, d))| body_bytes(d))
             .sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dropped_answers_and_running(&self, log: i64) -> (usize, usize) {
+        self.state
+            .lock()
+            .apps
+            .get(&log)
+            .map_or((0, 0), |l| (l.dropped_answers.len(), l.running.len()))
     }
 
     #[cfg(test)]
@@ -738,7 +768,7 @@ impl Shared {
 
     fn finish(&self, st: &mut State, app: i64, id: i64, delivery: Option<(u64, Delivery)>) {
         let log = st.apps.entry(app).or_default();
-        log.running.remove(&id);
+        log.end(id);
         match delivery {
             Some(d) => {
                 st.bodies.hold(app, &d.1);

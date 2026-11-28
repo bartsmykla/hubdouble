@@ -1389,6 +1389,37 @@ async fn a_hooks_last_response_is_its_newest_dropped_answer_before_a_running_att
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_hook_keeps_at_most_one_dropped_answer_per_gap_between_running_attempts() {
+    // Given a log capacity of one and seven hook attempts in flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 7;
+        o.log_capacity = 1;
+    });
+    let mut attempts = BTreeMap::new();
+    for n in 1..=7 {
+        emit_one(&store, event("issues", WIDGET));
+        attempts.insert(n, hits.recv().await.unwrap());
+    }
+    // When the second, fourth, sixth, third, seventh and fifth attempts answer in turn while the
+    // first still runs, so the gaps around the third and the fifth join over older dropped answers
+    for (answered, n) in (1..).zip([2, 4, 6, 3, 7, 5]) {
+        attempts.remove(&n).unwrap().reply.send(200).unwrap();
+        let dropped = answered - 1;
+        hooks
+            .shared
+            .wait_stats(|s| s.in_flight == 7 - answered && s.unlogged == 7 - dropped)
+            .await;
+        // Then the hook keeps no more dropped answers than there are gaps between running attempts
+        let (kept, running) = hooks.shared.dropped_answers_and_running(ISSUES_HOOK);
+        assert!(
+            kept <= running + 1,
+            "{kept} dropped answers, {running} running"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_hooks_newer_logged_answer_beats_an_older_answer_the_log_dropped() {
     // Given a log capacity of one and three hook attempts in flight
     let store = world_with_issues_hook();
