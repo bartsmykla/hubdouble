@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-api-search"
-description = "T11: Search"
+description = "Search"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

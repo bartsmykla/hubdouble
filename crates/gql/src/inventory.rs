@@ -22,8 +22,19 @@ pub(crate) fn documents() -> Vec<(String, String)> {
     docs
 }
 
-const OWNERS: [&str; 13] = [
-    "P0-B", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11", "T12",
+const OWNERS: [&str; 12] = [
+    "gql",
+    "api-apps",
+    "api-users",
+    "api-orgs",
+    "api-gitdata",
+    "api-pulls",
+    "api-reviews",
+    "api-issues",
+    "api-checks",
+    "api-actions",
+    "api-repos",
+    "api-search",
 ];
 
 #[test]
@@ -50,7 +61,7 @@ fn graphql_fields_lists_every_selected_field_with_an_owner() {
         listed, selected,
         "regenerate with `cargo run -p hubdouble-gql --example graphql_fields`"
     );
-    // Then every row has one owner from the plan's tracks
+    // Then every row names the crate that serves it
     for row in &rows {
         assert_eq!(row.len(), 3, "{row:?}");
         assert!(OWNERS.contains(&row[1]), "{} has no owner", row[0]);

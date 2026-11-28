@@ -31,7 +31,7 @@ pub struct Builder {
 }
 
 impl Builder {
-    /// Replaces the phase 0 frame (`hubdouble_admin::register`) with `f`, which then registers
+    /// Replaces the admin frame (`hubdouble_admin::register`) with `f`, which then registers
     /// the admin frame itself, as `hubdouble_api::register_all` does for the whole server.
     #[must_use]
     pub fn frame(mut self, f: fn(&mut Registrar<'_>)) -> Builder {
@@ -47,7 +47,7 @@ impl Builder {
         self
     }
 
-    /// Adds a registration after the phase 0 frame: the track under test or a stand-in from
+    /// Adds a registration after the admin frame: the API crate under test or a stand-in from
     /// [`crate::standins`]. They run in the order added.
     #[must_use]
     pub fn register(mut self, f: fn(&mut Registrar<'_>)) -> Builder {

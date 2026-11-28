@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-admin"
-description = "Admin API frame, seed loader, faults, request log and per-track registration"
+description = "Admin API frame, seed loader, faults, request log and per-crate registration"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

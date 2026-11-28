@@ -15,7 +15,7 @@ pub use shared::{comment_view, issue_view};
 
 use crate::shared::{ISSUES_READ, ISSUES_WRITE, READ, WRITE};
 
-/// Registers what T7 owns: the issue event and manual link side tables, the `issue_link` kind,
+/// Registers what this crate owns: the issue event and manual link side tables, the `issue_link` kind,
 /// the ref subscriber that closes issues from commits and pull requests on the default branch,
 /// the issue, label, comment and reaction operations, and the `Issue`,
 /// `IssueComment` and `Repository.issue` GraphQL types and fields.

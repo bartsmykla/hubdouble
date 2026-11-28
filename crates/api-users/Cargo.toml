@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-api-users"
-description = "T2: OAuth and users"
+description = "OAuth and users"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

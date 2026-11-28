@@ -16,7 +16,7 @@ use crate::receiver::Delivery;
 /// The directory for checked answers and signed webhook records.
 pub const DIR_ENV: &str = "HUBDOUBLE_TEST_COVERAGE_DIR";
 
-/// Which case of plan section 7's "Tests per operation" a checked answer proves, read from the
+/// Which case of the per-operation test list a checked answer proves, read from the
 /// answer and the server's state, never from what the test says it meant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Case {

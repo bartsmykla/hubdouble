@@ -454,7 +454,7 @@ fn answer_fields(call: &str) -> impl Iterator<Item = &'static str> + '_ {
 
 #[test]
 fn the_variant_table_holds_every_variant_plan_section_4_8_names() {
-    // Given plan section 4.8's rows, with a requirement such as E9 read from section 1.1
+    // Given the call table's rows, with a requirement such as E9 read from the requirement list
     let rows = plan_variant_rows();
 
     // When each word a row puts in backticks, outside its source citations, is looked up

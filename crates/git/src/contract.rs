@@ -564,7 +564,7 @@ impl Git {
     /// [`GitError::Stale`] when `old` does not match, [`GitError::NotFastForward`] without `force`.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the frozen contract of plan section 6.4 plus the sender"
+        reason = "the frozen git contract plus the sender"
     )]
     pub fn update_ref(
         &self,
@@ -774,10 +774,7 @@ impl Git {
     /// # Errors
     ///
     /// [`GitError::Stale`] when `branch` is not at `parent`, [`GitError::Invalid`] for a bad path.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the frozen contract of plan section 6.4"
-    )]
+    #[expect(clippy::too_many_arguments, reason = "the frozen git contract")]
     pub fn commit(
         &self,
         tx: &mut TxMut<'_>,

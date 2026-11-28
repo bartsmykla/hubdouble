@@ -20,7 +20,7 @@ pub struct Edge {
     pub node: Resolved,
 }
 
-/// The value behind every connection type P0-B owns.
+/// The value behind every connection type this crate owns.
 #[derive(Clone)]
 pub struct Conn {
     pub type_name: &'static str,

@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-api-issues"
-description = "T7: Issues and comments"
+description = "Issues and comments"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

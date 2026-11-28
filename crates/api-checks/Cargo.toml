@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-api-checks"
-description = "T8: Checks and statuses"
+description = "Checks and statuses"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

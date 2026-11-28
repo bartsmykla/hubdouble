@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-api"
-description = "register_all: every track's registration in the fixed order"
+description = "register_all: every API crate's registration in the fixed order"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

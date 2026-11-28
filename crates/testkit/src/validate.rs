@@ -328,7 +328,7 @@ pub fn webhook_payload(
 /// Checks one webhook delivery: its payload against octokit's schema for the `X-GitHub-Event`
 /// header and the payload's `action`, and its headers against
 /// <https://docs.github.com/en/webhooks/webhook-events-and-payloads#delivery-headers>:
-/// `X-GitHub-Event`, `X-GitHub-Delivery` (a lowercase UUID, plan section 4.3),
+/// `X-GitHub-Event`, `X-GitHub-Delivery` (a lowercase UUID),
 /// `X-GitHub-Hook-ID` and `X-GitHub-Hook-Installation-Target-ID` (numbers),
 /// `X-GitHub-Hook-Installation-Target-Type`, `X-Hub-Signature-256` (`sha256=` and 64 hex) and
 /// `X-Hub-Signature` (`sha1=` and 40 hex), both or neither, a `User-Agent` that starts with

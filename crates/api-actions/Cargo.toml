@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-api-actions"
-description = "T9: Actions and OIDC"
+description = "Actions and OIDC"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -171,8 +171,8 @@ impl Admin {
     }
 }
 
-/// Registers P0-F's own kinds (users, orgs, repositories, Apps, installations, tokens) and admin
-/// routes; `hubdouble-api::register_all` calls it before every track.
+/// Registers the core kinds (users, orgs, repositories, Apps, installations, tokens) and admin
+/// routes; `hubdouble-api::register_all` calls it before every API crate.
 pub fn register(r: &mut Registrar<'_>) {
     r.store
         .register_table::<crate::properties::RepositoryProperties>();

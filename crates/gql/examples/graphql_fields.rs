@@ -4,11 +4,11 @@ use std::process::ExitCode;
 const INVENTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/inventory");
 
 const TYPE_OWNERS: &[(&str, &[&str])] = &[
-    ("P0-B", &["Node", "PageInfo"]),
-    ("T1", &["App", "Bot"]),
-    ("T2", &["User", "Actor"]),
+    ("gql", &["Node", "PageInfo"]),
+    ("api-apps", &["App", "Bot"]),
+    ("api-users", &["User", "Actor"]),
     (
-        "T3",
+        "api-orgs",
         &[
             "Organization",
             "Team",
@@ -17,7 +17,7 @@ const TYPE_OWNERS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "T4",
+        "api-gitdata",
         &[
             "Ref",
             "Commit",
@@ -37,7 +37,7 @@ const TYPE_OWNERS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "T5",
+        "api-pulls",
         &[
             "PullRequest",
             "PullRequestCommit",
@@ -45,7 +45,7 @@ const TYPE_OWNERS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "T6",
+        "api-reviews",
         &[
             "PullRequestReview",
             "PullRequestReviewThread",
@@ -55,39 +55,40 @@ const TYPE_OWNERS: &[(&str, &[&str])] = &[
             "UnresolveReviewThreadPayload",
         ],
     ),
-    ("T7", &["Issue", "IssueComment", "Comment"]),
-    ("T8", &["StatusCheckRollup"]),
-    ("T10", &["Repository"]),
+    ("api-issues", &["Issue", "IssueComment", "Comment"]),
+    ("api-checks", &["StatusCheckRollup"]),
+    ("api-repos", &["Repository"]),
     (
-        "T11",
+        "api-search",
         &["SearchResultItemConnection", "SearchResultItemEdge"],
     ),
 ];
 
 const FIELD_OWNERS: &[(&str, &str, &str)] = &[
-    ("Query", "node", "P0-B"),
-    ("Query", "nodes", "P0-B"),
-    ("Query", "viewer", "T2"),
-    ("Query", "organization", "T3"),
-    ("Query", "repository", "T10"),
-    ("Query", "search", "T11"),
-    ("Repository", "collaborators", "T3"),
-    ("Repository", "defaultBranchRef", "T4"),
-    ("Repository", "object", "T4"),
-    ("Repository", "ref", "T4"),
-    ("Repository", "refs", "T4"),
-    ("Repository", "pullRequest", "T5"),
-    ("Repository", "issue", "T7"),
-    ("Ref", "associatedPullRequests", "T5"),
-    ("PullRequest", "reviewThreads", "T6"),
-    ("PullRequest", "reviews", "T6"),
-    ("Commit", "statusCheckRollup", "T8"),
-    ("Mutation", "createCommitOnBranch", "T4"),
-    ("Mutation", "updateRefs", "T4"),
-    ("Mutation", "markPullRequestReadyForReview", "T5"),
-    ("Mutation", "addPullRequestReviewThread", "T6"),
-    ("Mutation", "resolveReviewThread", "T6"),
-    ("Mutation", "unresolveReviewThread", "T6"),
+    ("Query", "node", "gql"),
+    ("Query", "nodes", "gql"),
+    ("Query", "viewer", "api-users"),
+    ("Query", "organization", "api-orgs"),
+    ("Query", "repository", "api-repos"),
+    ("Query", "search", "api-search"),
+    ("Repository", "collaborators", "api-orgs"),
+    ("Repository", "defaultBranchRef", "api-gitdata"),
+    ("Repository", "object", "api-gitdata"),
+    ("Repository", "ref", "api-gitdata"),
+    ("Repository", "refs", "api-gitdata"),
+    ("Repository", "pullRequest", "api-pulls"),
+    ("Repository", "issue", "api-issues"),
+    ("Ref", "associatedPullRequests", "api-pulls"),
+    ("PullRequest", "closingIssuesReferences", "api-issues"),
+    ("PullRequest", "reviewThreads", "api-reviews"),
+    ("PullRequest", "reviews", "api-reviews"),
+    ("Commit", "statusCheckRollup", "api-checks"),
+    ("Mutation", "createCommitOnBranch", "api-gitdata"),
+    ("Mutation", "updateRefs", "api-gitdata"),
+    ("Mutation", "markPullRequestReadyForReview", "api-pulls"),
+    ("Mutation", "addPullRequestReviewThread", "api-reviews"),
+    ("Mutation", "resolveReviewThread", "api-reviews"),
+    ("Mutation", "unresolveReviewThread", "api-reviews"),
 ];
 
 fn default_owner(type_name: &str, field: &str) -> Option<&'static str> {
@@ -100,7 +101,7 @@ fn default_owner(type_name: &str, field: &str) -> Option<&'static str> {
     if let Some((owner, _)) = TYPE_OWNERS.iter().find(|(_, ts)| ts.contains(&type_name)) {
         return Some(owner);
     }
-    (type_name.ends_with("Connection") || type_name.ends_with("Edge")).then_some("P0-B")
+    (type_name.ends_with("Connection") || type_name.ends_with("Edge")).then_some("gql")
 }
 
 fn main() -> ExitCode {

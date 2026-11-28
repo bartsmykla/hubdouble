@@ -1,6 +1,6 @@
 [package]
 name = "hubdouble-api-pulls"
-description = "T5: Pull requests"
+description = "Pull requests"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

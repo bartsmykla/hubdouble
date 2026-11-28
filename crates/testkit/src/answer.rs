@@ -20,7 +20,7 @@ const PROSE_REDIRECTS: [u16; 3] = [301, 302, 307];
 const RAW_BY_CONTENT: [(&str, [&str; 2]); 1] =
     [("git/get-blob", ["text/plain", "application/octet-stream"])];
 
-/// An answer where live GitHub differs from its docs, and live GitHub wins (plan section 4.7).
+/// An answer where live GitHub differs from its docs, and live GitHub wins.
 struct LiveEvidence {
     operation_id: &'static str,
     status: u16,
@@ -248,8 +248,7 @@ pub fn api_path(path: &str) -> &str {
 ///
 /// The rules and where they come from:
 ///
-/// - Path parameters `ref`, `path`, `branch`, `basehead` and `tag` hold slashes, as on GitHub
-///   (plan section 6.2).
+/// - Path parameters `ref`, `path`, `branch`, `basehead` and `tag` hold slashes, as on GitHub.
 /// - Every operation may also answer what the docs prose gives every endpoint: `304` for a
 ///   conditional `GET` with an empty body
 ///   (<https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api#use-conditional-requests>);
@@ -270,8 +269,8 @@ pub fn api_path(path: &str) -> &str {
 /// - Every answer has `X-GitHub-Request-Id`, `X-GitHub-Media-Type` and the five
 ///   `X-RateLimit-*` headers, `X-RateLimit-Remaining` never `0`
 ///   (<https://docs.github.com/en/rest/using-the-rest-api/getting-started-with-the-rest-api#about-the-response-code-and-headers>,
-///   <https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#checking-the-status-of-your-rate-limit>,
-///   plan section 4.7), and `Location` where the operation documents it. An authenticated
+///   <https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#checking-the-status-of-your-rate-limit>),
+///   and `Location` where the operation documents it. An authenticated
 ///   `304` or `412` has no `X-GitHub-Media-Type`, `X-OAuth-Scopes`, `X-Accepted-OAuth-Scopes`
 ///   or `Link`, as live GitHub answered on 2026-11-25.
 ///   `X-GitHub-Api-Version-Selected` names the selected version unless GitHub rejects the version.

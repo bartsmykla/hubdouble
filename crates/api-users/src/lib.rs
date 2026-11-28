@@ -9,7 +9,7 @@ mod users;
 
 use hubdouble_admin::Registrar;
 
-/// Registers what T2 owns: tables, REST operations, GraphQL fields, ref subscribers, seed kinds
+/// Registers what this crate owns: tables, REST operations, GraphQL fields, ref subscribers, seed kinds
 /// and admin routes.
 pub fn register(r: &mut Registrar<'_>) {
     state::register_tables(r.store);

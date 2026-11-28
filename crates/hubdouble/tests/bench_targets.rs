@@ -289,7 +289,7 @@ fn a_scaled_target_is_judged_on_the_reference_runner_and_a_raw_one_as_measured()
     let faster = judge(Some(0.5 * REFERENCE_CALIBRATION_US));
     let uncalibrated = judge(None);
 
-    // Then the slower runner meets the scaled rows, the faster one misses them, and so does no calibration, which both sides also miss as a section 9 row, with every scaled section 9 row
+    // Then the slower runner meets the scaled rows, the faster one misses them, and so does no calibration, which both sides also miss as a performancerow, with every scaled performancerow
     let scaled_section_9 = section_9_rows(None)
         .iter()
         .filter(|row| row["scaled"] == true)
@@ -335,7 +335,7 @@ fn a_round_side_without_a_positive_calibration_misses_a_scaled_target() {
 
 #[test]
 fn the_targets_gate_needs_every_section_9_measure_in_every_report_of_each_side() {
-    // Given five paired reports with every section 9 measure on both sides
+    // Given five paired reports with every performancemeasure on both sides
     let judge = |head: &dyn Fn(u32) -> Value, base: &dyn Fn(u32) -> Value| {
         let dir = TempDir::new().unwrap();
         for n in 1..=5 {
@@ -408,7 +408,7 @@ fn the_targets_gate_needs_every_section_9_measure_in_every_report_of_each_side()
 
 #[test]
 fn a_section_9_row_must_report_the_goal_unit_and_scaling_of_the_plan() {
-    // Given five paired reports with every section 9 measure, where the head's REST GET p99
+    // Given five paired reports with every performancemeasure, where the head's REST GET p99
     // row reports no target, a looser target, another unit, or no scaling
     let p99 = |r: &&mut Value| {
         r["measure"]
