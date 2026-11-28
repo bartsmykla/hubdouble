@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use hubdouble_auth::Actor;
-use hubdouble_model::{MembershipState, OrgRole, Repo, RepoRole, Team, TeamPrivacy, TeamRole};
-use hubdouble_store::{Memberships, Teams, Tx};
+use hubdouble_model::{
+    Access, MembershipState, OrgRole, Repo, RepoRole, Team, TeamPrivacy, TeamRole, TokenKind,
+};
+use hubdouble_store::{Installations, Memberships, Teams, Tx};
 
 pub fn org_role(tx: &Tx, org_id: i64, user_id: i64) -> Option<OrgRole> {
     tx.table::<Memberships>()
@@ -52,6 +54,14 @@ impl TeamViewer {
             Actor::Installation { installation, .. } if installation.account_id == org_id => {
                 Self::Admin
             }
+            Actor::User { token, .. }
+                if token.kind == TokenKind::User
+                    && token
+                        .app_id
+                        .is_some_and(|app| !reads_members(tx, app, org_id)) =>
+            {
+                Self::Outside
+            }
             Actor::User { user, .. } => match org_role(tx, org_id, user.id) {
                 Some(OrgRole::Admin) => Self::Admin,
                 Some(OrgRole::Member) => Self::Member(user.id),
@@ -71,6 +81,14 @@ impl TeamViewer {
             Self::Outside => false,
         }
     }
+}
+
+fn reads_members(tx: &Tx, app_id: i64, org_id: i64) -> bool {
+    tx.table::<Installations>()
+        .of(app_id, org_id)
+        .filter(|i| i.suspended_at.is_none())
+        .and_then(|i| i.permissions.get("members"))
+        .is_some_and(|access| *access >= Access::Read)
 }
 
 pub fn pushes(tx: &Tx, actor: &Actor, repo: &Repo) -> bool {

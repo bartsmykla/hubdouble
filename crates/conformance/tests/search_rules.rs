@@ -1,5 +1,9 @@
-use hubdouble_model::{Reaction, ReactionContent, ReactionSubjectKind, Timestamp, node_id};
-use hubdouble_store::{Issues, Reactions};
+use std::collections::BTreeMap;
+
+use hubdouble_model::{
+    Reaction, ReactionContent, ReactionSubjectKind, Timestamp, Token, TokenKind, node_id,
+};
+use hubdouble_store::{Issues, Reactions, Tokens};
 use hubdouble_testkit::fixture::{self, ALICE_ID, ALICE_TOKEN, BOB_TOKEN, CAROL_TOKEN};
 use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer};
 use serde_json::{Value, json};
@@ -123,6 +127,96 @@ async fn a_team_qualifier_matches_only_a_team_the_searcher_can_see() {
             vec![vec![], vec![], vec![], vec![]],
         ]
     );
+}
+
+#[tokio::test]
+async fn a_team_qualifier_needs_the_app_of_a_user_token_installed_on_the_org_with_members_read() {
+    // Given alice, an admin of acme, with a user token of the fixture App, whose installation
+    // on acme has no members permission, and one of an App installed on acme with members=read
+    const WITHOUT_MEMBERS: &str = "ghu_alice_of_the_app_without_members";
+    const WITH_MEMBERS: &str = "ghu_alice_of_the_app_with_members";
+    let server = TestServer::builder()
+        .frame(hubdouble_api::register_all)
+        .entry(json!({
+            "kind": "app", "id": 4201, "slug": "members-app", "name": "Members App",
+            "owner": fixture::ORG, "public_key": fixture::APP_PUBLIC_KEY,
+            "permissions": {"members": "read", "metadata": "read", "pull_requests": "read"},
+            "events": [],
+        }))
+        .entry(json!({
+            "kind": "installation", "id": 5201, "app": "members-app", "account": fixture::ORG,
+            "permissions": {"members": "read", "metadata": "read", "pull_requests": "read"},
+        }));
+    let server = fixture::seed()
+        .into_iter()
+        .fold(server, hubdouble_testkit::Builder::entry)
+        .entry(json!({
+            "kind": "team", "org": "acme", "name": "Secret", "privacy": "secret",
+            "members": [{"login": "alice"}],
+            "repositories": [{"repository": "acme/public", "permission": "read"}],
+        }))
+        .entry(json!({
+            "kind": "team", "org": "acme", "name": "Reviewers",
+            "repositories": [{"repository": "acme/public", "permission": "read"}],
+        }))
+        .entry(json!({
+            "kind": "pull_request", "repository": "acme/public", "user": "alice",
+            "title": "Ship the feature", "head": "feature", "base": "main",
+        }))
+        .start()
+        .await;
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            for (token, app_id) in [(WITHOUT_MEMBERS, fixture::APP_ID), (WITH_MEMBERS, 4201)] {
+                let id = tx.next_id();
+                tx.table_mut::<Tokens>().insert(Token {
+                    id,
+                    token: token.into(),
+                    kind: TokenKind::User,
+                    user_id: Some(ALICE_ID),
+                    app_id: Some(app_id),
+                    installation_id: None,
+                    repo_ids: None,
+                    permissions: BTreeMap::new(),
+                    scopes: Vec::new(),
+                    expires_at: None,
+                    revoked: false,
+                    owner_seeded: true,
+                    created_at: Timestamp::SEED,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+    created(
+        &GoGithub::new(&server)
+            .with_token(ALICE_TOKEN)
+            .post(
+                "repos/acme/public/pulls/1/requested_reviewers",
+                &json!({"team_reviewers": ["secret", "reviewers"]}),
+            )
+            .await,
+    );
+
+    // When each token searches for the pull request that requests both teams
+    let mut seen = Vec::new();
+    for token in [WITHOUT_MEMBERS, WITH_MEMBERS] {
+        let client = GoGithub::new(&server).with_token(token);
+        let mut row = Vec::new();
+        for query in [
+            "team-review-requested:acme/secret",
+            "team-review-requested:acme/reviewers",
+        ] {
+            row.push(numbers(&client, query).await);
+        }
+        seen.push(row);
+    }
+
+    // Then only the App with members=read on acme resolves acme's teams
+    assert_eq!(seen, vec![vec![vec![], vec![]], vec![vec![1], vec![1]]]);
 }
 
 #[tokio::test]
