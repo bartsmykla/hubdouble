@@ -636,7 +636,8 @@ impl Shared {
         let delivery = job.logged(delivered_at, started.elapsed().as_secs_f64(), outcome);
         let mut st = self.state.lock();
         st.bodies.held -= sent;
-        self.finish(&mut st, app, id, Some((epoch, delivery)));
+        let logged = (epoch == self.store.epoch()).then_some((epoch, delivery));
+        self.finish(&mut st, app, id, logged);
         if let Some(n) = st.in_flight.get_mut(&epoch) {
             *n -= 1;
             if *n == 0 {

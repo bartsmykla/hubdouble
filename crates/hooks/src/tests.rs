@@ -1635,6 +1635,73 @@ async fn an_attempt_started_during_a_reset_does_not_count_a_restored_hooks_delet
 }
 
 #[tokio::test(start_paused = true)]
+async fn old_attempts_that_end_in_reverse_order_during_a_reset_keep_the_kept_bodies() {
+    let numbered = |n: i64| {
+        let mut e = event("push", WIDGET);
+        e.payload.insert("n".to_owned(), json!(n));
+        e
+    };
+    let headers =
+        |h: &BTreeMap<String, String>| -> usize { h.iter().map(|(k, v)| k.len() + v.len()).sum() };
+    let sizing = world();
+    let (sized, hits) = start(&sizing, |_| {});
+    let _sized_bodies = answer_all(hits);
+    emit_one(&sizing, numbered(1));
+    sized.drain().await.unwrap();
+    let d = sizing
+        .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
+        .unwrap()
+        .unwrap();
+    let request = d.request.payload.len() + headers(&d.request.headers);
+    let full =
+        request + d.response.payload.as_ref().map_or(0, String::len) + headers(&d.response.headers);
+
+    // Given a log budget of one delivery and two requests, and a seeded App's delivery logged
+    // before the snapshot
+    let store = world();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 2;
+        o.log_bytes = full + 2 * request;
+    });
+    emit_one(&store, numbered(1));
+    hits.recv().await.unwrap().reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+    let snapshot = store.snapshot();
+    // Given two more attempts of the App in flight
+    for n in 2..=3 {
+        emit_one(&store, numbered(n));
+    }
+    let mut by_n = BTreeMap::new();
+    for _ in 0..2 {
+        let hit = hits.recv().await.unwrap();
+        by_n.insert(hit.json()["n"].as_i64().unwrap(), hit);
+    }
+
+    // When a reset runs and the higher attempt ends before the lower one
+    let reset = hooks.reset(&snapshot);
+    tokio::pin!(reset);
+    tokio::select! {
+        biased;
+        _ = &mut reset => panic!("the reset returned before the attempts in flight ended"),
+        () = std::future::ready(()) => {}
+    }
+    by_n.remove(&3).unwrap().reply.send(200).unwrap();
+    hooks.shared.wait_stats(|s| s.in_flight == 1).await;
+    by_n.remove(&2).unwrap().reply.send(200).unwrap();
+    reset.await.unwrap();
+    hooks.drain().await.unwrap();
+
+    // Then the delivery kept from before the reset keeps its request and response
+    assert_eq!(logged_ids(&store, APP_A), vec![1]);
+    let first = store
+        .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
+        .unwrap()
+        .unwrap();
+    assert!(!first.request.payload.is_empty());
+    assert!(first.response.payload.is_some());
+}
+
+#[tokio::test(start_paused = true)]
 async fn deleting_a_hook_frees_its_finished_deliveries_that_wait_behind_a_slower_one() {
     // Given two hook attempts in flight, and the higher one finished behind the lower one
     let store = world_with_issues_hook();
