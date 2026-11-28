@@ -154,6 +154,23 @@ impl Bodies {
             self.held -= bytes;
         }
     }
+
+    fn release_log(&mut self, log: i64) {
+        let held = &mut self.held;
+        self.kept.retain(|_, (app, bytes)| {
+            let keep = *app != log;
+            if !keep {
+                *held -= *bytes;
+            }
+            keep
+        });
+    }
+}
+
+fn owner_exists(tx: &Tx, log: i64) -> bool {
+    tx.try_table::<Hooks>()
+        .is_some_and(|h| h.get(log).is_some())
+        || tx.table::<Apps>().get(log).is_some()
 }
 
 #[derive(Default)]
@@ -250,36 +267,40 @@ impl Shared {
 
     fn forget_discarded_hooks(&self) {
         let mut st = self.state.lock();
-        let live = |tx: &Tx, log: i64| {
-            tx.try_table::<Hooks>()
-                .is_some_and(|h| h.get(log).is_some())
-                || tx.table::<Apps>().get(log).is_some()
-        };
-        let Ok((doomed, stale)) = self.store.update(|tx| {
-            let view: &Tx = tx;
-            let doomed: Vec<i64> = view
+        let Ok(doomed) = self.store.update(|tx| {
+            let hooks = tx.try_table::<Hooks>();
+            let doomed: Vec<i64> = tx
                 .table::<Deliveries>()
                 .iter()
-                .filter(|d| d.app_id == 0 && !live(view, d.hook_id))
+                .filter(|d| d.app_id == 0 && hooks.is_none_or(|h| h.get(d.hook_id).is_none()))
                 .map(|d| d.id)
-                .collect();
-            let stale: Vec<i64> = st
-                .apps
-                .iter()
-                .filter(|(log, state)| state.running.is_empty() && !live(view, **log))
-                .map(|(log, _)| *log)
                 .collect();
             tx.table_mut::<Deliveries>()
                 .remove_all(doomed.iter().copied());
-            Ok((doomed, stale))
+            Ok(doomed)
         }) else {
             return;
         };
         for id in doomed {
             st.bodies.release(id);
         }
-        for log in stale {
+        self.forget_gone(&mut st);
+    }
+
+    fn forget_gone(&self, st: &mut State) {
+        let Ok(gone) = self.store.view(|tx| {
+            Ok(st
+                .apps
+                .iter()
+                .filter(|(log, state)| state.running.is_empty() && !owner_exists(tx, **log))
+                .map(|(log, _)| *log)
+                .collect::<Vec<i64>>())
+        }) else {
+            return;
+        };
+        for log in gone {
             st.apps.remove(&log);
+            st.bodies.release_log(log);
         }
     }
 
@@ -587,6 +608,7 @@ impl Shared {
             }
         }
         self.flush(st, app);
+        self.forget_gone(st);
         self.prune(st);
     }
 
@@ -647,10 +669,7 @@ impl Shared {
         let mut gone = Vec::new();
         let _ = self.store.update(|tx| {
             let epoch = self.store.epoch();
-            let owner_exists = tx
-                .try_table::<Hooks>()
-                .is_some_and(|hooks| hooks.get(app).is_some())
-                || tx.table::<Apps>().get(app).is_some();
+            let owner_exists = owner_exists(tx, app);
             let logged = logged.get_or_insert_with(|| {
                 tx.table::<Deliveries>()
                     .children(app)

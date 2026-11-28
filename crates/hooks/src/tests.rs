@@ -1347,6 +1347,62 @@ async fn a_reset_that_ends_while_a_discarded_hooks_attempts_run_leaves_none_unlo
 }
 
 #[tokio::test(start_paused = true)]
+async fn deleting_a_hook_or_an_app_frees_its_share_of_the_log_byte_budget() {
+    // Given logged deliveries of two Apps and a repository hook
+    const HOOK: i64 = 300;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Hooks>()
+                .insert(hook_row(HOOK, HookOwner::Repo(WIDGET), "issues"))?;
+            Ok(())
+        })
+        .unwrap();
+    let (hooks, hits) = start(&store, |_| {});
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", OTHER));
+    emit_one(&store, event("issues", WIDGET));
+    hooks.drain().await.unwrap();
+    assert_eq!(logged_ids(&store, APP_B).len(), 1);
+    assert_eq!(logged_ids(&store, HOOK).len(), 1);
+
+    // When the hook and App B are deleted with their deliveries, and App A gets one more
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Deliveries>().remove_children(HOOK);
+            tx.table_mut::<Hooks>().remove(HOOK);
+            tx.table_mut::<Deliveries>().remove_children(APP_B);
+            tx.table_mut::<Apps>().remove(APP_B);
+            Ok(())
+        })
+        .unwrap();
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+
+    // Then the budget holds only the requests and responses of App A's deliveries
+    let headers =
+        |h: &BTreeMap<String, String>| -> usize { h.iter().map(|(k, v)| k.len() + v.len()).sum() };
+    let app_a: usize = store
+        .view(|tx| {
+            Ok(tx
+                .table::<Deliveries>()
+                .children(APP_A)
+                .map(|d| {
+                    d.request.payload.len()
+                        + headers(&d.request.headers)
+                        + d.response.payload.as_ref().map_or(0, String::len)
+                        + headers(&d.response.headers)
+                })
+                .sum())
+        })
+        .unwrap();
+    assert_eq!(logged_ids(&store, APP_A).len(), 2);
+    assert_eq!(hooks.stats().log_bytes, app_a);
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_log_keeps_only_the_first_response_bytes_of_a_long_answer() {
     let store = world();
     // Given a cap shorter than the receiver's 8-byte answer "received"
