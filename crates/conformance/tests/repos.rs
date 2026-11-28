@@ -3,11 +3,14 @@ use std::sync::Arc;
 use http::header::{ACCEPT, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
 use hubdouble_git::{EntryMode, FileChange, ObjectId, Signature};
-use hubdouble_model::{Access, Clock, Issue, IssueState, Pull, PullRef, Token, TokenKind, node_id};
+use hubdouble_hooks::{ContentType, Hook, HookOwner, Hooks};
+use hubdouble_model::{
+    Access, Clock, Issue, IssueState, Pull, PullRef, Timestamp, Token, TokenKind, node_id,
+};
 use hubdouble_store::{Issues, Releases, Tokens};
 use hubdouble_testkit::fixture::{
-    ALICE_ID, ALICE_TOKEN, APP_ID, APP_PUBLIC_KEY, BOB_TOKEN, CAROL_TOKEN, INSTALLATION_ID,
-    PUBLIC_REPO_ID, WEBHOOK_SECRET, WEBHOOK_URL_ENV,
+    ALICE_ID, ALICE_TOKEN, APP_ID, APP_PUBLIC_KEY, BOB_TOKEN, CAROL_TOKEN, INSTALLATION_ID, ORG_ID,
+    PRIVATE_REPO_ID, PUBLIC_REPO_ID, WEBHOOK_SECRET, WEBHOOK_URL_ENV,
 };
 use hubdouble_testkit::{Answer, Delivery, GoGithub, Graphql, TestServer, validate};
 use serde_json::{Value, json};
@@ -1094,6 +1097,31 @@ async fn making_a_private_repository_public_delivers_the_public_event() {
                "repository_selection": "all"}),
     ])
     .await;
+    // Given a repository hook and an organization hook that subscribe to public
+    let url = server.receiver.url().to_owned();
+    server
+        .server
+        .services()
+        .store
+        .update(|tx| {
+            for owner in [HookOwner::Repo(PRIVATE_REPO_ID), HookOwner::Org(ORG_ID)] {
+                let id = tx.next_id();
+                tx.table_mut::<Hooks>().insert(Hook {
+                    id,
+                    owner,
+                    url: url.clone(),
+                    content_type: ContentType::Json,
+                    secret: None,
+                    insecure_ssl: false,
+                    events: vec!["public".to_owned()],
+                    active: true,
+                    created_at: Timestamp::SEED,
+                    updated_at: Timestamp::SEED,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("insert the hooks: {e:?}"));
     // When the private repository is made public
     let public = server
         .admin(
@@ -1103,9 +1131,32 @@ async fn making_a_private_repository_public_delivers_the_public_event() {
         )
         .await;
     assert_eq!(public.status, StatusCode::OK, "{:?}", public.body);
-    // Then the App gets one public event, without an action, for the public repository
-    let got = deliveries(&server, 1).await;
-    let event = delivered_as(&got, "public", None);
+    // Then the App and each hook get one public event
+    let got = deliveries(&server, 3).await;
+    let mut targets: Vec<(&str, &str)> = got
+        .iter()
+        .map(|d| {
+            (
+                d.header("x-github-hook-installation-target-type"),
+                d.header("x-github-event"),
+            )
+        })
+        .collect();
+    targets.sort_unstable();
+    assert_eq!(
+        targets,
+        [
+            ("integration", "public"),
+            ("organization", "public"),
+            ("repository", "public"),
+        ]
+    );
+    // Then the App's event has no action and shows the public repository
+    let event = got
+        .iter()
+        .find(|d| d.header("x-github-hook-installation-target-type") == "integration")
+        .unwrap_or_else(|| panic!("no App delivery"))
+        .json();
     assert_eq!(event.get("action"), None);
     assert_eq!(event["repository"]["full_name"], json!("acme/private"));
     assert_eq!(event["repository"]["private"], json!(false));
