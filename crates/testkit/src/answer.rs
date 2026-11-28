@@ -285,7 +285,9 @@ pub fn api_path(path: &str) -> &str {
 ///   it (`Repositories.GetByID`, `github/repos.go`), and
 ///   `GET /organizations/{org_id}/public_members/{username}` against
 ///   `orgs/check-public-membership-for-user`, where GitHub redirects
-///   `GET /orgs/{org}/members/{username}` for a caller outside the org. Each is recorded
+///   `GET /orgs/{org}/members/{username}` for a caller outside the org, and
+///   `POST /repos/{owner}/{repo}/hooks/{hook_id}/test` against `repos/test-push-webhook`,
+///   the `test_url` GitHub renders in a hook. Each is recorded
 ///   under its own route. GraphQL is checked by its own client.
 /// - `/repositories/{id}/...` and `/organizations/{id}/...` are checked against the
 ///   `/repos/{owner}/{repo}/...` and `/orgs/{org}/...` operation they alias, and every `Link`
@@ -300,14 +302,14 @@ pub fn check(x: &Exchange<'_>, registered: &dyn Fn(&str) -> bool) -> Result<Chec
     if let Some(result) = outside_the_bundle(x, path) {
         return result;
     }
-    if let Some((route, alias)) = BY_ID_ROUTES
+    if let Some((method, route, alias)) = ALIASED_ROUTES
         .iter()
-        .find(|(route, _)| x.method == "GET" && segments_eq(path, route))
+        .find(|(method, route, _)| x.method == *method && segments_eq(path, route))
     {
-        let op = resolve_operation("GET", alias)
-            .ok_or_else(|| vec![format!("the description has no GET {alias}")])?;
+        let op = resolve_operation(method, alias)
+            .ok_or_else(|| vec![format!("the description has no {method} {alias}")])?;
         return check_operation(x, op, registered).map(|status| Checked {
-            route: format!("GET {route}"),
+            route: format!("{method} {route}"),
             status,
         });
     }
@@ -321,11 +323,17 @@ pub fn check(x: &Exchange<'_>, registered: &dyn Fn(&str) -> bool) -> Result<Chec
     })
 }
 
-const BY_ID_ROUTES: [(&str, &str); 2] = [
-    ("/repositories/{repository_id}", "/repos/o/r"),
+const ALIASED_ROUTES: [(&str, &str, &str); 3] = [
+    ("GET", "/repositories/{repository_id}", "/repos/o/r"),
     (
+        "GET",
         "/organizations/{org_id}/public_members/{username}",
         "/orgs/o/public_members/u",
+    ),
+    (
+        "POST",
+        "/repos/{owner}/{repo}/hooks/{hook_id}/test",
+        "/repos/o/r/hooks/1/tests",
     ),
 ];
 
