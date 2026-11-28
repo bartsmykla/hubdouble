@@ -284,10 +284,10 @@ fn delete(tx: &mut TxMut<'_>, params: &Params, _: Timestamp, body: Value) -> Res
         );
         next += 1;
     }
-    tx.delete(&Deleted::Team(gone[0].clone()))?;
     for team in &gone {
         events::team(tx, &source, "deleted", team, None, None);
     }
+    tx.delete(&Deleted::Team(gone[0].clone()))?;
     Ok(())
 }
 

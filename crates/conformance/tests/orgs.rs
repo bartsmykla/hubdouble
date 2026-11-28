@@ -499,21 +499,30 @@ async fn deleting_a_parent_team_sends_team_deleted_for_it_and_each_child_team() 
 
     // Then each of the three teams gets one team deleted delivery
     admin_status(&server, Method::POST, "hooks/drain", None, 204).await;
-    let mut deleted: Vec<String> = server
+    let mut deleted: Vec<(String, Value)> = server
         .receiver
         .received()
         .await
         .iter()
         .filter(|d| d.header("x-github-event") == "team" && d.json()["action"] == "deleted")
         .map(|d| {
-            d.json()["team"]["slug"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned()
+            let team = &d.json()["team"];
+            (
+                team["slug"].as_str().unwrap_or_default().to_owned(),
+                team["parent"]["slug"].clone(),
+            )
         })
         .collect();
-    deleted.sort();
-    assert_eq!(deleted, ["child", "grandchild", "root"]);
+    deleted.sort_by(|a, b| a.0.cmp(&b.0));
+    // And each child names the parent it had
+    assert_eq!(
+        deleted,
+        [
+            ("child".to_owned(), json!("root")),
+            ("grandchild".to_owned(), json!("child")),
+            ("root".to_owned(), Value::Null),
+        ]
+    );
 }
 
 #[tokio::test]
