@@ -18,5 +18,16 @@ hubdouble-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+bytes.workspace = true
+criterion.workspace = true
+http.workspace = true
+hubdouble-git.workspace = true
+hubdouble-gql.workspace = true
+
+[[bench]]
+name = "activity"
+harness = false
+
 [lints]
 workspace = true

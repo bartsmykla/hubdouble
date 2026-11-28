@@ -2383,8 +2383,13 @@ dependencies = [
 name = "hubdouble-api-activity"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "criterion",
+ "http",
  "hubdouble-admin",
  "hubdouble-auth",
+ "hubdouble-git",
+ "hubdouble-gql",
  "hubdouble-model",
  "hubdouble-render",
  "hubdouble-rest",

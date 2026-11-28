@@ -302,7 +302,11 @@ impl TxMut<'_> {
     pub fn next_id(&mut self) -> i64;
     pub fn table_mut<T: Table>(&mut self) -> TableMut<'_, T>; // every insert, replace and remove records its undo
     pub fn push_outbox(&mut self, entry: OutboxEntry);        // buffered; reaches the outbox only on commit
+    pub fn delete(&mut self, deleted: &Deleted) -> Result<(), ApiError>; // calls every DeletionSubscriber, then removes the entity
 }
+pub enum Deleted { Repo(Arc<Repo>), Team(Arc<Team>), Account(Arc<Account>) /* a user or an org: its repositories and teams go first */ }
+pub type DeletionSubscriber = fn(&mut TxMut<'_>, &Deleted) -> Result<(), ApiError>; // StoreBuilder::on_delete; a crate removes its side-table rows for the entity
+pub struct ActivityEvent { pub id: i64, pub kind: &'static str, pub actor_id: i64, pub repo_id: i64, pub repo_name: String, pub org_id: Option<i64>, pub payload: Value, pub public: bool, pub created_at: Timestamp } // table ActivityEvents; ids from their own sequence
 impl Tx { pub fn table<T: Table>(&self) -> &T; pub fn config(&self) -> &Config; }
 pub struct StoreBuilder;                          // register_table::<T>() for every table, then build_with(config) (build() uses Config::default, for tests); no table is added after start
 pub struct OutboxEntry { pub app_id: i64, pub hook_id: Option<i64>, pub installation_id: Option<i64>, pub repo_id: Option<i64>, pub event: &'static str, pub action: Option<&'static str>, pub payload: serde_json::Value, pub redelivery_of: Option<String> }
@@ -443,6 +447,10 @@ impl Handle { pub async fn drain(&self); pub async fn reset(&self, s: &Snapshot)
 ```
 
 `emit` renders the payload and resolves the recipients (the App and installation when set, otherwise every App installed on the account or repository that subscribes) inside the transaction and pushes one `OutboxEntry` per recipient with `TxMut::push_outbox`, so an `installation.deleted` or `installation_repositories.removed` event carries the installation and repositories as they were before the change, and a rolled-back `update` delivers nothing. A test installs two Apps on one account, deletes one installation, and checks that only that App receives the event, with the deleted installation's data.
+
+`emit` is also the source of the events API: before it resolves recipients it records each event GitHub lists in its feeds (`PushEvent`, `IssuesEvent`, `PullRequestEvent` and the rest) as an `ActivityEvent`, stamped by the store's clock (`StoreBuilder::clock`, `Tx::now`). Every write already goes through `emit` with its actor, repository and REST-shaped payload, so no crate records events itself, and the outbox, which holds only events some App receives, is not read back.
+
+Every delete of a repository, team, user or organization goes through `TxMut::delete` in the deleting transaction, so each crate's side-table rows for it go too, and a subscriber error rolls the whole delete back.
 
 Repository and organization webhooks are rows of `Hooks`. `emit` also pushes one entry for each active hook of the event's repository and of its organization that subscribes to the event (`*` subscribes to all). Each entry carries `hook_id`, and every delivery is logged under its hook, so each hook has its own delivery log, cursor and redelivery, with GitHub's `X-GitHub-Hook-ID` and `X-GitHub-Hook-Installation-Target-Type` and `-ID` headers, signed with the hook's secret, as JSON or as a `payload=` form. A hook route answers `404` to a caller who may not administer the hook, as GitHub documents only `404` there.
 
