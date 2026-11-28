@@ -1,7 +1,7 @@
 use hubdouble_model::Timestamp;
 use hubdouble_render::Urls;
-use hubdouble_store::{Accounts, Entity, Repos, Rows, Tx};
-use serde_json::{Value, json};
+use hubdouble_store::{Accounts, Deliveries, Entity, Repos, Rows, Tx};
+use serde_json::{Map, Value, json};
 
 /// The repository or organization a webhook belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,16 +135,122 @@ impl Hook {
             HookOwner::Repo(_) => {
                 hook["type"] = json!("Repository");
                 hook["test_url"] = json!(format!("{url}/test"));
-                hook["last_response"] = json!({"code": null, "status": "unused", "message": null});
+                hook["last_response"] = self.last_response(tx);
             }
             HookOwner::Org(_) => hook["type"] = json!("Organization"),
         }
         Some(hook)
     }
+
+    /// GitHub's `hook-response` of the hook's latest logged delivery attempt: `unused` before
+    /// any, `active` after a `2xx`, and `misconfigured` with the attempt's status otherwise.
+    fn last_response(&self, tx: &Tx) -> Value {
+        let latest = tx
+            .try_table::<Deliveries>()
+            .and_then(|log| log.children(self.id).next_back());
+        let Some(d) = latest else {
+            return unused_response();
+        };
+        let code = (d.status_code != 0).then_some(d.status_code);
+        let status = if (200..300).contains(&d.status_code) {
+            "active"
+        } else {
+            "misconfigured"
+        };
+        json!({"code": code, "status": status, "message": d.status})
+    }
+}
+
+/// The event names a webhook may subscribe to, sorted: the `webhook-events` of the pinned octokit
+/// webhook schemas, and `*`.
+pub const EVENTS: [&str; 51] = [
+    "*",
+    "branch_protection_rule",
+    "check_run",
+    "check_suite",
+    "code_scanning_alert",
+    "commit_comment",
+    "create",
+    "delete",
+    "deploy_key",
+    "deployment",
+    "deployment_status",
+    "discussion",
+    "discussion_comment",
+    "fork",
+    "gollum",
+    "issue_comment",
+    "issues",
+    "label",
+    "member",
+    "membership",
+    "meta",
+    "milestone",
+    "org_block",
+    "organization",
+    "package",
+    "page_build",
+    "project",
+    "project_card",
+    "project_column",
+    "projects_v2_item",
+    "public",
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "pull_request_review_thread",
+    "push",
+    "registry_package",
+    "release",
+    "repository",
+    "repository_import",
+    "repository_vulnerability_alert",
+    "secret_scanning_alert",
+    "secret_scanning_alert_location",
+    "security_and_analysis",
+    "star",
+    "status",
+    "team",
+    "team_add",
+    "watch",
+    "workflow_job",
+    "workflow_run",
+];
+
+pub(crate) fn unused_response() -> Value {
+    json!({"code": null, "status": "unused", "message": null})
+}
+
+/// Whether a webhook may subscribe to `name`.
+#[must_use]
+pub fn is_event(name: &str) -> bool {
+    EVENTS.binary_search(&name).is_ok()
 }
 
 /// The repository and organization webhooks; a hook's parent is its repository or organization.
 pub type Hooks = Rows<Hook>;
+
+/// The payload of a repository's latest `push`, before its `repository` and `sender` are
+/// rendered, kept for the push test of its hooks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LatestPush {
+    pub repo_id: i64,
+    pub sender_id: i64,
+    pub payload: Map<String, Value>,
+}
+
+/// One [`LatestPush`] per repository, keyed by the repository ID. `emit` fills it only when the
+/// table is registered.
+pub type LatestPushes = Rows<LatestPush>;
+
+impl Entity for LatestPush {
+    fn id(&self) -> i64 {
+        self.repo_id
+    }
+    fn repo_id(&self) -> Option<i64> {
+        Some(self.repo_id)
+    }
+}
 
 impl Entity for Hook {
     fn id(&self) -> i64 {

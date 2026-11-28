@@ -51,6 +51,9 @@ impl From<HooksError> for ApiError {
 /// `action`, `installation`, `repository`, `organization` and `sender` are added unless the
 /// payload has them.
 ///
+/// A `push` of a repository also replaces its [`crate::LatestPush`] when
+/// [`crate::LatestPushes`] is registered, for the push test of its hooks.
+///
 /// Before that, an event of a repository that the events API shows (push, create, delete,
 /// issues, issue comment, pull request, review, review comment, release, member, public)
 /// becomes an [`hubdouble_store::ActivityEvent`], whether or not any App receives it.

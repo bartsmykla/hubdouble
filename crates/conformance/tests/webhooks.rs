@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use http::{Method, StatusCode};
+use hubdouble_hooks::{Hooks, LatestPushes};
 use hubdouble_model::{Clock, Token, TokenKind};
 use hubdouble_store::Tokens;
 use hubdouble_testkit::fixture::{
@@ -523,9 +524,7 @@ async fn the_push_test_sends_a_push_only_to_a_hook_that_subscribes_to_push() {
     let deliveries = drained(&server).await;
     let delivery = one(&deliveries, push, "push");
     assert!(delivery.signed_with("push-secret"));
-    let payload = delivery.json();
-    assert_eq!(payload["ref"], "refs/heads/main");
-    assert_eq!(payload["repository"]["id"], PUBLIC_REPO_ID);
+    assert_eq!(delivery.json()["repository"]["id"], PUBLIC_REPO_ID);
     assert!(to_hook(&deliveries, issues, "push").is_empty());
 }
 
@@ -684,4 +683,247 @@ async fn invalid_hooks_are_rejected() {
         alice.get(REPO_HOOKS).await.json().as_array().unwrap().len(),
         1
     );
+}
+
+fn assert_bad_event(answer: &Answer) {
+    assert_eq!(
+        answer.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        answer.json()
+    );
+    let body = answer.json();
+    assert_eq!(body["message"], "Validation Failed");
+    assert_eq!(body["errors"][0]["resource"], "Hook");
+    assert_eq!(body["errors"][0]["code"], "custom");
+}
+
+#[tokio::test]
+async fn a_hook_accepts_only_known_event_names() {
+    // Given
+    let server = server().await;
+    let alice = alice(&server);
+    let url = server.receiver.url().to_owned();
+    let id = create(
+        &alice,
+        REPO_HOOKS,
+        &json!({"events": ["push", "workflow_run", "security_and_analysis"],
+                "config": {"url": url}}),
+    )
+    .await;
+    let org_id = create(
+        &alice,
+        ORG_HOOKS,
+        &json!({"name": "web", "events": ["team", "membership"], "config": {"url": url}}),
+    )
+    .await;
+
+    // When
+    let refused = [
+        alice
+            .post(
+                REPO_HOOKS,
+                &json!({"events": ["push", "pushes"],
+                        "config": {"url": "https://example.com/a"}}),
+            )
+            .await,
+        alice
+            .post(
+                ORG_HOOKS,
+                &json!({"name": "web", "events": ["Issues"],
+                        "config": {"url": "https://example.com/a"}}),
+            )
+            .await,
+        alice
+            .call_json(
+                Method::PATCH,
+                &format!("{REPO_HOOKS}/{id}"),
+                &json!({"events": ["not_an_event"]}),
+            )
+            .await,
+        alice
+            .call_json(
+                Method::PATCH,
+                &format!("{REPO_HOOKS}/{id}"),
+                &json!({"add_events": ["issues", "nope"]}),
+            )
+            .await,
+        alice
+            .call_json(
+                Method::PATCH,
+                &format!("{ORG_HOOKS}/{org_id}"),
+                &json!({"events": [""]}),
+            )
+            .await,
+    ];
+    let changed = alice
+        .call_json(
+            Method::PATCH,
+            &format!("{REPO_HOOKS}/{id}"),
+            &json!({"add_events": ["issues"], "remove_events": ["security_and_analysis"]}),
+        )
+        .await;
+
+    // Then
+    for answer in &refused {
+        assert_bad_event(answer);
+    }
+    assert_eq!(changed.status, StatusCode::OK, "{}", changed.json());
+    assert_eq!(
+        changed.json()["events"],
+        json!(["push", "workflow_run", "issues"])
+    );
+    assert_eq!(
+        alice.get(REPO_HOOKS).await.json().as_array().unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn last_response_follows_the_latest_delivery_attempt() {
+    // Given
+    let server = server().await;
+    let alice = alice(&server);
+    let url = server.receiver.url().to_owned();
+
+    // When
+    let ok = alice
+        .post(REPO_HOOKS, &json!({"config": {"url": url}}))
+        .await;
+    let failing = alice
+        .post(
+            REPO_HOOKS,
+            &json!({"config": {"url": format!("{url}?status=404")}}),
+        )
+        .await;
+    drained(&server).await;
+
+    // Then
+    for created in [&ok, &failing] {
+        assert_eq!(created.status, StatusCode::CREATED);
+        assert_eq!(
+            created.json()["last_response"],
+            json!({"code": null, "status": "unused", "message": null})
+        );
+    }
+    let ok = alice
+        .get(&format!("{REPO_HOOKS}/{}", ok.json()["id"]))
+        .await
+        .json();
+    assert_eq!(
+        ok["last_response"],
+        json!({"code": 200, "status": "active", "message": "OK"})
+    );
+    let failing = alice
+        .get(&format!("{REPO_HOOKS}/{}", failing.json()["id"]))
+        .await
+        .json();
+    assert_eq!(failing["last_response"]["code"], 404);
+    assert_eq!(failing["last_response"]["status"], "misconfigured");
+    let listed = alice.get(REPO_HOOKS).await.json();
+    let statuses: BTreeSet<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|h| h["last_response"]["status"].as_str())
+        .collect();
+    assert_eq!(statuses, BTreeSet::from(["active", "misconfigured"]));
+}
+
+async fn sha(client: &GoGithub, branch: &str) -> Value {
+    let found = client
+        .get(&format!("repos/acme/public/git/ref/heads/{branch}"))
+        .await;
+    assert_eq!(found.status, StatusCode::OK, "{}", found.json());
+    found.json()["object"]["sha"].clone()
+}
+
+#[tokio::test]
+async fn the_push_test_sends_the_latest_push_of_the_repository() {
+    // Given
+    let server = server().await;
+    let alice = alice(&server);
+    let id = create(
+        &alice,
+        REPO_HOOKS,
+        &hook(&server, "push-secret", &["push"], true),
+    )
+    .await;
+    let main = sha(&alice, "main").await;
+    let created = alice
+        .post(
+            "repos/acme/public/git/refs",
+            &json!({"ref": "refs/heads/topic", "sha": main}),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.json());
+    let moved = alice
+        .call_json(
+            Method::PATCH,
+            "repos/acme/public/git/refs/heads/feature",
+            &json!({"sha": main, "force": true}),
+        )
+        .await;
+    assert_eq!(moved.status, StatusCode::OK, "{}", moved.json());
+    let pushes = drained(&server).await;
+    let pushes = to_hook(&pushes, id, "push");
+    assert_eq!(pushes.len(), 2);
+    let latest = pushes[1].json();
+    assert_eq!(latest["ref"], "refs/heads/feature");
+
+    // When
+    let tested = alice
+        .call(Method::POST, &format!("{REPO_HOOKS}/{id}/tests"))
+        .await;
+
+    // Then
+    assert_eq!(tested.status, StatusCode::NO_CONTENT);
+    let deliveries = drained(&server).await;
+    let delivery = one(&deliveries, id, "push");
+    assert!(delivery.signed_with("push-secret"));
+    let payload = delivery.json();
+    for field in ["ref", "before", "after", "commits", "head_commit", "forced"] {
+        assert_eq!(payload[field], latest[field], "{field}");
+    }
+    assert_eq!(payload["sender"]["login"], latest["sender"]["login"]);
+    assert_eq!(payload["repository"]["id"], PUBLIC_REPO_ID);
+}
+
+#[tokio::test]
+async fn deleting_a_repository_drops_its_hooks_and_its_latest_push() {
+    // Given
+    let server = server().await;
+    let alice = alice(&server);
+    create(&alice, REPO_HOOKS, &hook(&server, "s", &["push"], true)).await;
+    let main = sha(&alice, "main").await;
+    let created = alice
+        .post(
+            "repos/acme/public/git/refs",
+            &json!({"ref": "refs/heads/topic", "sha": main}),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let rows = |server: &TestServer| {
+        server
+            .server
+            .services()
+            .store
+            .view(|tx| {
+                Ok((
+                    tx.table::<Hooks>().children(PUBLIC_REPO_ID).count(),
+                    tx.table::<LatestPushes>().in_repo(PUBLIC_REPO_ID).count(),
+                ))
+            })
+            .unwrap()
+    };
+    assert_eq!(rows(&server), (1, 1));
+
+    // When
+    let deleted = server
+        .admin(Method::DELETE, "repos/acme/public", None)
+        .await;
+
+    // Then
+    assert!(deleted.status.is_success(), "{}", deleted.status);
+    assert_eq!(rows(&server), (0, 0));
 }

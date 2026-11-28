@@ -5,10 +5,10 @@ use http::header::LOCATION;
 use hubdouble_admin::Registrar;
 use hubdouble_api_apps::{DeliveryLog, get_delivery, list_deliveries, redeliver_delivery};
 use hubdouble_git::{ObjectData, RefChange};
-use hubdouble_hooks::{ContentType, Hook, HookOwner, Hooks};
+use hubdouble_hooks::{ContentType, Hook, HookOwner, Hooks, LatestPushes, is_event};
 use hubdouble_model::{AccountKind, ApiError, FieldError, Grant, Requirement, Scope};
 use hubdouble_rest::{Ctx, Reply};
-use hubdouble_store::{Accounts, Tx};
+use hubdouble_store::{Accounts, Deleted, Tx, TxMut};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -44,7 +44,10 @@ const ORG_WRITE: Requirement = Requirement {
 };
 
 pub(crate) fn register(r: &mut Registrar<'_>) {
-    r.store.register_table::<Hooks>();
+    r.store
+        .register_table::<Hooks>()
+        .register_table::<LatestPushes>()
+        .on_delete(forget);
     let rest = &mut *r.rest;
     rest.handle("repos/list-webhooks", REPO_READ, list);
     rest.handle("repos/create-webhook", REPO_WRITE, create);
@@ -77,6 +80,23 @@ pub(crate) fn register(r: &mut Registrar<'_>) {
     rest.handle("orgs/get-webhook-delivery", ORG_READ, delivery);
     rest.handle("orgs/redeliver-webhook-delivery", ORG_WRITE, redeliver);
     rest.handle("orgs/ping-webhook", ORG_WRITE, ping);
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a deletion subscriber returns a Result"
+)]
+fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
+    let owner = match deleted {
+        Deleted::Repo(repo) => {
+            tx.table_mut::<LatestPushes>().remove(repo.id);
+            HookOwner::Repo(repo.id)
+        }
+        Deleted::Account(account) => HookOwner::Org(account.id),
+        Deleted::Team(_) => return Ok(()),
+    };
+    tx.table_mut::<Hooks>().remove_where(|h| h.owner == owner);
+    Ok(())
 }
 
 fn owner(ctx: &Ctx<'_>) -> Result<HookOwner, ApiError> {
@@ -170,6 +190,13 @@ fn apply_config(hook: &mut Hook, c: ConfigBody) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn check_events(events: Option<&[String]>) -> Result<(), ApiError> {
+    match events.into_iter().flatten().find(|e| !is_event(e)) {
+        Some(unknown) => Err(invalid(&format!("\"{unknown}\" is not a valid event name"))),
+        None => Ok(()),
+    }
+}
+
 fn check_name(name: Option<&str>, required: bool) -> Result<(), ApiError> {
     match name {
         Some("web") => Ok(()),
@@ -193,6 +220,7 @@ fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let owner = owner(ctx)?;
     let body: HookBody = ctx.body()?;
     check_name(body.name.as_deref(), matches!(owner, HookOwner::Org(_)))?;
+    check_events(body.events.as_deref())?;
     let config = body.config.unwrap_or_default();
     if config.url.as_deref().is_none_or(str::is_empty) {
         return Err(invalid("Config must contain URL for webhooks"));
@@ -262,6 +290,8 @@ fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     if matches!(hook.owner, HookOwner::Org(_)) {
         check_name(body.name.as_deref(), false)?;
     }
+    check_events(body.events.as_deref())?;
+    check_events(body.add_events.as_deref())?;
     if let Some(config) = body.config {
         apply_config(&mut hook, config)?;
     }
@@ -341,6 +371,12 @@ fn test_push(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         return Ok(Reply::empty());
     }
     let repo = ctx.repo()?.clone();
+    let latest = ctx.tx().table::<LatestPushes>().get(repo.id).cloned();
+    if let Some(push) = latest {
+        let tx = ctx.tx_mut()?;
+        hubdouble_hooks::deliver_to_hook(tx, hook.id, "push", Some(push.sender_id), &push.payload)?;
+        return Ok(Reply::empty());
+    }
     let sender = sender(ctx).unwrap_or(repo.owner_id);
     let (tx, git) = ctx.tx_mut_and_git()?;
     let name = format!("refs/heads/{}", repo.default_branch);

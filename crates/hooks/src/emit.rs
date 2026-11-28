@@ -9,7 +9,7 @@ use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
 use crate::push::PushRepository;
-use crate::{HookOwner, Hooks, HooksError, Injection};
+use crate::{HookOwner, Hooks, HooksError, Injection, LatestPush, LatestPushes};
 
 const ALWAYS_DELIVERED: [&str; 4] = [
     "installation",
@@ -310,13 +310,23 @@ pub(crate) fn emit(tx: &mut TxMut<'_>, mut e: Event) {
     crate::activity::record(tx, &e);
     let recipients = recipients(tx, &e);
     let hooks = hook_recipients(tx, &e);
-    if recipients.is_empty() && hooks.is_empty() {
+    let latest = e
+        .repo_id
+        .filter(|_| e.name == "push" && tx.try_table::<LatestPushes>().is_some());
+    if recipients.is_empty() && hooks.is_empty() && latest.is_none() {
         return;
     }
     let mut payload = std::mem::take(&mut e.payload);
     webhook_form(&mut payload);
     if let Some(action) = e.action.filter(|_| !payload.contains_key("action")) {
         payload.insert("action".to_owned(), Value::from(action));
+    }
+    if let Some(repo_id) = latest {
+        let _ = tx.table_mut::<LatestPushes>().replace(LatestPush {
+            repo_id,
+            sender_id: e.sender_id,
+            payload: payload.clone(),
+        });
     }
     let subjects = Subjects {
         repo: e.repo_id,
@@ -399,11 +409,14 @@ pub(crate) fn ping_hook(
     hook_id: i64,
     sender_id: Option<i64>,
 ) -> Result<(), HooksError> {
-    let hook = tx
+    let mut hook = tx
         .try_table::<Hooks>()
         .and_then(|hooks| hooks.get(hook_id))
         .and_then(|hook| hook.render(tx))
         .ok_or(HooksError::UnknownHook(hook_id))?;
+    if let Some(last) = hook.get_mut("last_response") {
+        *last = crate::hook::unused_response();
+    }
     let mut payload = Map::new();
     payload.insert("zen".to_owned(), Value::from(ZEN));
     payload.insert("hook_id".to_owned(), Value::from(hook_id));

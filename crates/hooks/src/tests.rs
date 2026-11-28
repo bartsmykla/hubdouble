@@ -1280,3 +1280,25 @@ async fn ping_describes_the_apps_hook() {
         .unwrap();
     assert_eq!((d.event.as_str(), d.app_id), ("ping", APP_B));
 }
+
+#[test]
+fn a_hook_may_subscribe_to_the_webhook_events_of_the_pinned_schemas_and_to_the_wildcard() {
+    // Given
+    let schema: Value =
+        serde_json::from_str(include_str!("../../testkit/spec/octokit/schema.json")).unwrap();
+    let events = &schema["definitions"]["webhook-events"]["oneOf"];
+    let mut want: Vec<&str> = events[0]["items"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.as_str().unwrap())
+        .chain([events[1]["items"]["const"].as_str().unwrap()])
+        .collect();
+    want.sort_unstable();
+
+    // Then
+    assert_eq!(crate::EVENTS.to_vec(), want);
+    assert!(crate::is_event("push"));
+    assert!(!crate::is_event("pushes"));
+    assert!(!crate::is_event("installation"));
+}

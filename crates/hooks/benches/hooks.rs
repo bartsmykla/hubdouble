@@ -6,7 +6,7 @@ use bytes::Bytes;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use http::Uri;
 use http_body_util::{BodyExt, Full};
-use hubdouble_hooks::{ConnectFuture, Connector, Handle, Io, Options, emit};
+use hubdouble_hooks::{ConnectFuture, Connector, Handle, Io, LatestPushes, Options, emit};
 use hubdouble_model::{
     Access, Account, AccountKind, App, Event, Installation, Repo, RepositorySelection, SystemClock,
     Timestamp, Visibility, Webhook, node_id,
@@ -225,6 +225,42 @@ fn enqueue(c: &mut Criterion) {
     });
 }
 
+fn latest_push(c: &mut Criterion) {
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<LatestPushes>();
+    let store = builder.build();
+    let commits: Vec<_> = (0..20)
+        .map(|n| json!({"id": format!("{n:040x}"), "message": "change", "added": ["a.txt"]}))
+        .collect();
+    let mut payload = Map::new();
+    payload.insert("ref".to_owned(), json!("refs/heads/main"));
+    payload.insert("commits".to_owned(), json!(commits));
+    let push = Event {
+        name: "push",
+        action: None,
+        repo_id: Some(REPO),
+        org_id: None,
+        sender_id: ORG,
+        app_id: None,
+        installation_id: None,
+        payload,
+    };
+    c.bench_function("emit_push_records_the_latest_push", |b| {
+        b.iter(|| {
+            store
+                .update(|tx| {
+                    emit(tx, push.clone());
+                    Ok(())
+                })
+                .unwrap_or_else(|e| panic!("{e:?}"));
+        });
+    });
+    let recorded = store
+        .view(|tx| Ok(tx.table::<LatestPushes>().get(REPO).is_some()))
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(recorded, "the bench push was not recorded");
+}
+
 fn throughput(c: &mut Criterion) {
     const EVENTS: usize = 200;
     let rt = Runtime::new().unwrap_or_else(|e| panic!("{e}"));
@@ -275,5 +311,5 @@ fn backlog(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, enqueue, throughput, backlog);
+criterion_group!(benches, enqueue, latest_push, throughput, backlog);
 criterion_main!(benches);
