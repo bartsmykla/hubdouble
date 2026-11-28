@@ -551,6 +551,18 @@ async fn the_content_of_a_deleted_user_reads_back_as_the_ghost_user() {
     assert!(by_ghost.contains(&&json!("IssuesEvent")), "{events}");
     assert!(by_ghost.contains(&&json!("IssueCommentEvent")), "{events}");
 
+    // And the accounts inside their payloads name the ghost user too
+    for event in events.as_array().into_iter().flatten() {
+        match event["type"].as_str() {
+            Some("IssuesEvent") => ghost(&event["payload"]["issue"]["user"]),
+            Some("IssueCommentEvent") => {
+                ghost(&event["payload"]["issue"]["user"]);
+                ghost(&event["payload"]["comment"]["user"]);
+            }
+            _ => {}
+        }
+    }
+
     // And GraphQL names the ghost user as the author of both
     let answer = Graphql::new(alice)
         .query(

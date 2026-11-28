@@ -1,9 +1,10 @@
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use hubdouble_auth::{Actor, Target, authorize, can_see, repo_role};
 use hubdouble_model::{Account, AccountKind, ApiError, Repo, RepoRole, Timestamp};
-use hubdouble_render::Urls;
+use hubdouble_render::{SimpleUser, Urls};
 use hubdouble_rest::{Ctx, PageLimit, Reply};
 use hubdouble_store::{Accounts, ActivityEvent, ActivityEvents, Repos, Tx};
 use serde::Serialize;
@@ -71,7 +72,7 @@ struct EventView<'a> {
     kind: &'static str,
     actor: EventActor,
     repo: EventRepo<'a>,
-    payload: &'a Value,
+    payload: Cow<'a, Value>,
     public: bool,
     created_at: Timestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -89,7 +90,13 @@ fn view<'a>(tx: &Tx, urls: &Urls, (e, actor): &(&'a ActivityEvent, &Account)) ->
             name: &e.repo_name,
             url: format!("{}/repos/{}", urls.api, e.repo_name),
         },
-        payload: &e.payload,
+        payload: if names_deleted(accounts, &e.payload) {
+            let mut payload = e.payload.clone();
+            ghost_deleted(accounts, &ghost_user(urls), &mut payload);
+            Cow::Owned(payload)
+        } else {
+            Cow::Borrowed(&e.payload)
+        },
         public: e.public,
         created_at: e.created_at,
         org: e
@@ -97,6 +104,45 @@ fn view<'a>(tx: &Tx, urls: &Urls, (e, actor): &(&'a ActivityEvent, &Account)) ->
             .and_then(|id| accounts.get(id))
             .map(|o| EventActor::new(urls, o)),
     }
+}
+
+fn account_id(v: &Value) -> Option<i64> {
+    let kind = v.get("type")?.as_str()?;
+    v.get("login")?.as_str()?;
+    matches!(kind, "User" | "Bot" | "Organization")
+        .then(|| v.get("id")?.as_i64())
+        .flatten()
+}
+
+fn names_deleted(accounts: &Accounts, v: &Value) -> bool {
+    match v {
+        Value::Object(map) => {
+            account_id(v).is_some_and(|id| accounts.get(id).is_none())
+                || map.values().any(|child| names_deleted(accounts, child))
+        }
+        Value::Array(items) => items.iter().any(|child| names_deleted(accounts, child)),
+        _ => false,
+    }
+}
+
+fn ghost_deleted(accounts: &Accounts, ghost: &Value, v: &mut Value) {
+    if account_id(v).is_some_and(|id| accounts.get(id).is_none()) {
+        ghost.clone_into(v);
+        return;
+    }
+    match v {
+        Value::Object(map) => map
+            .values_mut()
+            .for_each(|child| ghost_deleted(accounts, ghost, child)),
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|child| ghost_deleted(accounts, ghost, child)),
+        _ => {}
+    }
+}
+
+fn ghost_user(urls: &Urls) -> Value {
+    serde_json::to_value(SimpleUser::new(urls, &Account::ghost())).unwrap_or_default()
 }
 
 fn reply<'e>(
