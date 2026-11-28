@@ -429,6 +429,43 @@ fn an_app_keeps_only_its_newest_over_budget_entries_within_the_refused_count() {
 }
 
 #[test]
+fn each_repository_hook_keeps_its_own_newest_over_budget_entries_within_the_refused_count() {
+    // Given an outbox with no room, which keeps two over-budget entries per delivery target
+    let s = store();
+    s.limit_outbox(OutboxUse {
+        refused_bytes: usize::MAX,
+        refused_per_app: 2,
+        ..OutboxUse::default()
+    });
+    let commit = |hook_id: i64, n: usize| {
+        s.update(|tx| {
+            tx.push_outbox(OutboxEntry {
+                app_id: 0,
+                hook_id: Some(hook_id),
+                payload: Bytes::from(vec![b'1'; n]),
+                ..entry("push")
+            });
+            Ok(())
+        })
+        .unwrap();
+    };
+
+    // When hook 7 commits an entry of 5 bytes and then hook 8 commits entries of 1, 2 and 3 bytes
+    commit(7, 5);
+    commit(8, 1);
+    commit(8, 2);
+    commit(8, 3);
+
+    // Then hook 7 keeps its entry and hook 8 keeps its two newest
+    let kept: Vec<_> = s
+        .take_outbox()
+        .iter()
+        .map(|c| (c.entry.hook_id, c.entry.payload.len()))
+        .collect();
+    assert_eq!(kept, [(Some(7), 5), (Some(8), 2), (Some(8), 3)]);
+}
+
+#[test]
 fn restore_releases_what_the_dropped_outbox_entries_held() {
     // Given committed entries that hold a share of the outbox limits
     let s = store();

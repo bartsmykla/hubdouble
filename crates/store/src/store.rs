@@ -227,10 +227,10 @@ impl Outbox {
     }
 
     fn refuse(&mut self, c: Committed, limit: OutboxUse) {
-        let (seq, app) = (c.seq, c.entry.app_id);
+        let (seq, target) = (c.seq, c.entry.hook_id.unwrap_or(c.entry.app_id));
         self.refused_bytes += c.entry.payload.len();
         self.push(c);
-        let held = self.refused.entry(app).or_default();
+        let held = self.refused.entry(target).or_default();
         held.push_back(seq);
         if held.len() > limit.refused_per_app
             && let Some(old) = held.pop_front()
@@ -439,8 +439,9 @@ impl Store {
     /// [`Committed::over_budget`] set. Over-budget entries keep at most `limit.refused_bytes`
     /// payload bytes until they are released with [`Store::release_refused`], taken or not;
     /// past it the oldest of them still in the outbox lose their payload. At most
-    /// `limit.refused_per_app` over-budget entries of one App wait in the outbox; past it the
-    /// oldest of them is dropped and gives back its share.
+    /// `limit.refused_per_app` over-budget entries of one App webhook or one repository or
+    /// organization webhook wait in the outbox; past it the oldest of them is dropped and gives
+    /// back its share.
     /// Without a call there is no bound.
     pub fn limit_outbox(&self, limit: OutboxUse) {
         *self.inner.limit.lock() = limit;
