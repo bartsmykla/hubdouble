@@ -1519,6 +1519,43 @@ async fn a_new_attempt_frees_a_deleted_hooks_log_bytes_before_it_strips_an_older
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_reset_that_brings_back_a_deleted_seeded_hook_frees_its_deleted_deliveries_log_bytes() {
+    let limit = log_bytes_of_an_app_delivery_beside_one_more().await;
+
+    // Given a log budget of two deliveries, an App delivery and a newer delivery of a seeded hook
+    let store = world_with_issues_hook();
+    let snapshot = store.snapshot();
+    let (hooks, hits) = start(&store, |o| o.log_bytes = limit);
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    emit_one(&store, event("issues", WIDGET));
+    hooks.drain().await.unwrap();
+
+    // When the hook is deleted with its deliveries, a reset brings it back, and the App gets one more
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Deliveries>().remove_children(ISSUES_HOOK);
+            tx.table_mut::<Hooks>().remove(ISSUES_HOOK);
+            Ok(())
+        })
+        .unwrap();
+    hooks.reset(&snapshot).await.unwrap();
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+
+    // Then the App keeps its log with its older delivery's request and response, and the hook has none
+    assert_eq!(logged_ids(&store, APP_A), vec![1, 3]);
+    assert_eq!(logged_ids(&store, ISSUES_HOOK), Vec::<i64>::new());
+    let first = store
+        .view(|tx| Ok(tx.table::<Deliveries>().get(1).cloned()))
+        .unwrap()
+        .unwrap();
+    assert!(!first.request.payload.is_empty());
+    assert!(first.response.payload.is_some());
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_log_keeps_only_the_first_response_bytes_of_a_long_answer() {
     let store = world();
     // Given a cap shorter than the receiver's 8-byte answer "received"

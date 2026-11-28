@@ -267,7 +267,10 @@ impl Shared {
 
     fn forget_discarded_hooks(&self) {
         let mut st = self.state.lock();
-        let Ok(doomed) = self.store.update(|tx| {
+        let State {
+            apps: logs, bodies, ..
+        } = &mut *st;
+        let Ok(stale) = self.store.update(|tx| {
             let hooks = tx.try_table::<Hooks>();
             let apps = tx.table::<Apps>();
             let doomed: Vec<i64> = tx
@@ -282,14 +285,25 @@ impl Shared {
                 })
                 .map(|d| d.id)
                 .collect();
-            tx.table_mut::<Deliveries>()
-                .remove_all(doomed.iter().copied());
-            Ok(doomed)
+            tx.table_mut::<Deliveries>().remove_all(doomed);
+            let rows = tx.table::<Deliveries>();
+            Ok(bodies
+                .kept
+                .iter()
+                .filter(|(id, (log, _))| {
+                    rows.get(**id).is_none()
+                        && !logs.get(log).is_some_and(|l| l.ready.contains_key(*id))
+                })
+                .map(|(id, _)| *id)
+                .collect::<Vec<i64>>())
         }) else {
             return;
         };
-        for id in doomed {
-            st.bodies.release(id);
+        for id in stale {
+            bodies.release(id);
+        }
+        for log in logs.values_mut() {
+            log.logged = None;
         }
         self.forget_gone(&mut st);
     }
