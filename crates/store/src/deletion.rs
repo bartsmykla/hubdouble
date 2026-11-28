@@ -62,7 +62,23 @@ pub(crate) fn delete(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiErr
     match deleted {
         Deleted::Repo(repo) => drop_repo(tx, repo.id),
         Deleted::Team(team) => {
-            tx.table_mut::<Teams>().remove(team.id);
+            let id = team.id;
+            let requested: Vec<_> = tx
+                .table::<Issues>()
+                .iter()
+                .filter(|i| {
+                    i.pull
+                        .as_ref()
+                        .is_some_and(|p| p.requested_teams.contains(&id))
+                })
+                .cloned()
+                .collect();
+            replace_each(tx, requested, |issue| {
+                if let Some(pull) = issue.pull.as_mut() {
+                    pull.requested_teams.retain(|t| *t != id);
+                }
+            });
+            tx.table_mut::<Teams>().remove(id);
         }
         Deleted::Account(account) => drop_account(tx, account.id),
         Deleted::Environment(environment) => {
@@ -167,6 +183,23 @@ fn drop_account(tx: &mut TxMut<'_>, account_id: i64) {
         .collect();
     replace_each(tx, repos, |repo| {
         repo.collaborators.retain(|c| c.user_id != account_id);
+    });
+    let named: Vec<_> = tx
+        .table::<Issues>()
+        .iter()
+        .filter(|i| {
+            i.assignee_ids.contains(&account_id)
+                || i.pull
+                    .as_ref()
+                    .is_some_and(|p| p.requested_reviewers.contains(&account_id))
+        })
+        .cloned()
+        .collect();
+    replace_each(tx, named, |issue| {
+        issue.assignee_ids.retain(|a| *a != account_id);
+        if let Some(pull) = issue.pull.as_mut() {
+            pull.requested_reviewers.retain(|r| *r != account_id);
+        }
     });
     let apps: Vec<i64> = tx
         .table::<Apps>()

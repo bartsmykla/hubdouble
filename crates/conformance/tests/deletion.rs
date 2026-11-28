@@ -658,6 +658,69 @@ async fn deleting_a_user_drops_the_apps_they_own_with_installations_and_tokens()
 }
 
 #[tokio::test]
+async fn a_deleted_user_or_team_leaves_no_assignment_or_review_request() {
+    // Given an issue assigned to carol, and a pull request that asks carol and a team to review
+    let server = start(vec![
+        carol_in_acme(),
+        json!({"kind": "team", "id": TEMP_TEAM_ID, "org": "acme", "name": "Temp",
+               "members": [{"login": "bob"}],
+               "repositories": [{"repository": "acme/public", "permission": "write"}]}),
+        json!({"kind": "pull_request", "repository": "acme/public", "user": "alice",
+               "title": "Ship the feature", "head": "feature", "base": "main"}),
+    ])
+    .await;
+    admin(
+        &server,
+        Method::PUT,
+        "repository/acme/public/collaborators/carol",
+        Some(&json!({"permission": "write"})),
+    )
+    .await;
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    let issue = alice
+        .post(
+            "repos/acme/public/issues",
+            &json!({"title": "for carol", "assignees": ["carol"]}),
+        )
+        .await;
+    assert_eq!(issue.status.as_u16(), 201, "{:?}", issue.body);
+    let number = issue.json()["number"].clone();
+    let requested = alice
+        .post(
+            "repos/acme/public/pulls/1/requested_reviewers",
+            &json!({"reviewers": ["carol"], "team_reviewers": ["temp"]}),
+        )
+        .await;
+    assert_eq!(requested.status.as_u16(), 201, "{:?}", requested.body);
+
+    // When carol and the team are deleted
+    admin(&server, Method::DELETE, "user/carol", None).await;
+    admin(&server, Method::DELETE, "team/acme/temp", None).await;
+
+    // Then the issue counts as unassigned and the pull request asks no one to review
+    let unassigned = alice
+        .get("repos/acme/public/issues?assignee=none")
+        .await
+        .json();
+    let numbers: Vec<&Value> = unassigned
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|i| &i["number"])
+        .collect();
+    assert!(numbers.contains(&&number), "{unassigned}");
+    let reviewers = alice
+        .get("repos/acme/public/pulls/1/requested_reviewers?per_page=1")
+        .await;
+    assert_eq!(reviewers.json(), json!({"users": [], "teams": []}));
+    assert!(
+        reviewers.header("link").is_empty(),
+        "{}",
+        reviewers.header("link")
+    );
+}
+
+#[tokio::test]
 async fn deleting_an_app_drops_its_bot_account_and_frees_its_slug() {
     // Given an App without installations
     let spare = json!({"slug": "spare-app", "owner": "acme",
