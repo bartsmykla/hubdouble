@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use hubdouble_model::{
     Reaction, ReactionContent, ReactionSubjectKind, Timestamp, Token, TokenKind, node_id,
 };
-use hubdouble_store::{Issues, Reactions, Tokens};
+use hubdouble_store::{Accounts, Issues, Reactions, Tokens};
 use hubdouble_testkit::fixture::{self, ALICE_ID, ALICE_TOKEN, BOB_TOKEN, CAROL_TOKEN};
 use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer};
 use serde_json::{Value, json};
@@ -236,6 +236,45 @@ async fn a_team_qualifier_needs_an_app_installed_on_the_org_with_members_read() 
     let hidden = vec![vec![], vec![]];
     let found = vec![vec![1], vec![1]];
     assert_eq!(seen, vec![hidden.clone(), hidden, found.clone(), found]);
+}
+
+#[tokio::test]
+async fn a_team_qualifier_needs_sso_for_a_user_token_on_an_org_that_enforces_it() {
+    // Given acme enforces SSO, and alice holds a user token of an App with members=read
+    const USER_WITH_MEMBERS: &str = "ghu_alice_of_the_app_with_members";
+    let server = server().await;
+    insert_app_tokens(&server, &[(USER_WITH_MEMBERS, MEMBERS_APP_ID, None)]);
+    created(
+        &GoGithub::new(&server)
+            .with_token(ALICE_TOKEN)
+            .post(
+                "repos/acme/public/pulls/1/requested_reviewers",
+                &json!({"team_reviewers": ["secret"]}),
+            )
+            .await,
+    );
+    let store = &server.server.services().store;
+    store
+        .update(|tx| {
+            let mut acme = (**tx.table::<Accounts>().get(fixture::ORG_ID).unwrap()).clone();
+            acme.sso_enforced = true;
+            tx.table_mut::<Accounts>().replace(acme)?;
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+    let client = GoGithub::new(&server).with_token(USER_WITH_MEMBERS);
+    let query = "team-review-requested:acme/secret";
+
+    // When alice searches before and after she authorizes SSO
+    let before = numbers(&client, query).await;
+    store
+        .update(|tx| hubdouble_auth::record_sso(tx, ALICE_ID, fixture::ORG_ID))
+        .unwrap_or_else(|error| panic!("{error}"));
+    let after = numbers(&client, query).await;
+
+    // Then
+    assert_eq!(before, Vec::<i64>::new());
+    assert_eq!(after, vec![1]);
 }
 
 #[tokio::test]
