@@ -5,7 +5,7 @@ use hubdouble_model::{
     Access, Account, MembershipState, OrgRole, Repo, RepoRole, Team, TeamPrivacy, TeamRole,
     TokenKind,
 };
-use hubdouble_store::{Accounts, Installations, Memberships, Teams, Tx};
+use hubdouble_store::{Installations, Memberships, Teams, Tx};
 
 pub fn org_role(tx: &Tx, org_id: i64, user_id: i64) -> Option<OrgRole> {
     tx.table::<Memberships>()
@@ -62,12 +62,11 @@ impl TeamViewer {
             {
                 Self::Admin
             }
-            Actor::User { token, user }
+            Actor::User { token, .. }
                 if token.kind == TokenKind::User
-                    && (token
+                    && token
                         .app_id
-                        .is_some_and(|app| !reads_members(tx, app, org_id))
-                        || needs_sso(tx, user.id, org_id)) =>
+                        .is_some_and(|app| !reads_members(tx, app, org_id)) =>
             {
                 Self::Outside
             }
@@ -108,13 +107,6 @@ fn reads_members(tx: &Tx, app_id: i64, org_id: i64) -> bool {
         .of(app_id, org_id)
         .filter(|i| i.suspended_at.is_none())
         .is_some_and(|i| reads(i.permissions.get("members")))
-}
-
-fn needs_sso(tx: &Tx, user_id: i64, org_id: i64) -> bool {
-    tx.table::<Accounts>()
-        .get(org_id)
-        .is_some_and(|org| org.sso_enforced)
-        && !hubdouble_auth::has_sso(tx, user_id, org_id)
 }
 
 fn reads(access: Option<&Access>) -> bool {
