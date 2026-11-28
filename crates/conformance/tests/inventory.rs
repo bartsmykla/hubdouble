@@ -273,9 +273,19 @@ async fn every_route_with_a_permission_answers_403_to_an_installation_without_it
         .await;
     installation_token(&server, "ghs_metadata_only", 4009, 5009);
     let client = GoGithub::new(&server).with_token("ghs_metadata_only");
+    let registry = Registries::new(hubdouble_api::register_all).rest;
+    let installations_call = |method: &Method, template: &str| {
+        registry
+            .route(method, &sample_path(template))
+            .and_then(|r| r.entry)
+            .is_none_or(|entry| entry.tokens.installation)
+    };
 
-    for (method, template) in routes_needing(Case::MissingPermission) {
-        // When the route is called on a repository the installation can see
+    for (method, template) in routes_needing(Case::MissingPermission)
+        .into_iter()
+        .filter(|(method, template)| installations_call(method, template))
+    {
+        // When the route, which GitHub serves to installations, is called on a repository the installation can see
         let path = concrete(&template, fixture::ORG, fixture::PRIVATE_REPO);
         let answer = send(&client, &method, &path).await;
 
