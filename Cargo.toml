@@ -52,6 +52,7 @@ apollo-compiler = "=1.33.1"
 base64 = "=0.23.1"
 bytes = "=1.12.2"
 criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+crypto_box = { version = "=0.9.1", default-features = false, features = ["alloc", "rand_core", "salsa20", "seal"] }
 fancy-regex = "=0.20.2"
 flate2 = { version = "=1.1.11", default-features = false, features = ["zlib"] }
 foldhash = { version = "=0.2.0", default-features = false }
@@ -85,6 +86,7 @@ serde-saphyr = "=2.2.0"
 serde_json = { version = "=1.0.154", features = ["raw_value", "unbounded_depth"] }
 sha1 = "=0.11.0"
 sha2 = "=0.11.1"
+tar = { version = "=0.4.46", default-features = false }
 tempfile = "=3.27.0"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
