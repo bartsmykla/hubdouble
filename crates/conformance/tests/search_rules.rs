@@ -232,9 +232,29 @@ async fn a_team_qualifier_needs_an_app_installed_on_the_org_with_members_read() 
         seen.push(row);
     }
 
-    // And an installation token of that App narrowed to no members permission searches, then
-    // the user token searches after the App's installation is suspended
+    // Then only the App with members=read on acme resolves acme's teams
+    let hidden = vec![vec![], vec![]];
+    let found = vec![vec![1], vec![1]];
+    assert_eq!(seen, vec![hidden.clone(), hidden, found.clone(), found]);
+}
+
+#[tokio::test]
+async fn a_team_qualifier_needs_an_active_installation_and_a_token_that_keeps_members() {
+    // Given an App installed on acme with members=read, alice's user token of it, and an
+    // installation token of it narrowed to permissions without members
+    const USER_WITH_MEMBERS: &str = "ghu_alice_of_the_app_with_members";
     const NARROWED: &str = "ghs_installation_narrowed_without_members";
+    let server = server().await;
+    insert_app_tokens(&server, &[(USER_WITH_MEMBERS, MEMBERS_APP_ID, None)]);
+    created(
+        &GoGithub::new(&server)
+            .with_token(ALICE_TOKEN)
+            .post(
+                "repos/acme/public/pulls/1/requested_reviewers",
+                &json!({"team_reviewers": ["reviewers"]}),
+            )
+            .await,
+    );
     let store = &server.server.services().store;
     store
         .update(|tx| {
@@ -260,11 +280,12 @@ async fn a_team_qualifier_needs_an_app_installed_on_the_org_with_members_read() 
             Ok(())
         })
         .unwrap_or_else(|error| panic!("{error}"));
-    let narrowed = numbers(
-        &GoGithub::new(&server).with_token(NARROWED),
-        "team-review-requested:acme/reviewers",
-    )
-    .await;
+    let query = "team-review-requested:acme/reviewers";
+
+    // When the narrowed token searches, and the user token searches before and after the
+    // installation is suspended
+    let narrowed = numbers(&GoGithub::new(&server).with_token(NARROWED), query).await;
+    let active = numbers(&GoGithub::new(&server).with_token(USER_WITH_MEMBERS), query).await;
     store
         .update(|tx| {
             let mut installation = (**tx
@@ -277,18 +298,11 @@ async fn a_team_qualifier_needs_an_app_installed_on_the_org_with_members_read() 
             Ok(())
         })
         .unwrap_or_else(|error| panic!("{error}"));
-    let suspended = numbers(
-        &GoGithub::new(&server).with_token(USER_WITH_MEMBERS),
-        "team-review-requested:acme/reviewers",
-    )
-    .await;
+    let suspended = numbers(&GoGithub::new(&server).with_token(USER_WITH_MEMBERS), query).await;
 
-    // Then only the App with members=read on acme resolves acme's teams, and only while its
-    // token keeps members and its installation is active
-    let hidden = vec![vec![], vec![]];
-    let found = vec![vec![1], vec![1]];
-    assert_eq!(seen, vec![hidden.clone(), hidden, found.clone(), found]);
+    // Then
     assert_eq!(narrowed, Vec::<i64>::new());
+    assert_eq!(active, vec![1]);
     assert_eq!(suspended, Vec::<i64>::new());
 }
 

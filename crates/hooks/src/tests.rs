@@ -439,19 +439,18 @@ fn a_wildcard_hook_gets_no_event_that_github_sends_only_to_apps() {
     for name in ["push", "workflow_dispatch"] {
         // When the repository emits a webhook event and an App-only event
         emit_one(&store, event(name, WIDGET));
-        let mut hooks: Vec<Option<i64>> = store
+        let mut hooks: Vec<i64> = store
             .take_outbox()
             .iter()
-            .map(|c| c.entry.hook_id)
-            .filter(Option::is_some)
+            .filter_map(|c| c.entry.hook_id)
             .collect();
         hooks.sort_unstable();
         got.insert(name, hooks);
     }
 
     // Then both hooks get push and neither gets workflow_dispatch
-    assert_eq!(got["push"], [Some(REPO_HOOK), Some(ORG_HOOK)]);
-    assert_eq!(got["workflow_dispatch"], []);
+    assert_eq!(got["push"], [REPO_HOOK, ORG_HOOK]);
+    assert_eq!(got["workflow_dispatch"], Vec::<i64>::new());
 }
 
 #[test]
