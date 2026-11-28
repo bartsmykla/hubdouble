@@ -310,7 +310,7 @@ async fn an_organization_hook_is_created_read_changed_and_deleted() {
 }
 
 #[tokio::test]
-async fn a_hook_update_whose_config_omits_the_secret_removes_it() {
+async fn a_hook_update_without_config_keeps_the_secret_and_one_whose_config_omits_it_removes_it() {
     // Given
     let server = server().await;
     let alice = alice(&server);
@@ -330,6 +330,11 @@ async fn a_hook_update_whose_config_omits_the_secret_removes_it() {
             .await;
         alice.call(Method::POST, &format!("{path}/pings")).await;
         let after_config = drained(&server).await;
+        let without_config = alice
+            .call_json(Method::PATCH, &path, &json!({"events": ["issues"]}))
+            .await;
+        alice.call(Method::POST, &format!("{path}/pings")).await;
+        let after_events = drained(&server).await;
         let updated = alice
             .call_json(
                 Method::PATCH,
@@ -343,6 +348,8 @@ async fn a_hook_update_whose_config_omits_the_secret_removes_it() {
         // Then
         assert_eq!(config_changed.status, StatusCode::OK);
         assert!(one(&after_config, id, "ping").signed_with(secret));
+        assert_eq!(without_config.status, StatusCode::OK);
+        assert!(one(&after_events, id, "ping").signed_with(secret));
         assert_eq!(updated.status, StatusCode::OK);
         let ping = one(&after_update, id, "ping");
         assert_eq!(ping.header("x-hub-signature"), "");
