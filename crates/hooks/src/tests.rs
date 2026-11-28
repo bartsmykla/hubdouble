@@ -1660,6 +1660,38 @@ async fn a_reset_that_brings_back_a_deleted_seeded_hook_frees_its_deleted_delive
     assert!(first.response.payload.is_some());
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_reset_keeps_an_apps_log_within_its_capacity_when_the_snapshot_holds_an_evicted_delivery()
+{
+    // Given a log capacity of one and a snapshot taken while the App's first delivery is logged
+    let store = world();
+    let (hooks, hits) = start(&store, |o| o.log_capacity = 1);
+    let _bodies = answer_all(hits);
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    let snapshot = store.snapshot();
+    // When a newer delivery evicts it and a reset restores the snapshot
+    emit_one(&store, event("push", WIDGET));
+    hooks.drain().await.unwrap();
+    assert_eq!(logged_ids(&store, APP_A), vec![2]);
+    hooks.reset(&snapshot).await.unwrap();
+    // Then the log holds only the newer delivery and the log bytes count its body
+    assert_eq!(logged_ids(&store, APP_A), vec![2]);
+    let kept = store
+        .view(|tx| {
+            let d = tx.table::<Deliveries>().get(2).unwrap();
+            let headers = |h: &BTreeMap<String, String>| -> usize {
+                h.iter().map(|(k, v)| k.len() + v.len()).sum()
+            };
+            Ok(d.request.payload.len()
+                + headers(&d.request.headers)
+                + d.response.payload.as_ref().map_or(0, String::len)
+                + headers(&d.response.headers))
+        })
+        .unwrap();
+    assert_eq!(hooks.stats().log_bytes, kept);
+}
+
 async fn app_request_app_and_hook_log_bytes() -> (usize, usize, usize) {
     let headers =
         |h: &BTreeMap<String, String>| -> usize { h.iter().map(|(k, v)| k.len() + v.len()).sum() };

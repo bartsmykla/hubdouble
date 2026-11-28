@@ -264,9 +264,52 @@ impl Shared {
             let epoch = self.store.restore_epoch(snapshot);
             self.drop_older(&mut st, epoch);
             self.forget_discarded_hooks(&mut st);
+            self.limit_restored_logs(&mut st);
             epoch
         };
         self.wait_older(epoch).await
+    }
+
+    fn limit_restored_logs(&self, st: &mut State) {
+        let capacity = self.options.log_capacity.max(1);
+        let Ok(rows) = self.store.update(|tx| {
+            let mut per_log: HashMap<i64, usize> = HashMap::new();
+            let over: Vec<i64> = tx
+                .table::<Deliveries>()
+                .iter()
+                .rev()
+                .filter(|d| {
+                    let n = per_log.entry(d.hook_id).or_default();
+                    *n += 1;
+                    *n > capacity
+                })
+                .map(|d| d.id)
+                .collect();
+            tx.table_mut::<Deliveries>().remove_all(over);
+            Ok(tx
+                .table::<Deliveries>()
+                .iter()
+                .map(|d| (d.id, d.hook_id, body_bytes(d)))
+                .filter(|(_, _, bytes)| *bytes > 0)
+                .collect::<Vec<_>>())
+        }) else {
+            return;
+        };
+        let State { apps, bodies, .. } = &mut *st;
+        let unkept = bodies
+            .held
+            .saturating_sub(bodies.kept.values().map(|(_, b)| b).sum());
+        bodies
+            .kept
+            .retain(|id, (log, _)| apps.get(log).is_some_and(|l| l.ready.contains_key(id)));
+        bodies
+            .kept
+            .extend(rows.into_iter().map(|(id, log, bytes)| (id, (log, bytes))));
+        bodies.held = unkept + bodies.kept.values().map(|(_, b)| b).sum::<usize>();
+        for log in apps.values_mut() {
+            log.logged = None;
+        }
+        self.prune(st);
     }
 
     fn forget_discarded_hooks(&self, st: &mut State) {
