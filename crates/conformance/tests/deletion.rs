@@ -2,7 +2,7 @@ use http::header::{self, HeaderValue};
 use http::{HeaderMap, Method};
 use hubdouble_hooks::Hooks;
 use hubdouble_store::{
-    CheckRuns, Environments, IssueComments, Issues, Releases, Rulesets, Statuses, Teams,
+    CheckRuns, Deliveries, Environments, IssueComments, Issues, Releases, Rulesets, Statuses, Teams,
 };
 use hubdouble_testkit::{Answer, GoGithub, Graphql, TestServer, fixture};
 use serde_json::{Value, json};
@@ -903,11 +903,35 @@ async fn deleting_an_app_drops_its_bot_account_and_frees_its_slug() {
     let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
     assert_eq!(status(&alice, "users/spare-app[bot]").await, 200);
 
+    let spare_id = admin(&server, Method::GET, "app/spare-app", None)
+        .await
+        .json()["id"]
+        .as_i64()
+        .unwrap();
+    admin(
+        &server,
+        Method::PATCH,
+        "app/spare-app",
+        Some(&json!({"webhook": {"url": server.receiver.url()}})),
+    )
+    .await;
+    admin(&server, Method::POST, "hooks/drain", None).await;
+    let logged = |server: &TestServer| {
+        server
+            .server
+            .services()
+            .store
+            .view(|tx| Ok(tx.table::<Deliveries>().children(spare_id).count()))
+            .unwrap()
+    };
+    assert_eq!(logged(&server), 1, "the webhook ping is logged");
+
     // When the App is deleted
     admin(&server, Method::DELETE, "app/spare-app", None).await;
 
-    // Then its bot account is gone and a new App takes the slug
+    // Then its bot account and its delivery log are gone, and a new App takes the slug
     assert_eq!(status(&alice, "users/spare-app[bot]").await, 404);
+    assert_eq!(logged(&server), 0);
     admin(&server, Method::POST, "app", Some(&spare)).await;
 }
 

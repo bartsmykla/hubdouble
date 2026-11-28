@@ -273,8 +273,21 @@ fn delete(tx: &mut TxMut<'_>, params: &Params, _: Timestamp, body: Value) -> Res
         org: &org,
         sender: sender(tx, &org, input.sender.as_deref())?,
     };
-    tx.delete(&Deleted::Team(team.clone()))?;
-    events::team(tx, &source, "deleted", &team, None, None);
+    let mut gone = vec![team];
+    let mut next = 0;
+    while let Some(parent) = gone.get(next).map(|t| t.id) {
+        gone.extend(
+            tx.table::<Teams>()
+                .children(org.id)
+                .filter(|t| t.parent_id == Some(parent))
+                .cloned(),
+        );
+        next += 1;
+    }
+    tx.delete(&Deleted::Team(gone[0].clone()))?;
+    for team in &gone {
+        events::team(tx, &source, "deleted", team, None, None);
+    }
     Ok(())
 }
 

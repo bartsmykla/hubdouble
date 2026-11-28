@@ -485,6 +485,38 @@ async fn admin_status(
 }
 
 #[tokio::test]
+async fn deleting_a_parent_team_sends_team_deleted_for_it_and_each_child_team() {
+    // Given root with a child team, and the child with a grandchild
+    let server = start(setup().entry(json!({
+        "kind": "team", "org": "acme", "name": "Grandchild", "parent": "child",
+    })))
+    .await;
+    admin_status(&server, Method::POST, "hooks/drain", None, 204).await;
+    server.receiver.received().await;
+
+    // When root is deleted
+    admin_status(&server, Method::DELETE, "team/acme/root", None, 204).await;
+
+    // Then each of the three teams gets one team deleted delivery
+    admin_status(&server, Method::POST, "hooks/drain", None, 204).await;
+    let mut deleted: Vec<String> = server
+        .receiver
+        .received()
+        .await
+        .iter()
+        .filter(|d| d.header("x-github-event") == "team" && d.json()["action"] == "deleted")
+        .map(|d| {
+            d.json()["team"]["slug"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    deleted.sort();
+    assert_eq!(deleted, ["child", "grandchild", "root"]);
+}
+
+#[tokio::test]
 async fn admin_transitions_publish_the_four_event_families_once() {
     let server = start(setup()).await;
     let client = GoGithub::new(&server).with_token(MEMBERS_TOKEN);

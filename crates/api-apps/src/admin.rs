@@ -12,7 +12,7 @@ use hubdouble_model::{
 use hubdouble_render::Urls;
 use hubdouble_rest::Params;
 use hubdouble_store::{
-    Accounts, Apps, Deleted, Installations, RepoRedirects, Repos, Tokens, Tx, TxMut,
+    Accounts, Apps, Deleted, Deliveries, Installations, RepoRedirects, Repos, Tokens, Tx, TxMut,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -188,6 +188,7 @@ fn delete_app(tx: &mut TxMut<'_>, params: &Params) -> Result<(), ApiError> {
     if let Some(bot) = tx.table::<Accounts>().get(bot_id).cloned() {
         tx.delete(&Deleted::Account(bot))?;
     }
+    tx.table_mut::<Deliveries>().remove_children(id);
     tx.table_mut::<Apps>().remove(id);
     Ok(())
 }
