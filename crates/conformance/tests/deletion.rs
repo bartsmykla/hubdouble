@@ -227,6 +227,55 @@ async fn deleting_a_repository_drops_the_rows_of_every_feature_and_keeps_other_r
     assert!(fresh.iter().all(|size| *size == 0), "{fresh:?}");
 }
 
+fn stage_variable(owner_kind: &str, owner: &str) -> Value {
+    json!({"kind": "actions_variable", owner_kind: owner, "name": "STAGE", "value": owner})
+}
+
+#[tokio::test]
+async fn deleting_a_repository_or_an_org_keeps_the_actions_variables_of_an_owner_with_the_same_id()
+{
+    // Given repository acme/kept and org twin with one ID, and repository acme/notes and org
+    // gone with another, each with a STAGE variable, and an acme variable selected for acme/notes
+    let server = start(vec![
+        repository(KEPT_REPO_ID, fixture::ORG, "kept"),
+        repository(NOTES_REPO_ID, fixture::ORG, "notes"),
+        json!({"kind": "org", "id": KEPT_REPO_ID, "login": "twin"}),
+        json!({"kind": "org", "id": NOTES_REPO_ID, "login": "gone"}),
+        stage_variable("repository", "acme/kept"),
+        stage_variable("organization", "twin"),
+        stage_variable("repository", "acme/notes"),
+        stage_variable("organization", "gone"),
+        json!({"kind": "actions_variable", "organization": fixture::ORG, "name": "SHARED",
+               "value": "yes", "visibility": "selected", "repositories": ["acme/notes"]}),
+    ])
+    .await;
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+
+    // When repository acme/kept and org gone are deleted
+    admin(&server, Method::DELETE, "repos/acme/kept", None).await;
+    admin(&server, Method::DELETE, "org/gone", None).await;
+
+    // Then org twin and repository acme/notes keep their own variables
+    let twin = admin(
+        &server,
+        Method::GET,
+        "actions/orgs/twin/variables/STAGE",
+        None,
+    )
+    .await;
+    assert_eq!(twin.json()["value"], "twin");
+    let notes = alice.get("repos/acme/notes/actions/variables/STAGE").await;
+    assert_eq!(notes.status.as_u16(), 200, "{:?}", notes.body);
+    assert_eq!(notes.json()["value"], "acme/notes");
+
+    // And acme/notes still gets the acme variable selected for it
+    let shared = alice
+        .get("repos/acme/notes/actions/organization-variables")
+        .await;
+    assert_eq!(shared.status.as_u16(), 200, "{:?}", shared.body);
+    assert_eq!(shared.json()["variables"][0]["name"], "SHARED");
+}
+
 fn fork(id: i64, owner: &str, name: &str, parent: &str, visibility: &str) -> Value {
     json!({"kind": "repository", "id": id, "owner": owner, "name": name,
            "visibility": visibility, "fork_of": parent})

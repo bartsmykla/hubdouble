@@ -52,12 +52,16 @@ struct Policy {
 pub(crate) type Entries = Rows<Entry>;
 
 pub(crate) fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
-    let id = match deleted {
-        Deleted::Repo(repo) => repo.id,
-        Deleted::Account(account) => account.id,
+    let (id, org) = match deleted {
+        Deleted::Repo(repo) => (repo.id, false),
+        Deleted::Account(account) => (account.id, true),
         Deleted::Team(_) | Deleted::Environment(_) => return Ok(()),
     };
-    tx.table_mut::<Entries>().remove_children(id);
+    tx.table_mut::<Entries>()
+        .remove_where(|e| e.scope == id && e.org() == org);
+    if org {
+        return Ok(());
+    }
     let selecting: Vec<_> = tx
         .table::<Entries>()
         .iter()
@@ -92,7 +96,13 @@ impl Entity for Entry {
     }
 
     fn keys(&self) -> Vec<String> {
-        vec![key(self.scope, self.variable, &self.value.name)]
+        vec![key(self.scope, self.org(), self.variable, &self.value.name)]
+    }
+}
+
+impl Entry {
+    fn org(&self) -> bool {
+        self.visibility.is_some()
     }
 }
 
@@ -272,7 +282,7 @@ fn seed_entry(
     let existing = ctx
         .tx
         .table::<Entries>()
-        .by_key(&key(scope, variable, &input.name))
+        .by_key(&key(scope, visibility.is_some(), variable, &input.name))
         .map(|entry| (entry.id, entry.value.created_at));
     let (id, created_at) = existing.unwrap_or_else(|| (ctx.tx.next_id(), now));
     let value = EntryValue {
@@ -292,8 +302,8 @@ fn seed_entry(
     Ok(())
 }
 
-fn key(scope: i64, variable: bool, name: &str) -> String {
-    format!("{scope}:{variable}:{}", name.to_ascii_uppercase())
+fn key(scope: i64, org: bool, variable: bool, name: &str) -> String {
+    format!("{scope}:{org}:{variable}:{}", name.to_ascii_uppercase())
 }
 
 fn admin_entry(
@@ -313,7 +323,7 @@ fn admin_entry(
         };
         let found = tx
             .table::<Entries>()
-            .by_key(&key(scope, variable, param("name")?))
+            .by_key(&key(scope, org, variable, param("name")?))
             .ok_or_else(ApiError::not_found)?;
         Ok(Arc::clone(found))
     };
@@ -382,7 +392,7 @@ fn get(ctx: &Ctx<'_>, variable: bool) -> Result<Reply, ApiError> {
     let entry = ctx
         .tx()
         .table::<Entries>()
-        .by_key(&key(repo.id, variable, name))
+        .by_key(&key(repo.id, false, variable, name))
         .ok_or_else(ApiError::not_found)?;
     Reply::json(&entry.value)
 }
@@ -395,7 +405,7 @@ fn list(ctx: &Ctx<'_>, variable: bool, org: bool) -> Result<Reply, ApiError> {
         .tx()
         .table::<Entries>()
         .children(scope)
-        .filter(|entry| entry.variable == variable && applies(entry, repo))
+        .filter(|entry| entry.org() == org && entry.variable == variable && applies(entry, repo))
         .map(|entry| &entry.value)
         .collect();
     items.sort_unstable_by(|a, b| a.name.cmp(&b.name));
