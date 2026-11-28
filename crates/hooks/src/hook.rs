@@ -161,17 +161,22 @@ impl Hook {
     }
 }
 
-/// The event names a webhook may subscribe to, sorted: the `webhook-events` of the pinned octokit
-/// webhook schemas, and `*`.
-pub const EVENTS: [&str; 51] = [
+/// The event names a repository or organization webhook may subscribe to, sorted: the
+/// `x-webhooks` events of the pinned `OpenAPI` description that GitHub's docs make available to
+/// repositories or organizations, and `*`.
+pub const EVENTS: [&str; 64] = [
     "*",
+    "branch_protection_configuration",
     "branch_protection_rule",
     "check_run",
     "check_suite",
     "code_scanning_alert",
     "commit_comment",
     "create",
+    "custom_property",
+    "custom_property_values",
     "delete",
+    "dependabot_alert",
     "deploy_key",
     "deployment",
     "deployment_status",
@@ -180,6 +185,8 @@ pub const EVENTS: [&str; 51] = [
     "fork",
     "gollum",
     "issue_comment",
+    "issue_dependencies",
+    "issue_relates_to",
     "issues",
     "label",
     "member",
@@ -190,10 +197,13 @@ pub const EVENTS: [&str; 51] = [
     "organization",
     "package",
     "page_build",
+    "personal_access_token_request",
     "project",
     "project_card",
     "project_column",
+    "projects_v2",
     "projects_v2_item",
+    "projects_v2_status_update",
     "public",
     "pull_request",
     "pull_request_review",
@@ -203,13 +213,17 @@ pub const EVENTS: [&str; 51] = [
     "registry_package",
     "release",
     "repository",
+    "repository_advisory",
     "repository_import",
+    "repository_ruleset",
     "repository_vulnerability_alert",
     "secret_scanning_alert",
     "secret_scanning_alert_location",
+    "secret_scanning_scan",
     "security_and_analysis",
     "star",
     "status",
+    "sub_issues",
     "team",
     "team_add",
     "watch",

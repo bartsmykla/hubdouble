@@ -1282,23 +1282,47 @@ async fn ping_describes_the_apps_hook() {
 }
 
 #[test]
-fn a_hook_may_subscribe_to_the_webhook_events_of_the_pinned_schemas_and_to_the_wildcard() {
+fn a_hook_may_subscribe_to_the_spec_events_that_repositories_or_organizations_receive() {
     // Given
-    let schema: Value =
-        serde_json::from_str(include_str!("../../testkit/spec/octokit/schema.json")).unwrap();
-    let events = &schema["definitions"]["webhook-events"]["oneOf"];
-    let mut want: Vec<&str> = events[0]["items"]["enum"]
-        .as_array()
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../spec/openapi/api.github.com.json"
+    );
+    let spec: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let not_for_repositories_or_organizations = [
+        "deployment_protection_rule",
+        "deployment_review",
+        "github_app_authorization",
+        "installation",
+        "installation_repositories",
+        "installation_target",
+        "marketplace_purchase",
+        "merge_group",
+        "ping",
+        "repository_dispatch",
+        "security_advisory",
+        "sponsorship",
+        "workflow_dispatch",
+    ];
+    let mut want: Vec<String> = spec["x-webhooks"]
+        .as_object()
         .unwrap()
-        .iter()
-        .map(|e| e.as_str().unwrap())
-        .chain([events[1]["items"]["const"].as_str().unwrap()])
+        .values()
+        .map(|w| {
+            w["post"]["x-github"]["subcategory"]
+                .as_str()
+                .unwrap()
+                .replace('-', "_")
+        })
+        .filter(|e| !not_for_repositories_or_organizations.contains(&e.as_str()))
+        .chain(["*".to_owned()])
         .collect();
     want.sort_unstable();
+    want.dedup();
 
     // Then
     assert_eq!(crate::EVENTS.to_vec(), want);
-    assert!(crate::is_event("push"));
+    assert!(crate::is_event("custom_property_values"));
+    assert!(!crate::is_event("custom-property-values"));
     assert!(!crate::is_event("pushes"));
-    assert!(!crate::is_event("installation"));
 }
