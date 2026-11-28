@@ -755,6 +755,20 @@ async fn a_hook_accepts_only_known_event_names() {
                 &json!({"events": [""]}),
             )
             .await,
+        alice
+            .post(
+                REPO_HOOKS,
+                &json!({"events": ["*", "push"],
+                        "config": {"url": "https://example.com/b"}}),
+            )
+            .await,
+        alice
+            .call_json(
+                Method::PATCH,
+                &format!("{REPO_HOOKS}/{id}"),
+                &json!({"add_events": ["*"]}),
+            )
+            .await,
     ];
     let changed = alice
         .call_json(

@@ -197,6 +197,13 @@ fn check_events(events: Option<&[String]>) -> Result<(), ApiError> {
     }
 }
 
+fn check_wildcard(events: &[String]) -> Result<(), ApiError> {
+    if events.len() > 1 && events.iter().any(|e| e == "*") {
+        return Err(invalid("\"*\" must be the only event"));
+    }
+    Ok(())
+}
+
 fn check_name(name: Option<&str>, required: bool) -> Result<(), ApiError> {
     match name {
         Some("web") => Ok(()),
@@ -238,6 +245,7 @@ fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
         created_at: now,
         updated_at: now,
     };
+    check_wildcard(&hook.events)?;
     apply_config(&mut hook, config)?;
     let taken = ctx
         .tx()
@@ -305,6 +313,7 @@ fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     }
     let removed = body.remove_events.unwrap_or_default();
     hook.events.retain(|e| !removed.contains(e));
+    check_wildcard(&hook.events)?;
     if let Some(active) = body.active {
         hook.active = active;
     }
