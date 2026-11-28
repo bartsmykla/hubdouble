@@ -404,6 +404,68 @@ fn a_team_event_on_a_fork_reaches_the_teams_organization_and_not_the_forks_owner
 }
 
 #[test]
+fn repository_deleted_reaches_organization_hooks_and_no_app_or_repository_hook() {
+    // Given an App installed on every repository, a repository hook and an organization hook,
+    // each subscribed to repository
+    const REPO_HOOK: i64 = 310;
+    const ORG_HOOK: i64 = 311;
+    let mut builder = StoreBuilder::new();
+    builder.register_table::<Hooks>();
+    let store = world_of(builder);
+    store
+        .update_quiet(|tx| {
+            tx.table_mut::<Apps>()
+                .replace(app(APP_A, "alpha", &["repository"]))?;
+            tx.table_mut::<Installations>()
+                .replace(installation(INSTALL_A, APP_A, None))?;
+            for (id, owner) in [
+                (REPO_HOOK, HookOwner::Repo(WIDGET)),
+                (ORG_HOOK, HookOwner::Org(ORG)),
+            ] {
+                tx.table_mut::<Hooks>().insert(Hook {
+                    id,
+                    owner,
+                    url: format!("http://hook.test/{id}"),
+                    content_type: ContentType::Json,
+                    secret: None,
+                    insecure_ssl: false,
+                    events: vec!["repository".to_owned()],
+                    active: true,
+                    created_at: Timestamp::SEED,
+                    updated_at: Timestamp::SEED,
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mut got = BTreeMap::new();
+    for action in ["edited", "deleted"] {
+        // When the repository is edited, then deleted, while every hook still exists
+        emit_one(
+            &store,
+            Event {
+                action: Some(action),
+                ..event("repository", WIDGET)
+            },
+        );
+        let mut sent: Vec<(i64, Option<i64>)> = store
+            .take_outbox()
+            .iter()
+            .map(|c| (c.entry.app_id, c.entry.hook_id))
+            .collect();
+        sent.sort_unstable();
+        got.insert(action, sent);
+    }
+
+    // Then every recipient gets edited, and only the organization hook gets deleted
+    assert_eq!(
+        got["edited"],
+        [(0, Some(REPO_HOOK)), (0, Some(ORG_HOOK)), (APP_A, None)]
+    );
+    assert_eq!(got["deleted"], [(0, Some(ORG_HOOK))]);
+}
+
+#[test]
 fn an_event_reaches_only_installations_granted_its_permission() {
     // Given two Apps that subscribe to the same events on one repository, and installation B with contents and checks read but no issues permission
     let store = world();
