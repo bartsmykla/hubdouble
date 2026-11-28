@@ -525,7 +525,7 @@ impl Git {
     }
 
     pub(crate) fn odb(&self, tx: &Tx, repo: i64) -> Arc<Odb> {
-        let root = refs::network_root(tx, repo);
+        let root = refs::odb_key(tx, repo);
         if let Some(odb) = self.inner.networks.read().get(&root) {
             return odb.clone();
         }

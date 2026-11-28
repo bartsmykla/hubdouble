@@ -132,11 +132,14 @@ impl TxMut<'_> {
     }
 
     /// Deletes a repository, a team or an account with every row that names it, in this
-    /// transaction. An account's repositories and an organization's teams are deleted first,
-    /// each as a deletion of its own. Then every [`DeletionSubscriber`] runs, in registration
-    /// order, and last the store drops its own rows: the entity, the rows in a deleted
-    /// repository, and the references other rows hold, such as a team's repository list or the
-    /// head repository of a pull request from a deleted fork, which becomes `None`.
+    /// transaction. An account's repositories, an organization's teams, the bot accounts of an
+    /// account's Apps, a team's child teams and a private repository's private forks are
+    /// deleted first, each as a deletion of its own. Then every [`DeletionSubscriber`] runs, in
+    /// registration order, and last the store drops its own rows: the entity, the rows in a
+    /// deleted repository, and the references other rows hold, such as a team's repository
+    /// list, an assignee, a requested reviewer or the head repository of a pull request from a
+    /// deleted fork, which becomes `None`. The other forks of a deleted repository move to its
+    /// parent; those of a deleted root move to [`crate::Repos::heir`], which becomes the root.
     ///
     /// # Errors
     ///

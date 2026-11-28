@@ -28,9 +28,15 @@ pub type DeletionSubscriber = fn(&mut TxMut<'_>, &Deleted) -> Result<(), ApiErro
 
 pub(crate) fn delete(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
     if let Deleted::Account(account) = deleted {
-        let repos: Vec<_> = tx.table::<Repos>().children(account.id).cloned().collect();
-        for repo in repos {
-            delete(tx, &Deleted::Repo(repo))?;
+        let repos: Vec<i64> = tx
+            .table::<Repos>()
+            .children(account.id)
+            .map(|r| r.id)
+            .collect();
+        for id in repos {
+            if let Some(repo) = tx.table::<Repos>().get(id).cloned() {
+                delete(tx, &Deleted::Repo(repo))?;
+            }
         }
         let teams = tx.table::<Teams>();
         let roots: Vec<_> = teams
@@ -62,6 +68,19 @@ pub(crate) fn delete(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiErr
             delete(tx, &Deleted::Team(child))?;
         }
     }
+    if let Deleted::Repo(repo) = deleted
+        && repo.is_private()
+    {
+        let forks: Vec<_> = tx
+            .table::<Repos>()
+            .iter()
+            .filter(|r| r.fork_of == Some(repo.id) && r.is_private())
+            .cloned()
+            .collect();
+        for fork in forks {
+            delete(tx, &Deleted::Repo(fork))?;
+        }
+    }
     if let Deleted::Repo(repo) = deleted {
         let environments: Vec<_> = tx
             .table::<Environments>()
@@ -76,7 +95,10 @@ pub(crate) fn delete(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiErr
         subscriber(tx, deleted)?;
     }
     match deleted {
-        Deleted::Repo(repo) => drop_repo(tx, repo.id),
+        Deleted::Repo(repo) => {
+            adopt_forks(tx, repo);
+            drop_repo(tx, repo.id);
+        }
         Deleted::Team(team) => {
             let id = team.id;
             let requested: Vec<_> = tx
@@ -113,6 +135,25 @@ where
         change(&mut changed);
         let _ = tx.table_mut::<Rows<E>>().replace(changed);
     }
+}
+
+fn adopt_forks(tx: &mut TxMut<'_>, repo: &Repo) {
+    let repos = tx.table::<Repos>();
+    let (parent, heir) = match repo.fork_of {
+        Some(parent) => (Some(parent), None),
+        None => match repos.heir(repo.id) {
+            Some(heir) => (Some(heir.id), Some(heir.id)),
+            None => return,
+        },
+    };
+    let forks: Vec<_> = repos
+        .iter()
+        .filter(|r| r.fork_of == Some(repo.id))
+        .cloned()
+        .collect();
+    replace_each(tx, forks, |fork| {
+        fork.fork_of = if Some(fork.id) == heir { None } else { parent };
+    });
 }
 
 fn drop_repo(tx: &mut TxMut<'_>, repo_id: i64) {

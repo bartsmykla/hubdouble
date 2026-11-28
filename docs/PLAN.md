@@ -304,7 +304,7 @@ impl TxMut<'_> {
     pub fn push_outbox(&mut self, entry: OutboxEntry);        // buffered; reaches the outbox only on commit
     pub fn delete(&mut self, deleted: &Deleted) -> Result<(), ApiError>; // calls every DeletionSubscriber, then removes the entity
 }
-pub enum Deleted { Repo(Arc<Repo>) /* its environments go first */, Team(Arc<Team>), Account(Arc<Account>) /* a user or an org: its repositories and teams go first; its Apps go with their installations, tokens and deliveries */, Environment(Arc<Environment>) }
+pub enum Deleted { Repo(Arc<Repo>) /* a private repository's private forks and its environments go first; its other forks move to its parent, or, for a root, the oldest public fork (Rows<Repo>::heir) becomes the upstream that the rest fork and keeps the network's objects */, Team(Arc<Team>) /* its child teams go first; it leaves the requested teams of pull requests */, Account(Arc<Account>) /* a user or an org: its repositories, teams and the bot accounts of its Apps go first; its Apps go with their installations, tokens and deliveries; it leaves assignees and requested reviewers; its activity events in other owners' repositories stay */, Environment(Arc<Environment>) }
 pub type DeletionSubscriber = fn(&mut TxMut<'_>, &Deleted) -> Result<(), ApiError>; // StoreBuilder::on_delete; a crate removes its side-table rows for the entity
 pub struct ActivityEvent { pub id: i64, pub kind: &'static str, pub actor_id: i64, pub repo_id: i64, pub repo_name: String, pub org_id: Option<i64>, pub payload: Value, pub public: bool, pub created_at: Timestamp } // table ActivityEvents; ids from their own sequence
 impl Tx { pub fn table<T: Table>(&self) -> &T; pub fn config(&self) -> &Config; }

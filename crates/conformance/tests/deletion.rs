@@ -227,6 +227,118 @@ async fn deleting_a_repository_drops_the_rows_of_every_feature_and_keeps_other_r
     assert!(fresh.iter().all(|size| *size == 0), "{fresh:?}");
 }
 
+fn fork(id: i64, owner: &str, name: &str, parent: &str, visibility: &str) -> Value {
+    json!({"kind": "repository", "id": id, "owner": owner, "name": name,
+           "visibility": visibility, "fork_of": parent})
+}
+
+async fn lineage(client: &GoGithub, full_name: &str) -> (Value, Value, Value) {
+    let answer = client.get(&format!("repos/{full_name}")).await;
+    assert_eq!(
+        answer.status.as_u16(),
+        200,
+        "{full_name}: {:?}",
+        answer.body
+    );
+    let repo = answer.json();
+    (
+        repo["fork"].clone(),
+        repo["parent"]["full_name"].clone(),
+        repo["source"]["full_name"].clone(),
+    )
+}
+
+async fn assert_readme(client: &GoGithub, full_name: &str) {
+    let path = format!("repos/{full_name}/contents/README.md");
+    assert_eq!(status(client, &path).await, 200, "{path}");
+}
+
+#[tokio::test]
+async fn deleting_a_public_root_makes_its_oldest_fork_the_new_upstream() {
+    // Given acme/public with two forks, and a fork of the older fork
+    let server = start(vec![
+        fork(3201, "alice", "older", "acme/public", "public"),
+        fork(3202, "bob", "newer", "acme/public", "public"),
+        fork(3203, "carol", "deep", "alice/older", "public"),
+    ])
+    .await;
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+
+    // When acme/public is deleted
+    admin(&server, Method::DELETE, "repos/acme/public", None).await;
+
+    // Then the oldest fork is the new upstream, the other forks name it, and git reads work
+    assert_eq!(
+        lineage(&alice, "alice/older").await,
+        (json!(false), Value::Null, Value::Null)
+    );
+    for name in ["bob/newer", "carol/deep"] {
+        assert_eq!(
+            lineage(&alice, name).await,
+            (json!(true), json!("alice/older"), json!("alice/older")),
+            "{name}"
+        );
+    }
+    for name in ["alice/older", "bob/newer", "carol/deep"] {
+        assert_readme(&alice, name).await;
+    }
+
+    // And when the new upstream is deleted too, the next oldest fork takes its place
+    admin(&server, Method::DELETE, "repos/alice/older", None).await;
+    assert_eq!(
+        lineage(&alice, "bob/newer").await,
+        (json!(false), Value::Null, Value::Null)
+    );
+    assert_eq!(
+        lineage(&alice, "carol/deep").await,
+        (json!(true), json!("bob/newer"), json!("bob/newer"))
+    );
+    for name in ["bob/newer", "carol/deep"] {
+        assert_readme(&alice, name).await;
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_fork_moves_its_forks_to_its_parent() {
+    // Given a fork of acme/public with a fork of its own
+    let server = start(vec![
+        fork(3201, "alice", "middle", "acme/public", "public"),
+        fork(3202, "bob", "leaf", "alice/middle", "public"),
+    ])
+    .await;
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+
+    // When the middle fork is deleted
+    admin(&server, Method::DELETE, "repos/alice/middle", None).await;
+
+    // Then its fork names acme/public as its parent and still reads its files
+    assert_eq!(
+        lineage(&alice, "bob/leaf").await,
+        (json!(true), json!("acme/public"), json!("acme/public"))
+    );
+    assert_readme(&alice, "bob/leaf").await;
+}
+
+#[tokio::test]
+async fn deleting_a_private_repository_deletes_its_private_forks() {
+    // Given a private fork of acme/private, and a fork of that fork
+    let server = start(vec![
+        fork(3201, "carol", "copy", "acme/private", "private"),
+        fork(3202, "carol", "copy-of-copy", "carol/copy", "private"),
+    ])
+    .await;
+    let carol = GoGithub::new(&server).with_token(fixture::CAROL_TOKEN);
+    assert_eq!(status(&carol, "repos/carol/copy").await, 200);
+
+    // When acme/private is deleted
+    admin(&server, Method::DELETE, "repos/acme/private", None).await;
+
+    // Then both forks are gone
+    assert_eq!(status(&carol, "repos/carol/copy").await, 404);
+    assert_eq!(status(&carol, "repos/carol/copy-of-copy").await, 404);
+    assert_no_repo_rows(&server, 3201);
+}
+
 #[tokio::test]
 async fn deleting_an_environment_drops_it_and_keeps_the_other_environments() {
     // Given two environments of a repository

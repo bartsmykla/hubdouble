@@ -198,6 +198,15 @@ impl Rows<Repo> {
     pub fn by_name(&self, owner_id: i64, name: &str) -> Option<&Arc<Repo>> {
         self.by_key(&pair(owner_id, name))
     }
+
+    /// The fork of `repo_id` that becomes the network's new upstream when `repo_id` is a
+    /// deleted root: the oldest public fork, else the oldest fork.
+    #[must_use]
+    pub fn heir(&self, repo_id: i64) -> Option<&Arc<Repo>> {
+        self.iter()
+            .filter(|r| r.fork_of == Some(repo_id))
+            .min_by_key(|r| (r.is_private(), r.created_at, r.id))
+    }
 }
 
 impl Entity for App {
