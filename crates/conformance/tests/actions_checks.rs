@@ -471,6 +471,11 @@ async fn a_workflow_job_is_its_check_run_in_the_github_actions_suite_of_its_run(
     assert_eq!(suite_view["latest_check_runs_count"], 4);
     assert_eq!(suite_view["rerequestable"], true);
     assert_eq!(suite_view["runs_rerequestable"], false);
+    // Then a run of that suite is not rerequestable, so a rerequest is a validation error
+    ok(
+        &rerun(&client, &format!("check-runs/{build}/rerequest")).await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+    );
     assert_eq!(suite_view["pull_requests"][0]["number"], number);
     assert_eq!(
         suite_view["check_runs_url"],

@@ -429,6 +429,16 @@ pub fn list_annotations(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
 
 pub fn rerequest(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let run = find(ctx)?;
+    let rerequestable = ctx
+        .tx()
+        .table::<CheckSuites>()
+        .get(run.check_suite_id)
+        .is_some_and(|suite| view::runs_rerequestable(suite));
+    if !rerequestable {
+        return Err(ApiError::unprocessable(
+            "This check run is not rerequestable",
+        ));
+    }
     let sender = owner(ctx.actor(), &run)?;
     let now = ctx.now();
     let (tx, git) = ctx.tx_mut_and_git()?;

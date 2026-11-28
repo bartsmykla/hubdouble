@@ -1237,3 +1237,37 @@ async fn repository_settings_and_actions_permissions_match_the_route() {
     assert_eq!(vars["total_count"], 1);
     assert_eq!(vars["variables"][0]["value"], "yes");
 }
+
+#[tokio::test]
+async fn the_repository_lists_its_own_secrets_variables_and_workflows() {
+    // Given the repository's seeded secret, variable and workflow files
+    let server = server("success").await;
+    let client = client(&server);
+
+    // Then each list holds only the repository's own entries, without secret values
+    let repo_secrets = valid(
+        "list-repo-secrets",
+        &client.get(&format!("{ACTIONS}/secrets")).await,
+    );
+    assert_eq!(repo_secrets["total_count"], 1);
+    assert_eq!(repo_secrets["secrets"][0]["name"], "HAS_SECRET");
+    assert!(repo_secrets["secrets"][0].get("value").is_none());
+    let repo_vars = valid(
+        "list-repo-variables",
+        &client.get(&format!("{ACTIONS}/variables")).await,
+    );
+    assert_eq!(repo_vars["total_count"], 1);
+    assert_eq!(repo_vars["variables"][0]["name"], "MODE");
+    assert_eq!(repo_vars["variables"][0]["value"], "local");
+    let workflows = valid(
+        "list-repo-workflows",
+        &client.get(&format!("{ACTIONS}/workflows")).await,
+    );
+    let listed = workflows["workflows"].as_array().unwrap();
+    assert_eq!(workflows["total_count"], listed.len());
+    assert!(
+        listed
+            .iter()
+            .any(|w| w["path"] == ".github/workflows/agent.yml" && w["state"] == "active")
+    );
+}
