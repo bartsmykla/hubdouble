@@ -658,6 +658,28 @@ async fn deleting_a_user_drops_the_apps_they_own_with_installations_and_tokens()
 }
 
 #[tokio::test]
+async fn an_account_cannot_be_renamed_to_the_ghost_login() {
+    // Given carol
+    let server = start(Vec::new()).await;
+
+    // When carol is renamed to the ghost user's login, in any case
+    for login in ["ghost", "Ghost"] {
+        let renamed = server
+            .admin(
+                Method::PATCH,
+                "installation-target/carol",
+                Some(&json!({"login": login})),
+            )
+            .await;
+
+        // Then the rename is refused and carol keeps her login
+        assert_eq!(renamed.status.as_u16(), 422, "{login}");
+    }
+    let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
+    assert_eq!(status(&alice, "users/carol").await, 200);
+}
+
+#[tokio::test]
 async fn deleting_a_parent_team_deletes_its_child_teams_and_keeps_other_teams() {
     // Given a team with a child and a grandchild, and another team
     let server = start(vec![

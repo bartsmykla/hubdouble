@@ -6,8 +6,8 @@ use hubdouble_admin::{
     Admin, AdminHandler, AdminRequest, AdminResponse, error_response, json_response, read_json,
 };
 use hubdouble_model::{
-    Access, AccountKind, ApiError, App, Installation, RepositorySelection, Timestamp, Token,
-    TokenKind, Webhook,
+    Access, Account, AccountKind, ApiError, App, Installation, RepositorySelection, Timestamp,
+    Token, TokenKind, Webhook,
 };
 use hubdouble_render::Urls;
 use hubdouble_rest::Params;
@@ -337,6 +337,11 @@ fn rename_target(
         .by_login(login)
         .filter(|a| a.kind != AccountKind::Bot)
         .ok_or_else(ApiError::not_found)?;
+    if Account::is_ghost(account.id, &input.login) {
+        return Err(ApiError::unprocessable(
+            "The login is reserved for the ghost user",
+        ));
+    }
     let mut account = (**account).clone();
     if account.login != input.login {
         let old_login = std::mem::replace(&mut account.login, input.login);
