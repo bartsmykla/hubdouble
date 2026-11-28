@@ -192,7 +192,9 @@ fn repo_access(
             user_to_server(token, req, public_read, |app| {
                 app_installation(tx, app, repo)
             })?;
-            classic_scopes(token, req)?;
+            if repo.is_private() || !public_repo_hook_scope(token, req) {
+                classic_scopes(token, req)?;
+            }
             if token.kind == TokenKind::Personal && !is_read(req) && !webhook_scope(token, req) {
                 let wanted = if repo.is_private() {
                     &["repo"][..]
@@ -435,6 +437,12 @@ fn classic_scopes(token: &Token, req: &Requirement) -> Result<(), ApiError> {
     } else {
         Err(scope_denied(req.scopes))
     }
+}
+
+fn public_repo_hook_scope(token: &Token, req: &Requirement) -> bool {
+    token.kind == TokenKind::Personal
+        && req.scopes.iter().any(|w| WEBHOOK_SCOPES.contains(w))
+        && holds_scope(&token.scopes, "public_repo")
 }
 
 fn webhook_scope(token: &Token, req: &Requirement) -> bool {

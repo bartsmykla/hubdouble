@@ -679,6 +679,33 @@ async fn a_hook_belongs_to_its_owner_kind_when_a_repository_and_an_organization_
 }
 
 #[tokio::test]
+async fn a_public_repo_token_manages_the_hooks_of_public_repositories_only() {
+    // Given an administrator token that holds only public_repo
+    let server = server().await;
+    let token = "ghp_a11ce0000000000000000000000publicrepo";
+    add_token(
+        &server,
+        token,
+        TokenKind::Personal,
+        (None, None, Some(ALICE_ID)),
+        &["public_repo"],
+    );
+    let alice = GoGithub::new(&server).with_token(token);
+
+    // When
+    let created = alice
+        .post(REPO_HOOKS, &hook(&server, "s", &["issues"], true))
+        .await;
+    let listed = alice.get(REPO_HOOKS).await;
+    let private = alice.get("repos/acme/private/hooks").await;
+
+    // Then
+    assert_eq!(created.status, StatusCode::CREATED);
+    assert_eq!(listed.status, StatusCode::OK);
+    assert_eq!(private.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn the_test_url_of_a_hook_sends_the_push_test() {
     // Given
     let server = server().await;
