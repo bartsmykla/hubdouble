@@ -1180,6 +1180,41 @@ async fn queued_form_deliveries_hold_only_the_payload_bytes_the_queue_counts() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_hooks_last_response_skips_a_queue_full_record_that_was_never_sent() {
+    let sizing = world_with_issues_hook();
+    emit_one(&sizing, event("issues", WIDGET));
+    let one = sizing.take_outbox()[0].entry.payload.len();
+    // Given a queue byte limit of one payload and a hook attempt in flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| o.queue_bytes = one);
+    emit_one(&store, event("issues", WIDGET));
+    let in_flight = hits.recv().await.unwrap();
+    // When a second event is refused as Queue full and the attempt then answers 200
+    emit_one(&store, event("issues", WIDGET));
+    in_flight.reply.send(200).unwrap();
+    hooks.drain().await.unwrap();
+    let statuses: Vec<i64> = store
+        .view(|tx| {
+            Ok(tx
+                .table::<Deliveries>()
+                .children(ISSUES_HOOK)
+                .map(|d| d.status_code)
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(statuses, [200, 0]);
+    // Then the hook's last response is the answered attempt
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 200, "status": "active", "message": "OK"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn past_the_log_byte_budget_the_oldest_deliveries_lose_their_bodies() {
     let numbered = |n: i64| {
         let mut e = event("push", WIDGET);

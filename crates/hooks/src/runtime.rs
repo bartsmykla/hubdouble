@@ -16,7 +16,7 @@ use tokio::time::Instant;
 use crate::delivery::{Outcome, Pool, send, signature_1, signature_256};
 use crate::{ContentType, Hooks, HooksError, Notice, Options, QUEUE_BYTES, Stats};
 
-const OVER_BUDGET: &str = "Queue full";
+pub(crate) const OVER_BUDGET: &str = "Queue full";
 
 pub(crate) struct Job {
     id: i64,

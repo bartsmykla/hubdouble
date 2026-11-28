@@ -3,6 +3,8 @@ use hubdouble_render::Urls;
 use hubdouble_store::{Accounts, Deliveries, Entity, Repos, Rows, Tx};
 use serde_json::{Map, Value, json};
 
+use crate::runtime::OVER_BUDGET;
+
 /// The repository or organization a webhook belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookOwner {
@@ -170,12 +172,15 @@ impl Hook {
         Some(hook)
     }
 
-    /// GitHub's `hook-response` of the hook's latest logged delivery attempt: `unused` before
-    /// any, `active` after a `2xx`, and `misconfigured` with the attempt's status otherwise.
+    /// GitHub's `hook-response` of the hook's latest logged delivery attempt, past any `Queue
+    /// full` record that was never sent: `unused` before any, `active` after a `2xx`, and
+    /// `misconfigured` with the attempt's status otherwise.
     fn last_response(&self, tx: &Tx) -> Value {
-        let latest = tx
-            .try_table::<Deliveries>()
-            .and_then(|log| log.children(self.id).next_back());
+        let latest = tx.try_table::<Deliveries>().and_then(|log| {
+            log.children(self.id)
+                .rev()
+                .find(|d| d.status != OVER_BUDGET)
+        });
         let Some(d) = latest else {
             return unused_response();
         };
