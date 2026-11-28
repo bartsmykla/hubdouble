@@ -310,6 +310,47 @@ async fn an_organization_hook_is_created_read_changed_and_deleted() {
 }
 
 #[tokio::test]
+async fn a_hook_update_whose_config_omits_the_secret_removes_it() {
+    // Given
+    let server = server().await;
+    let alice = alice(&server);
+    let url = server.receiver.url().to_owned();
+    for (hooks, secret) in [(REPO_HOOKS, "repo-secret"), (ORG_HOOKS, "org-secret")] {
+        let id = create(&alice, hooks, &hook(&server, secret, &["issues"], true)).await;
+        let path = format!("{hooks}/{id}");
+        drained(&server).await;
+
+        // When
+        let config_changed = alice
+            .call_json(
+                Method::PATCH,
+                &format!("{path}/config"),
+                &json!({"url": url, "insecure_ssl": "0"}),
+            )
+            .await;
+        alice.call(Method::POST, &format!("{path}/pings")).await;
+        let after_config = drained(&server).await;
+        let updated = alice
+            .call_json(
+                Method::PATCH,
+                &path,
+                &json!({"config": {"url": url, "content_type": "json"}}),
+            )
+            .await;
+        alice.call(Method::POST, &format!("{path}/pings")).await;
+        let after_update = drained(&server).await;
+
+        // Then
+        assert_eq!(config_changed.status, StatusCode::OK);
+        assert!(one(&after_config, id, "ping").signed_with(secret));
+        assert_eq!(updated.status, StatusCode::OK);
+        let ping = one(&after_update, id, "ping");
+        assert_eq!(ping.header("x-hub-signature"), "");
+        assert_eq!(ping.header("x-hub-signature-256"), "");
+    }
+}
+
+#[tokio::test]
 async fn an_event_reaches_every_active_hook_that_subscribes_to_it() {
     // Given
     let server = server().await;

@@ -330,7 +330,8 @@ fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     }
     check_events(hook.owner, body.events.as_deref())?;
     check_events(hook.owner, body.add_events.as_deref())?;
-    if let Some(config) = body.config {
+    if let Some(mut config) = body.config {
+        config.secret.get_or_insert_default();
         apply_config(&mut hook, config)?;
     }
     if let Some(events) = body.events {
