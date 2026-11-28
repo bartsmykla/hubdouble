@@ -629,6 +629,9 @@ pub(crate) fn app_kind(ctx: &mut SeedCtx<'_>, v: serde_json::Value) -> Result<()
             "slug {ACTIONS_APP_SLUG} belongs to GitHub Actions"
         )));
     }
+    if s.id.is_some_and(|id| id < 1) {
+        return Err(ApiError::unprocessable("App ID must be positive"));
+    }
     if s.id == Some(ACTIONS_APP_ID) {
         return Err(ApiError::unprocessable(format!(
             "App ID {ACTIONS_APP_ID} belongs to GitHub Actions"

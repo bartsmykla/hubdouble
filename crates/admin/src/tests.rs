@@ -306,6 +306,40 @@ fn no_account_takes_the_id_or_login_of_the_ghost_user() {
 }
 
 #[test]
+fn an_app_takes_only_a_positive_id() {
+    let org = json!({"kind": "org", "id": 962_416, "login": "acme"});
+    for id in [0, -1] {
+        // Given
+        let w = world();
+        // When
+        let e = w
+            .seed(vec![
+                org.clone(),
+                json!({"kind": "app", "id": id, "slug": "ci", "owner": "acme", "public_key": KEY}),
+            ])
+            .unwrap_err();
+        // Then
+        assert_eq!(e.status, 422, "{id}");
+    }
+
+    // Given
+    let w = world();
+    // When
+    w.seed(vec![
+        org,
+        json!({"kind": "app", "id": 1, "slug": "ci", "owner": "acme", "public_key": KEY}),
+    ])
+    .unwrap();
+    // Then
+    w.store
+        .view(|tx| {
+            assert!(tx.table::<Apps>().get(1).is_some());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn a_failing_entry_changes_nothing_and_names_its_position() {
     // Given
     let w = world();
