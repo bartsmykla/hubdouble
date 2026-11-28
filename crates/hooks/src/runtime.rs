@@ -117,6 +117,15 @@ struct AppLog {
     running: BTreeSet<i64>,
     ready: BTreeMap<i64, (u64, Delivery)>,
     logged: Option<VecDeque<i64>>,
+    dropped_answer: Option<(i64, u64, LastResponse)>,
+}
+
+fn answer_of(d: &Delivery) -> Option<LastResponse> {
+    (d.app_id == 0 && d.status != OVER_BUDGET).then(|| LastResponse {
+        hook_id: d.hook_id,
+        status_code: d.status_code,
+        status: d.status.clone(),
+    })
 }
 
 fn header_bytes(h: &BTreeMap<String, String>) -> usize {
@@ -388,6 +397,7 @@ impl Shared {
                 st.unlogged.remove(&id);
             }
             l.logged = None;
+            l.dropped_answer = None;
             if l.running.is_empty() {
                 st.apps.remove(&log);
             }
@@ -436,6 +446,9 @@ impl Shared {
             }
             st.bodies.release(id);
             st.unlogged.remove(&id);
+        }
+        for log in st.apps.values_mut() {
+            log.dropped_answer.take_if(|(_, e, _)| *e < epoch);
         }
     }
 
@@ -770,13 +783,22 @@ impl Shared {
         let floor = log.running.first().copied().unwrap_or(i64::MAX);
         let mut rest = log.ready.split_off(&floor);
         while rest.len() > capacity
-            && let Some((id, _)) = rest.pop_first()
+            && let Some((id, (e, d))) = rest.pop_first()
         {
+            if let Some(answer) = answer_of(&d)
+                && log
+                    .dropped_answer
+                    .as_ref()
+                    .is_none_or(|(old, ..)| *old < id)
+            {
+                log.dropped_answer = Some((id, e, answer));
+            }
             bodies.release(id);
             unlogged.remove(&id);
         }
         let ready = std::mem::replace(&mut log.ready, rest);
-        if ready.is_empty() {
+        let dropped = log.dropped_answer.take_if(|(id, ..)| *id < floor);
+        if ready.is_empty() && dropped.is_none() {
             return;
         }
         let logged = &mut log.logged;
@@ -797,8 +819,8 @@ impl Shared {
                 if *e == epoch && owner_exists && table.insert(d.clone()).is_ok() {
                     logged.push_back(d.id);
                     inserted.push(d);
-                    if d.app_id == 0 && d.status != OVER_BUDGET {
-                        answered = Some(d);
+                    if let Some(answer) = answer_of(d) {
+                        answered = Some((d.id, answer));
                     }
                 } else {
                     gone.push(d.id);
@@ -810,14 +832,17 @@ impl Shared {
                     }
                 }
             }
-            if let Some(d) = answered
+            if let Some((id, e, answer)) = dropped
+                && e == epoch
+                && owner_exists
+                && answered.as_ref().is_none_or(|(newer, _)| *newer < id)
+            {
+                answered = Some((id, answer));
+            }
+            if let Some((_, answer)) = answered
                 && tx.try_table::<LastResponses>().is_some()
             {
-                let _ = tx.table_mut::<LastResponses>().replace(LastResponse {
-                    hook_id: d.hook_id,
-                    status_code: d.status_code,
-                    status: d.status.clone(),
-                });
+                let _ = tx.table_mut::<LastResponses>().replace(answer);
             }
             Ok(())
         });

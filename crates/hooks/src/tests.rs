@@ -1286,6 +1286,58 @@ async fn a_hook_stays_active_after_a_queue_full_record_evicts_its_only_answered_
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_hooks_last_response_is_its_newest_sent_attempt_after_the_log_drops_it() {
+    let numbered = |n: i64| {
+        let mut e = event("issues", WIDGET);
+        e.payload.insert("n".to_owned(), json!(n));
+        e
+    };
+    let sizing = world_with_issues_hook();
+    emit_one(&sizing, numbered(1));
+    let one = sizing.take_outbox()[0].entry.payload.len();
+    // Given a log capacity of one, a queue byte limit of two payloads and two hook attempts in
+    // flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 2;
+        o.queue_bytes = 2 * one;
+        o.log_capacity = 1;
+    });
+    let mut by_n = BTreeMap::new();
+    for n in 1..=2 {
+        emit_one(&store, numbered(n));
+        let hit = hits.recv().await.unwrap();
+        by_n.insert(hit.json()["n"].as_i64().unwrap(), hit);
+    }
+    // When a third event is refused as Queue full, the second attempt answers 200 and the first
+    // then answers 404
+    emit_one(&store, numbered(3));
+    by_n.remove(&2).unwrap().reply.send(200).unwrap();
+    hooks.shared.wait_stats(|s| s.in_flight == 1).await;
+    by_n.remove(&1).unwrap().reply.send(404).unwrap();
+    hooks.drain().await.unwrap();
+    let statuses: Vec<i64> = store
+        .view(|tx| {
+            Ok(tx
+                .table::<Deliveries>()
+                .children(ISSUES_HOOK)
+                .map(|d| d.status_code)
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(statuses, [0]);
+    // Then the hook's last response is the second attempt
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 200, "status": "active", "message": "OK"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_seeded_hook_keeps_its_last_response_over_a_reset_that_keeps_its_log() {
     // Given a seeded hook whose attempt after the snapshot answered 200
     let store = world_with_issues_hook();
