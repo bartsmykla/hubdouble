@@ -26,7 +26,28 @@ impl HookOwner {
             HookOwner::Org(_) => "organization",
         }
     }
+
+    /// Whether a webhook of this owner may get `event`: a repository webhook never gets an event
+    /// that GitHub's docs make available to organizations and not to repositories.
+    #[must_use]
+    pub fn offers(self, event: &str) -> bool {
+        matches!(self, HookOwner::Org(_)) || !ORGANIZATION_EVENTS.contains(&event)
+    }
 }
+
+/// The [`EVENTS`] whose "Availability" in GitHub's "Webhook events and payloads" docs lists
+/// Organizations and not Repositories. Every other event of [`EVENTS`] lists both.
+pub(crate) const ORGANIZATION_EVENTS: [&str; 9] = [
+    "custom_property",
+    "membership",
+    "org_block",
+    "organization",
+    "personal_access_token_request",
+    "projects_v2",
+    "projects_v2_item",
+    "projects_v2_status_update",
+    "team",
+];
 
 /// How a webhook's body is sent: `application/json`, or `application/x-www-form-urlencoded`
 /// with the JSON in a `payload` parameter.
@@ -73,10 +94,10 @@ pub struct Hook {
 }
 
 impl Hook {
-    /// Whether the hook gets `event`.
+    /// Whether the hook gets `event`: its owner offers it and the hook subscribes to it or to `*`.
     #[must_use]
     pub fn subscribes(&self, event: &str) -> bool {
-        self.events.iter().any(|e| e == "*" || e == event)
+        self.owner.offers(event) && self.events.iter().any(|e| e == "*" || e == event)
     }
 
     /// GitHub's `webhook-config`: the secret shows as `********` when it is set.

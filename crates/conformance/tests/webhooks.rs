@@ -933,6 +933,82 @@ async fn a_hook_accepts_only_known_event_names() {
 }
 
 #[tokio::test]
+async fn a_repository_hook_refuses_and_never_gets_events_only_organizations_receive() {
+    // Given
+    let server = server().await;
+    let alice = alice(&server);
+    let url = server.receiver.url().to_owned();
+    let repo_hook = create(
+        &alice,
+        REPO_HOOKS,
+        &json!({"events": ["*"], "config": {"url": url}}),
+    )
+    .await;
+    let org_hook = create(
+        &alice,
+        ORG_HOOKS,
+        &json!({"name": "web", "events": ["*"], "config": {"url": url}}),
+    )
+    .await;
+    let team = server
+        .admin(
+            Method::POST,
+            "team",
+            Some(&json!({"org": ORG, "name": "Watchers"})),
+        )
+        .await;
+    assert_eq!(team.status, StatusCode::CREATED, "{}", team.json());
+    drained(&server).await;
+
+    // When
+    let refused = [
+        alice
+            .post(
+                REPO_HOOKS,
+                &json!({"events": ["team"], "config": {"url": "https://example.com/a"}}),
+            )
+            .await,
+        alice
+            .call_json(
+                Method::PATCH,
+                &format!("{REPO_HOOKS}/{repo_hook}"),
+                &json!({"events": ["membership"]}),
+            )
+            .await,
+        alice
+            .call_json(
+                Method::PATCH,
+                &format!("{REPO_HOOKS}/{repo_hook}"),
+                &json!({"add_events": ["organization"]}),
+            )
+            .await,
+    ];
+    let added = server
+        .admin(
+            Method::PUT,
+            "team/acme/watchers/repos/acme/public",
+            Some(&json!({"permission": "read"})),
+        )
+        .await;
+
+    // Then
+    for answer in &refused {
+        assert_invalid_hook(answer);
+    }
+    assert_eq!(added.status, StatusCode::NO_CONTENT);
+    let deliveries = drained(&server).await;
+    assert_eq!(
+        one(&deliveries, org_hook, "team").json()["action"],
+        "added_to_repository"
+    );
+    assert!(to_hook(&deliveries, repo_hook, "team").is_empty());
+    assert_eq!(
+        alice.get(&format!("{REPO_HOOKS}/{repo_hook}")).await.json()["events"],
+        json!(["*"])
+    );
+}
+
+#[tokio::test]
 async fn last_response_follows_the_latest_delivery_attempt() {
     // Given
     let server = server().await;

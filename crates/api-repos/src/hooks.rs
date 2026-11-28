@@ -207,8 +207,12 @@ fn apply_config(hook: &mut Hook, c: ConfigBody) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn check_events(events: Option<&[String]>) -> Result<(), ApiError> {
-    match events.into_iter().flatten().find(|e| !is_event(e)) {
+fn check_events(owner: HookOwner, events: Option<&[String]>) -> Result<(), ApiError> {
+    match events
+        .into_iter()
+        .flatten()
+        .find(|e| !is_event(e) || !owner.offers(e))
+    {
         Some(unknown) => Err(invalid(&format!("\"{unknown}\" is not a valid event name"))),
         None => Ok(()),
     }
@@ -258,7 +262,7 @@ fn create(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let owner = owner(ctx)?;
     let body: HookBody = ctx.body()?;
     check_name(body.name.as_deref(), matches!(owner, HookOwner::Org(_)))?;
-    check_events(body.events.as_deref())?;
+    check_events(owner, body.events.as_deref())?;
     let config = body.config.unwrap_or_default();
     if config.url.as_deref().is_none_or(str::is_empty) {
         return Err(invalid("Config must contain URL for webhooks"));
@@ -321,8 +325,8 @@ fn update(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     if matches!(hook.owner, HookOwner::Org(_)) {
         check_name(body.name.as_deref(), false)?;
     }
-    check_events(body.events.as_deref())?;
-    check_events(body.add_events.as_deref())?;
+    check_events(hook.owner, body.events.as_deref())?;
+    check_events(hook.owner, body.add_events.as_deref())?;
     if let Some(config) = body.config {
         apply_config(&mut hook, config)?;
     }
