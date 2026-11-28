@@ -85,6 +85,42 @@ async fn an_old_name_redirects_reads_and_writes_to_the_repository_id() {
 }
 
 #[tokio::test]
+async fn an_old_name_of_a_deleted_repository_answers_not_found() {
+    let server = server().await;
+    let client = GoGithub::new(&server).with_token(ALICE_TOKEN);
+
+    // Given a renamed repository whose old name redirects
+    admin(
+        &server,
+        Method::PATCH,
+        "repos/acme/public",
+        Some(&json!({"name": "shiny"})),
+    )
+    .await;
+    assert_eq!(
+        client.get("repos/acme/public").await.status,
+        StatusCode::MOVED_PERMANENTLY
+    );
+
+    // When the repository is deleted
+    admin(&server, Method::DELETE, "repos/acme/shiny", None).await;
+
+    // Then its old name, its current name and its ID answer 404
+    for path in [
+        "repos/acme/public",
+        "repos/acme/public/issues",
+        "repos/acme/shiny",
+        &format!("repositories/{PUBLIC_REPO_ID}"),
+    ] {
+        assert_eq!(
+            client.get(path).await.status,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_old_name_of_a_hidden_repository_answers_not_found() {
     let server = server().await;
 
