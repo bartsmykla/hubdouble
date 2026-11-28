@@ -1,4 +1,5 @@
 use http::Method;
+use hubdouble_hooks::Hooks;
 use hubdouble_store::{CheckRuns, IssueComments, Issues, Releases, Rulesets, Statuses, Teams};
 use hubdouble_testkit::{Answer, GoGithub, TestServer, fixture};
 use serde_json::{Value, json};
@@ -10,6 +11,16 @@ const DOOMED_REPO_ID: i64 = 3103;
 const DOOMED_INSTALLATION_ID: i64 = 5101;
 const TEMP_TEAM_ID: i64 = 6101;
 const KEPT_TEAM_ID: i64 = 6102;
+const HOOK_ADMIN_TOKEN: &str = "ghp_d0a1000000000000000000000000000000000";
+const CAROL_APP_ID: i64 = 4002;
+const CAROL_INSTALLATION_ID: i64 = 5102;
+const CAROL_APP_JWT: &str = concat!(
+    "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOjQwMDIsImlhdCI6MTc2NzIyNTU0MCwiZXhwIjoxNzY3MjI2MjAwfQ.",
+    "gobO4qnik78K0sFVCrmbD6FG02vW0XMALsekmCW_PF0t0GZsJUx0isvZDY84Zp54-2zB9ciCUTM48qfwPNVeTsO9B_8jFncvfp6",
+    "f0uwi0SS8nQWyh7pZJs_7h_T2DlbIVHBjTTgXMtLvWpP5VIe9YjgYQp1TbepKztie1tg6DX61xly-vxhKH-nNZ6_D9zMFbgvEV",
+    "GvNYzQl4KSX0BwtEHs-CFj_DunR-bAuDDaKKeKB2kC99uqfPNpWnlp03z1KYEiH3B7d9zj7nVMCE4RHf9NmXifV0Emikpkqsx2",
+    "hWlO65sop7GoeCOQuKxK6QoYJjtCXQ14lIQyGZIpOOlEpDA"
+);
 
 const REPO_FEEDS: [&str; 8] = [
     "issues",
@@ -88,6 +99,25 @@ async fn add_comment(client: &GoGithub, owner: &str, name: &str) {
     assert_eq!(answer.status.as_u16(), 201, "{:?}", answer.body);
 }
 
+async fn add_hook(client: &GoGithub, path: &str) {
+    let answer = client
+        .post(
+            path,
+            &json!({"name": "web", "config": {"url": "https://hooks.example.com/"}}),
+        )
+        .await;
+    assert_eq!(answer.status.as_u16(), 201, "{path}: {:?}", answer.body);
+}
+
+fn hook_count(server: &TestServer, owner_id: i64) -> usize {
+    server
+        .server
+        .services()
+        .store
+        .view(|tx| Ok(tx.table::<Hooks>().children(owner_id).count()))
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
 async fn feed_sizes(client: &GoGithub, owner: &str, name: &str) -> Vec<usize> {
     let mut sizes = Vec::new();
     for feed in REPO_FEEDS {
@@ -142,6 +172,7 @@ async fn deleting_a_repository_drops_the_rows_of_every_feature_and_keeps_other_r
     let alice = GoGithub::new(&server).with_token(fixture::ALICE_TOKEN);
     for name in [fixture::PUBLIC_REPO, "kept"] {
         add_comment(&alice, fixture::ORG, name).await;
+        add_hook(&alice, &format!("repos/{}/{name}/hooks", fixture::ORG)).await;
     }
     let kept = feed_sizes(&alice, fixture::ORG, "kept").await;
     assert!(kept.iter().all(|size| *size > 0), "{kept:?}");
@@ -157,7 +188,9 @@ async fn deleting_a_repository_drops_the_rows_of_every_feature_and_keeps_other_r
         );
     }
     assert_no_repo_rows(&server, fixture::PUBLIC_REPO_ID);
+    assert_eq!(hook_count(&server, fixture::PUBLIC_REPO_ID), 0);
     assert_eq!(feed_sizes(&alice, fixture::ORG, "kept").await, kept);
+    assert_eq!(hook_count(&server, KEPT_REPO_ID), 1);
 
     // And a new repository with the same name starts empty
     let mut fresh = repository(0, fixture::ORG, fixture::PUBLIC_REPO);
@@ -303,11 +336,64 @@ async fn deleting_a_user_drops_their_repositories_memberships_and_tokens_and_kee
 }
 
 #[tokio::test]
+async fn deleting_a_user_drops_the_apps_they_own_with_installations_and_tokens() {
+    // Given carol's App installed on acme, with an installation token
+    let server = start(vec![
+        json!({"kind": "app", "id": CAROL_APP_ID, "slug": "carol-app", "owner": "carol",
+               "public_key": fixture::APP_PUBLIC_KEY, "permissions": {"metadata": "read"}}),
+        json!({"kind": "installation", "id": CAROL_INSTALLATION_ID, "app": "carol-app",
+               "account": "acme", "permissions": {"metadata": "read"}}),
+    ])
+    .await;
+    let app = GoGithub::enterprise(&server).with_token(CAROL_APP_JWT);
+    assert_eq!(status(&app, "app").await, 200);
+    let minted = app
+        .post(
+            &format!("app/installations/{CAROL_INSTALLATION_ID}/access_tokens"),
+            &json!({}),
+        )
+        .await;
+    assert_eq!(minted.status.as_u16(), 201, "{:?}", minted.body);
+    let token = minted.json()["token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{:?}", minted.body))
+        .to_owned();
+    let installation = GoGithub::new(&server).with_token(&token);
+    assert_eq!(
+        status(&installation, "installation/repositories").await,
+        200
+    );
+
+    // When carol is deleted
+    admin(&server, Method::DELETE, "user/carol", None).await;
+
+    // Then the App's JWT and its installation token are refused, and the installation is gone
+    assert_eq!(status(&app, "app").await, 401);
+    assert_eq!(
+        status(&installation, "installation/repositories").await,
+        401
+    );
+    for path in [
+        format!("installation/{CAROL_INSTALLATION_ID}"),
+        "app/carol-app".to_owned(),
+    ] {
+        let answer = server.admin(Method::GET, &path, None).await;
+        assert_eq!(answer.status.as_u16(), 404, "{path}");
+    }
+
+    // And the App of another owner stays
+    admin(&server, Method::GET, "app/fixture-app", None).await;
+}
+
+#[tokio::test]
 async fn deleting_an_org_drops_its_repositories_teams_and_installations_and_keeps_other_orgs() {
     // Given an org with a member, a repository with an issue, a team and an App installation
     let server = start(vec![
+        json!({"kind": "user", "login": "dana",
+               "tokens": [{"token": HOOK_ADMIN_TOKEN, "scopes": ["admin:org_hook"]}]}),
         json!({"kind": "org", "id": DOOMED_ORG_ID, "login": "doomed",
-               "members": [{"login": "alice", "role": "admin"}, {"login": "bob"}]}),
+               "members": [{"login": "alice", "role": "admin"}, {"login": "bob"},
+                           {"login": "dana", "role": "admin"}]}),
         repository(DOOMED_REPO_ID, "doomed", "app"),
         json!({"kind": "team", "org": "doomed", "name": "Core", "members": [{"login": "bob"}]}),
         json!({"kind": "installation", "id": DOOMED_INSTALLATION_ID, "app": fixture::APP_SLUG,
@@ -320,6 +406,9 @@ async fn deleting_an_org_drops_its_repositories_teams_and_installations_and_keep
         .post("repos/doomed/app/issues", &json!({"title": "todo"}))
         .await;
     assert_eq!(issue.status.as_u16(), 201, "{:?}", issue.body);
+    let dana = GoGithub::new(&server).with_token(HOOK_ADMIN_TOKEN);
+    add_hook(&dana, "orgs/doomed/hooks").await;
+    assert_eq!(hook_count(&server, DOOMED_ORG_ID), 1);
 
     // When the org is deleted
     admin(&server, Method::DELETE, "org/doomed", None).await;
@@ -341,6 +430,7 @@ async fn deleting_an_org_drops_its_repositories_teams_and_installations_and_keep
         404
     );
     assert_no_repo_rows(&server, DOOMED_REPO_ID);
+    assert_eq!(hook_count(&server, DOOMED_ORG_ID), 0);
 
     // And the other org, its repository and the App stay
     assert_eq!(status(&alice, "orgs/acme/members/bob").await, 204);

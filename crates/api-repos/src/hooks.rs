@@ -8,7 +8,7 @@ use hubdouble_git::{ObjectData, RefChange};
 use hubdouble_hooks::{ContentType, Hook, HookOwner, Hooks, LatestPushes, is_event};
 use hubdouble_model::{AccountKind, ApiError, FieldError, Grant, Requirement, Scope};
 use hubdouble_rest::{Ctx, Reply};
-use hubdouble_store::{Accounts, Deleted, Tx, TxMut};
+use hubdouble_store::{Accounts, Deleted, Deliveries, Tx, TxMut};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -95,6 +95,15 @@ fn forget(tx: &mut TxMut<'_>, deleted: &Deleted) -> Result<(), ApiError> {
         Deleted::Account(account) => HookOwner::Org(account.id),
         Deleted::Team(_) => return Ok(()),
     };
+    let hooks: Vec<i64> = tx
+        .table::<Hooks>()
+        .iter()
+        .filter(|h| h.owner == owner)
+        .map(|h| h.id)
+        .collect();
+    for hook in hooks {
+        tx.table_mut::<Deliveries>().remove_children(hook);
+    }
     tx.table_mut::<Hooks>().remove_where(|h| h.owner == owner);
     Ok(())
 }

@@ -5,9 +5,10 @@ use hubdouble_model::{Account, ApiError, Repo, Team};
 use crate::rows::{Entity, Rows};
 use crate::store::TxMut;
 use crate::tables::{
-    Accounts, ActivityEvents, CheckRuns, CheckSuites, Installations, IssueComments, Issues, Labels,
-    Memberships, Reactions, ReleaseAssets, Releases, RepoRedirects, Repos, ReviewComments,
-    ReviewThreads, Reviews, Rulesets, Statuses, Teams, Tokens, WorkflowJobs, WorkflowRuns,
+    Accounts, ActivityEvents, Apps, CheckRuns, CheckSuites, Deliveries, Installations,
+    IssueComments, Issues, Labels, Memberships, Reactions, ReleaseAssets, Releases, RepoRedirects,
+    Repos, ReviewComments, ReviewThreads, Reviews, Rulesets, Statuses, Teams, Tokens, WorkflowJobs,
+    WorkflowRuns,
 };
 
 /// An entity that [`TxMut::delete`] removes.
@@ -144,18 +145,29 @@ fn drop_account(tx: &mut TxMut<'_>, account_id: i64) {
     replace_each(tx, repos, |repo| {
         repo.collaborators.retain(|c| c.user_id != account_id);
     });
+    let apps: Vec<i64> = tx
+        .table::<Apps>()
+        .iter()
+        .filter(|a| a.owner_id == account_id)
+        .map(|a| a.id)
+        .collect();
     let installations: Vec<i64> = tx
         .table::<Installations>()
         .iter()
-        .filter(|i| i.account_id == account_id)
+        .filter(|i| i.account_id == account_id || apps.contains(&i.app_id))
         .map(|i| i.id)
         .collect();
     tx.table_mut::<Tokens>().remove_where(|t| {
         t.user_id == Some(account_id)
+            || t.app_id.is_some_and(|a| apps.contains(&a))
             || t.installation_id
                 .is_some_and(|i| installations.contains(&i))
     });
     tx.table_mut::<Installations>().remove_all(installations);
+    for app in &apps {
+        tx.table_mut::<Deliveries>().remove_children(*app);
+    }
+    tx.table_mut::<Apps>().remove_all(apps);
     tx.table_mut::<Rulesets>().remove_children(account_id);
     tx.table_mut::<ActivityEvents>().remove_children(account_id);
     tx.table_mut::<Accounts>().remove(account_id);
