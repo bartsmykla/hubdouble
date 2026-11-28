@@ -1338,6 +1338,53 @@ async fn a_hooks_last_response_is_its_newest_sent_attempt_after_the_log_drops_it
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_hooks_last_response_is_its_newest_dropped_answer_before_a_running_attempt() {
+    // Given a log capacity of one and five hook attempts in flight
+    let store = world_with_issues_hook();
+    let (hooks, mut hits) = start(&store, |o| {
+        o.workers = 5;
+        o.log_capacity = 1;
+    });
+    let mut attempts = Vec::new();
+    for _ in 0..5 {
+        emit_one(&store, event("issues", WIDGET));
+        attempts.push(hits.recv().await.unwrap());
+    }
+    let [one, two, _three, four, five]: [Hit; 5] = attempts.try_into().ok().unwrap();
+    // When the second attempt answers 200, the fourth and the fifth answer so the log drops the
+    // second and the fourth, and the first then answers 404 while the third still runs
+    two.reply.send(200).unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 4 && s.unlogged == 5)
+        .await;
+    four.reply.send(500).unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 3 && s.unlogged == 4)
+        .await;
+    five.reply.send(200).unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 2 && s.unlogged == 3)
+        .await;
+    one.reply.send(404).unwrap();
+    hooks
+        .shared
+        .wait_stats(|s| s.in_flight == 1 && s.unlogged == 2)
+        .await;
+    // Then the hook's last response is the second attempt
+    let rendered = store
+        .view(|tx| Ok(tx.table::<Hooks>().get(ISSUES_HOOK).unwrap().render(tx)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rendered["last_response"],
+        json!({"code": 200, "status": "active", "message": "OK"})
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_seeded_hook_keeps_its_last_response_over_a_reset_that_keeps_its_log() {
     // Given a seeded hook whose attempt after the snapshot answered 200
     let store = world_with_issues_hook();

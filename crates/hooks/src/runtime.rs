@@ -117,7 +117,23 @@ struct AppLog {
     running: BTreeSet<i64>,
     ready: BTreeMap<i64, (u64, Delivery)>,
     logged: Option<VecDeque<i64>>,
-    dropped_answer: Option<(i64, u64, LastResponse)>,
+    dropped_answers: BTreeMap<i64, (u64, LastResponse)>,
+}
+
+impl AppLog {
+    fn drop_answer(&mut self, id: i64, epoch: u64, answer: LastResponse) {
+        let low = self
+            .running
+            .range(..id)
+            .next_back()
+            .copied()
+            .unwrap_or(i64::MIN);
+        let high = self.running.range(id..).next().copied().unwrap_or(i64::MAX);
+        if self.dropped_answers.range(id..high).next().is_none() {
+            self.dropped_answers.retain(|k, _| !(low..high).contains(k));
+            self.dropped_answers.insert(id, (epoch, answer));
+        }
+    }
 }
 
 fn answer_of(d: &Delivery) -> Option<LastResponse> {
@@ -397,7 +413,7 @@ impl Shared {
                 st.unlogged.remove(&id);
             }
             l.logged = None;
-            l.dropped_answer = None;
+            l.dropped_answers.clear();
             if l.running.is_empty() {
                 st.apps.remove(&log);
             }
@@ -448,7 +464,7 @@ impl Shared {
             st.unlogged.remove(&id);
         }
         for log in st.apps.values_mut() {
-            log.dropped_answer.take_if(|(_, e, _)| *e < epoch);
+            log.dropped_answers.retain(|_, (e, _)| *e >= epoch);
         }
     }
 
@@ -785,20 +801,16 @@ impl Shared {
         while rest.len() > capacity
             && let Some((id, (e, d))) = rest.pop_first()
         {
-            if let Some(answer) = answer_of(&d)
-                && log
-                    .dropped_answer
-                    .as_ref()
-                    .is_none_or(|(old, ..)| *old < id)
-            {
-                log.dropped_answer = Some((id, e, answer));
+            if let Some(answer) = answer_of(&d) {
+                log.drop_answer(id, e, answer);
             }
             bodies.release(id);
             unlogged.remove(&id);
         }
         let ready = std::mem::replace(&mut log.ready, rest);
-        let dropped = log.dropped_answer.take_if(|(id, ..)| *id < floor);
-        if ready.is_empty() && dropped.is_none() {
+        let kept = log.dropped_answers.split_off(&floor);
+        let dropped = std::mem::replace(&mut log.dropped_answers, kept);
+        if ready.is_empty() && dropped.is_empty() {
             return;
         }
         let logged = &mut log.logged;
@@ -832,8 +844,8 @@ impl Shared {
                     }
                 }
             }
-            if let Some((id, e, answer)) = dropped
-                && e == epoch
+            if let Some((id, (_, answer))) =
+                dropped.into_iter().rev().find(|(_, (e, _))| *e == epoch)
                 && owner_exists
                 && answered.as_ref().is_none_or(|(newer, _)| *newer < id)
             {
