@@ -785,6 +785,13 @@ async fn hooks_are_hidden_from_callers_who_cannot_administer_them() {
                        "account": ORG, "repository_selection": "all",
                        "permissions": {"metadata": "read"}}),
             )
+            .entry(
+                json!({"kind": "app", "id": 4010, "slug": "not-installed", "owner": ORG,
+                       "public_key": APP_PUBLIC_KEY,
+                       "permissions": {"repository_hooks": "write",
+                                       "organization_hooks": "write"},
+                       "events": []}),
+            )
             .start()
             .await,
     );
@@ -793,6 +800,20 @@ async fn hooks_are_hidden_from_callers_who_cannot_administer_them() {
         "ghs_metadata_only",
         TokenKind::Installation,
         (Some(4009), Some(5009), None),
+        &[],
+    );
+    add_token(
+        &server,
+        "ghu_metadata_only",
+        TokenKind::User,
+        (Some(4009), None, Some(ALICE_ID)),
+        &[],
+    );
+    add_token(
+        &server,
+        "ghu_not_installed",
+        TokenKind::User,
+        (Some(4010), None, Some(ALICE_ID)),
         &[],
     );
     let alice = alice(&server);
@@ -812,6 +833,8 @@ async fn hooks_are_hidden_from_callers_who_cannot_administer_them() {
     let bob = GoGithub::new(&server).with_token(BOB_TOKEN);
     let anonymous = GoGithub::new(&server);
     let installation = GoGithub::new(&server).with_token("ghs_metadata_only");
+    let user_without_grant = GoGithub::new(&server).with_token("ghu_metadata_only");
+    let user_not_installed = GoGithub::new(&server).with_token("ghu_not_installed");
 
     // When
     let unknown_repo = alice.get("repos/acme/missing/hooks").await;
@@ -824,6 +847,10 @@ async fn hooks_are_hidden_from_callers_who_cannot_administer_them() {
     let repo_denied = installation.get(REPO_HOOKS).await;
     let org_denied = installation.get(ORG_HOOKS).await;
     let scope_missing = default_scopes.get(ORG_HOOKS).await;
+    let user_repo_denied = user_without_grant.get(REPO_HOOKS).await;
+    let user_org_denied = user_without_grant.get(ORG_HOOKS).await;
+    let uninstalled_repo = user_not_installed.get(REPO_HOOKS).await;
+    let uninstalled_org = user_not_installed.get(ORG_HOOKS).await;
 
     // Then
     for answer in [
@@ -837,6 +864,10 @@ async fn hooks_are_hidden_from_callers_who_cannot_administer_them() {
         &repo_denied,
         &org_denied,
         &scope_missing,
+        &user_repo_denied,
+        &user_org_denied,
+        &uninstalled_repo,
+        &uninstalled_org,
     ] {
         assert_eq!(answer.status, StatusCode::NOT_FOUND);
     }

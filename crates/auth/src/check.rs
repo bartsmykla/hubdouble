@@ -309,6 +309,8 @@ fn user_to_server<'t>(
     };
     if allowed {
         Ok(())
+    } else if hidden(req) {
+        Err(ApiError::not_found())
     } else {
         Err(integration_denied(req))
     }
