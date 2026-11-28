@@ -374,14 +374,17 @@ fn log_key(hook: &Hook) -> String {
 
 fn deliveries(ctx: &mut Ctx<'_>) -> Result<Reply, ApiError> {
     let hook = hook(ctx)?;
-    let path = hook.path(ctx.tx()).ok_or_else(ApiError::not_found)?;
+    let owner = match hook.owner {
+        HookOwner::Repo(id) => format!("repositories/{id}"),
+        HookOwner::Org(id) => format!("organizations/{id}"),
+    };
     let key = log_key(&hook);
     list_deliveries(
         ctx,
         &DeliveryLog {
             hook_id: hook.id,
             key: key.as_bytes(),
-            path: format!("{path}/deliveries"),
+            path: format!("{owner}/hooks/{}/deliveries", hook.id),
         },
     )
 }

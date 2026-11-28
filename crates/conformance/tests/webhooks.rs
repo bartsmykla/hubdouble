@@ -491,6 +491,50 @@ async fn a_hook_keeps_its_own_delivery_log_and_redelivers_from_it() {
 }
 
 #[tokio::test]
+async fn a_hook_delivery_page_links_the_next_page_by_the_owner_id() {
+    // Given
+    let server = server().await;
+    let alice = alice(&server);
+    let repo_hook = create(&alice, REPO_HOOKS, &hook(&server, "s", &["push"], true)).await;
+    let org_hook = create(&alice, ORG_HOOKS, &hook(&server, "s", &["push"], true)).await;
+    let logs = [
+        (
+            format!("{REPO_HOOKS}/{repo_hook}"),
+            format!("repositories/{PUBLIC_REPO_ID}/hooks/{repo_hook}/deliveries?"),
+        ),
+        (
+            format!("{ORG_HOOKS}/{org_hook}"),
+            format!("organizations/{ORG_ID}/hooks/{org_hook}/deliveries?"),
+        ),
+    ];
+    for (hook, _) in &logs {
+        let pinged = alice.call(Method::POST, &format!("{hook}/pings")).await;
+        assert_eq!(pinged.status, StatusCode::NO_CONTENT);
+    }
+    drained(&server).await;
+
+    for (hook, by_id) in logs {
+        // When
+        let first = alice.get(&format!("{hook}/deliveries?per_page=1")).await;
+        let next = first
+            .header("link")
+            .split_once(">; rel=\"next\"")
+            .and_then(|(link, _)| link.strip_prefix('<')?.strip_prefix(alice.base()))
+            .unwrap_or_else(|| panic!("no next link: {}", first.header("link")))
+            .to_owned();
+        let second = alice.get(&next).await;
+
+        // Then
+        assert!(next.starts_with(&by_id), "{next}");
+        assert_eq!(second.status, StatusCode::OK);
+        let (first, second) = (first.json(), second.json());
+        assert_eq!(second.as_array().map(Vec::len), Some(1), "{second}");
+        assert_eq!(second[0]["event"], "ping");
+        assert!(second[0]["id"].as_i64() < first[0]["id"].as_i64());
+    }
+}
+
+#[tokio::test]
 async fn the_push_test_sends_a_push_only_to_a_hook_that_subscribes_to_push() {
     // Given
     let server = server().await;
